@@ -1,0 +1,27 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+    show-sql: false
+  flyway:
+    enabled: false  # Use DDL auto for tests
+
+jwt:
+  secret: test-secret-key-at-least-32-characters-long-here
+  expiration-ms: 3600000
+
+fuelops:
+  seed:
+    auto-run: false
+  reconciliation:
+    thresholds:
+      warn-percent: 5.0
+      critical-percent: 10.0
+  alerts:
+    data-gap-threshold-minutes: 60

@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/fuelops
+  flyway:
+    enabled: true
+
+fuelops:
+  seed:
+    auto-run: true
+
+logging:
+  level:
+    com.fuelops: INFO
