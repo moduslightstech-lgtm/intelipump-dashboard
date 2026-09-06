@@ -125,17 +125,9 @@ def test_process_message_preserves_external_ids_and_sets_resolved_uuids():
     assert params[-1] == pump_uuid
 
 
-def test_consumer_handle_message_integration_exact_topic_and_payload():
-    """End-to-end ConsumerApp.handle_message with production bytes."""
+def test_consumer_handle_message_ignores_old_demo_topic():
+    """Live ingest is Phase 9 only — old demo topics are not written."""
     cur = MagicMock()
-    # station resolve, pump resolve, insert returning, mqtt_messages insert...
-    cur.fetchone.side_effect = [
-        None,  # no mqtt_station_id match
-        None,  # no identity map
-        None,  # no station_code match
-        ("896ff23f-4b41-429a-9dbe-760c33b9b95a",),  # insert returning
-        None,
-    ]
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False
@@ -155,9 +147,4 @@ def test_consumer_handle_message_integration_exact_topic_and_payload():
     insert_calls = [
         c for c in cur.execute.call_args_list if "INSERT INTO pump_transactions" in str(c.args[0])
     ]
-    assert insert_calls
-    _sql, insert_params = insert_calls[0].args
-    assert insert_params[1] == "EnergySwitch-Ibadan-Boluwaji"
-    assert insert_params[3] == "PUMP-05/06"
-    assert insert_params[12] == PRODUCTION_TOPIC
-    assert insert_params[3] != naive_fixed_split_pump_id(PRODUCTION_TOPIC)
+    assert insert_calls == []

@@ -58,9 +58,18 @@ def classify_station_event(topic: str, payload: dict[str, Any]) -> Optional[str]
     if "/devices/" in t:
         return None
     event_type = str(_first(payload, "eventType", "event_type") or "").lower()
-    if event_type in {"device.heartbeat", "edge.heartbeat", "device.status", "edge.status", "device.lwt"}:
+    if event_type in {
+        "device.heartbeat",
+        "edge.heartbeat",
+        "device.status",
+        "edge.status",
+        "device.lwt",
+        "device_online",
+        "device_offline",
+        "heartbeat",
+    }:
         return None
-    if event_type in {"station.heartbeat", "heartbeat"}:
+    if event_type in {"station.heartbeat"}:
         return "heartbeat"
     if event_type in {"station.status", "status"}:
         return "status"

@@ -11,11 +11,20 @@ from typing import Optional
 from app.config import load_settings
 from app.database import Database
 from app.mqtt_client import MqttClient
+from app.phase9 import (
+    KIND_DEVICE_STATUS,
+    KIND_HEARTBEAT,
+    KIND_IGNORED,
+    KIND_TRANSACTION,
+    classify_phase9_message,
+    extract_phase9_device_id,
+    flatten_device_fields,
+    is_phase9_device_status_topic,
+)
 from app.schemas import normalize_transaction, parse_json_payload
-from app.services.edge_device_service import EdgeDeviceService, classify_edge_device_event
-from app.services.status_service import StationStatusService, classify_station_event
+from app.services.edge_device_service import EdgeDeviceService
+from app.services.status_service import StationStatusService
 from app.services.transaction_service import TransactionService
-from app.topic_utils import extract_station_id_from_topic
 
 logger = logging.getLogger(__name__)
 
@@ -80,113 +89,74 @@ class ConsumerApp:
     def handle_message(self, topic: str, raw: bytes, qos: int, retained: bool) -> None:
         payload, json_error = parse_json_payload(raw)
         if json_error is not None:
-            # Non-JSON LWT on connectivity or device status topic
-            lower = topic.lower()
-            if "/connectivity" in lower or (
-                ("/devices/" in lower or "/device/" in lower) and lower.rstrip("/").endswith("/status")
-            ):
+            if is_phase9_device_status_topic(topic):
                 text = (raw or b"").decode("utf-8", errors="replace").strip().upper()
-                station_id = extract_station_id_from_topic(topic)
-                device_kind = classify_edge_device_event(topic, None)
-                if device_kind == "status" and station_id:
-                    from app.services.edge_device_service import extract_device_topic_ids
+                device_id = extract_phase9_device_id(topic)
+                lwt_payload = {
+                    "eventType": "DEVICE_OFFLINE",
+                    "deviceId": device_id,
+                    "status": text if text in {"ONLINE", "OFFLINE"} else "OFFLINE",
+                    "reason": "MQTT_CONNECTION_LOST",
+                }
+                result = self.handle_device_status_message(
+                    topic=topic, payload=lwt_payload, retained=retained
+                )
+                logger.info(
+                    "Plaintext edge LWT topic=%s result=%s retained=%s",
+                    topic,
+                    result,
+                    retained,
+                )
+                return
+            logger.warning(
+                "Ignored invalid JSON topic=%s error=%s", topic, json_error.message
+            )
+            return
 
-                    _, device_id = extract_device_topic_ids(topic)
-                    lwt_payload = {
-                        "eventType": "device.status",
-                        "stationId": station_id,
-                        "deviceId": device_id,
-                        "status": text if text in {"ONLINE", "OFFLINE"} else "OFFLINE",
-                        "reason": "MQTT_CONNECTION_LOST",
-                    }
-                    result = self.handle_device_status_message(
-                        topic=topic, payload=lwt_payload, retained=retained
-                    )
-                    logger.info(
-                        "Plaintext edge LWT topic=%s result=%s retained=%s",
-                        topic,
-                        result,
-                        retained,
-                    )
-                    return
-                if station_id:
-                    lwt_payload = {
-                        "eventType": "device.connectivity",
-                        "stationId": station_id,
-                        "deviceStatus": text if text in {"ONLINE", "OFFLINE", "DEGRADED"} else "OFFLINE",
-                    }
-                    result = self.status_service.process_event(
-                        topic=topic, payload=lwt_payload, retained=retained
-                    )
-                    logger.info(
-                        "Plaintext LWT/connectivity topic=%s result=%s retained=%s",
-                        topic,
-                        result,
-                        retained,
-                    )
-                    return
+        assert payload is not None
+        kind = classify_phase9_message(topic, payload)
+
+        if kind == KIND_IGNORED:
+            logger.info(
+                "Ignored MQTT event topic=%s eventType=%s",
+                topic,
+                payload.get("eventType"),
+            )
+            return
+
+        if kind == KIND_HEARTBEAT:
+            result = self.handle_heartbeat_message(
+                topic=topic, payload=flatten_device_fields(payload), retained=retained
+            )
+            logger.info("Edge heartbeat topic=%s result=%s", topic, result)
+            return
+
+        if kind == KIND_DEVICE_STATUS:
+            result = self.handle_device_status_message(
+                topic=topic, payload=flatten_device_fields(payload), retained=retained
+            )
+            logger.info("Edge device status topic=%s result=%s", topic, result)
+            return
+
+        if kind == KIND_TRANSACTION:
+            transaction, validation_error = normalize_transaction(
+                payload, source_topic=topic
+            )
             self.handle_transaction_message(
                 topic=topic,
                 raw=raw,
                 qos=qos,
                 retained=retained,
-                payload=None,
-                transaction=None,
-                validation_error=json_error,
+                payload=payload,
+                transaction=transaction,
+                validation_error=validation_error,
             )
             return
 
-        assert payload is not None
-
-        # Edge-device heartbeat / status (separate from station operational status)
-        edge_kind = classify_edge_device_event(topic, payload)
-        if edge_kind is not None:
-            if not payload.get("stationId") and not payload.get("station_id"):
-                hint = extract_station_id_from_topic(topic)
-                if hint:
-                    payload = {**payload, "stationId": hint}
-            if edge_kind == "heartbeat":
-                result = self.handle_heartbeat_message(
-                    topic=topic, payload=payload, retained=retained
-                )
-            else:
-                result = self.handle_device_status_message(
-                    topic=topic, payload=payload, retained=retained
-                )
-            logger.info("Edge device event topic=%s kind=%s result=%s", topic, edge_kind, result)
-            return
-
-        # Station heartbeat / status / connectivity — not pump transactions
-        if classify_station_event(topic, payload) is not None:
-            if not payload.get("stationId") and not payload.get("station_id"):
-                hint = extract_station_id_from_topic(topic)
-                if hint:
-                    payload = {**payload, "stationId": hint}
-            result = self.status_service.process_event(
-                topic=topic, payload=payload, retained=retained
-            )
-            logger.info("Station event topic=%s result=%s retained=%s", topic, result, retained)
-            return
-
-        # Transaction path — JSON payload is authoritative for IDs
-        transaction, validation_error = normalize_transaction(payload, source_topic=topic)
-        # Skip transaction validation noise for unrelated JSON without transactionId
-        if validation_error is not None and validation_error.error_type == "MISSING_TRANSACTION_ID":
-            if "stationId" in payload and ("stationStatus" in payload or "deviceStatus" in payload):
-                result = self.status_service.process_event(
-                    topic=topic, payload=payload, retained=retained
-                )
-                logger.info("Station-like event without eventType topic=%s result=%s", topic, result)
-                return
-
-        self.handle_transaction_message(
-            topic=topic,
-            raw=raw,
-            qos=qos,
-            retained=retained,
-            payload=payload,
-            transaction=transaction,
-            validation_error=validation_error,
+        logger.info(
+            "Ignored unsupported MQTT topic=%s eventType=%s",
+            topic,
+            payload.get("eventType"),
         )
 
     def _timeout_loop(self) -> None:

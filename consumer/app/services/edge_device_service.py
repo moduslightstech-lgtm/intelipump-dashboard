@@ -39,9 +39,15 @@ def classify_edge_device_event(topic: str, payload: Optional[dict[str, Any]] = N
 
     # Prefer explicit event types for the new edge contract
     event_type = str(first_present(payload, "eventType", "event_type") or "").lower()
-    if event_type in {"device.heartbeat", "edge.heartbeat"}:
+    if event_type in {"device.heartbeat", "edge.heartbeat", "heartbeat"}:
         return "heartbeat"
-    if event_type in {"device.status", "edge.status", "device.lwt"}:
+    if event_type in {
+        "device.status",
+        "edge.status",
+        "device.lwt",
+        "device_online",
+        "device_offline",
+    }:
         return "status"
 
     # Plural /devices/ path is the new contract
@@ -79,6 +85,13 @@ def extract_device_topic_ids(topic: str) -> tuple[Optional[str], Optional[str]]:
                 if suffix in after_device:
                     return station_id or None, after_device.split(suffix, 1)[0] or None
             return station_id or None, after_device.strip("/") or None
+    # Phase 9: intelipump/{lab|prod}/devices/{deviceId}/heartbeat|status
+    if "/devices/" in topic:
+        after_device = topic.split("/devices/", 1)[1]
+        for suffix in ("/heartbeat", "/status"):
+            if suffix in after_device:
+                return None, after_device.split(suffix, 1)[0] or None
+        return None, after_device.strip("/") or None
     return None, None
 
 

@@ -200,7 +200,7 @@ def test_lwt_status_processing():
     assert "INSERT INTO edge_devices" in sql
 
 
-def test_consumer_routes_edge_heartbeat_not_transaction():
+def test_consumer_routes_phase9_device_heartbeat_not_transaction():
     app = ConsumerApp.__new__(ConsumerApp)
     app.service = MagicMock()
     app.status_service = MagicMock()
@@ -209,7 +209,15 @@ def test_consumer_routes_edge_heartbeat_not_transaction():
 
     import json
 
-    app.handle_message(TOPIC, json.dumps(HEARTBEAT).encode(), 1, False)
+    topic = "intelipump/lab/devices/InteliPump-Lab-pi-001/heartbeat"
+    payload = {
+        "eventType": "HEARTBEAT",
+        "schemaVersion": "1.0",
+        "deviceId": "InteliPump-Lab-pi-001",
+        "stationId": "InteliPump-US-Lab",
+        "payload": {"status": "ONLINE", "hostname": "lab-pi"},
+    }
+    app.handle_message(topic, json.dumps(payload).encode(), 1, False)
     app.edge_device_service.handle_heartbeat_message.assert_called_once()
     app.service.process_message.assert_not_called()
 

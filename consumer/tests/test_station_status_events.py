@@ -95,14 +95,9 @@ def _mock_db(fetchone_rows):
     return db, cur
 
 
-def test_consumer_routes_closed_status_not_as_transaction():
-    db, cur = _mock_db(
-        [
-            ("4aff6a92-cb57-42ef-bd21-65f0de965e98",),
-            (None, None, [0, 1, 2, 3, 4, 5, 6], "Africa/Lagos"),
-            ("OPEN", "ONLINE", "REPORTED", None),
-        ]
-    )
+def test_consumer_ignores_old_station_status_topic():
+    """Phase 9 ingest does not persist the old demo station-status topics."""
+    db, cur = _mock_db([])
     app = ConsumerApp.__new__(ConsumerApp)
     app.settings = MagicMock()
     app.db = db
@@ -114,18 +109,12 @@ def test_consumer_routes_closed_status_not_as_transaction():
     app.handle_message(topic, json.dumps(CLOSED).encode(), qos=1, retained=False)
 
     sqls = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
-    assert "UPDATE stations" in sqls or "station_status_history" in sqls
+    assert "UPDATE stations" not in sqls
     assert "pump_transactions" not in sqls
 
 
-def test_plaintext_lwt_offline_routed():
-    db, cur = _mock_db(
-        [
-            ("4aff6a92-cb57-42ef-bd21-65f0de965e98",),
-            (None, None, [0, 1, 2, 3, 4, 5, 6], "Africa/Lagos"),
-            ("OPEN", "ONLINE", "REPORTED", None),
-        ]
-    )
+def test_plaintext_legacy_lwt_is_ignored():
+    db, cur = _mock_db([])
     app = ConsumerApp.__new__(ConsumerApp)
     app.settings = MagicMock()
     app.db = db
@@ -137,5 +126,4 @@ def test_plaintext_lwt_offline_routed():
     app.handle_message(topic, b"OFFLINE", qos=1, retained=True)
 
     sqls = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
-    assert "UPDATE stations" in sqls or "station_status_history" in sqls
-    assert "pump_transactions" not in sqls
+    assert sqls == ""

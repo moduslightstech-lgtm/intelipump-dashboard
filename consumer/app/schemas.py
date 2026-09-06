@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Tuple, Union
 
 from app.models import NormalizedTransaction, ValidationError
+from app.phase9 import is_phase9_envelope, scaled_sale_fields
 
 
 def _first(payload: dict[str, Any], *keys: str) -> Any:
@@ -66,13 +67,13 @@ def normalize_transaction(
 ) -> Tuple[Optional[NormalizedTransaction], Optional[ValidationError]]:
     """Normalize MQTT JSON into a persistence-ready transaction.
 
-    The JSON payload is the primary source for transactionId, stationId, pumpId,
-    and nozzleId. ``source_topic`` is preserved exactly for routing/traceability
-    and must not be used to invent or replace those identifiers.
-
-    ``pumpId`` values may contain slashes (e.g. ``PUMP-05/06``). Do not sanitize
-    them to alphanumerics. ``deviceId`` is optional.
+    Phase 9 envelopes (schemaVersion / TRANSACTION_COMPLETED / nested raw_*)
+    are unwrapped first. Identifiers come from JSON only — never invented,
+    never taken from the topic path.
     """
+    if is_phase9_envelope(payload):
+        return _normalize_phase9_transaction(payload, source_topic)
+
     transaction_id = _first(payload, "transactionId", "id")
     if transaction_id is None:
         return None, ValidationError(
@@ -152,6 +153,79 @@ def normalize_transaction(
             transaction_completed_at=completed,
             raw_payload=dict(payload),
             source_topic=source_topic,  # exact topic string as received
+        ),
+        None,
+    )
+
+
+def _normalize_phase9_transaction(
+    payload: dict[str, Any],
+    source_topic: str,
+) -> Tuple[Optional[NormalizedTransaction], Optional[ValidationError]]:
+    fields = scaled_sale_fields(payload)
+
+    transaction_id = fields["transaction_id"]
+    if not transaction_id:
+        return None, ValidationError(
+            "MISSING_TRANSACTION_ID",
+            "transactionId is required; refusing to invent an ID",
+        )
+
+    station_id = fields["station_id"]
+    if not station_id:
+        return None, ValidationError("MISSING_STATION_ID", "stationId is required")
+
+    pump_id = fields["pump_id"]
+    if not pump_id:
+        return None, ValidationError("MISSING_PUMP_ID", "pumpId is required")
+
+    volume = fields["volume"]
+    if volume is None:
+        return None, ValidationError(
+            "MISSING_VOLUME",
+            "payload.raw_volume is required (scaled integer)",
+        )
+
+    amount = fields["amount"]
+    if amount is None:
+        return None, ValidationError(
+            "MISSING_AMOUNT",
+            "payload.raw_amount is required (scaled integer)",
+        )
+
+    price = fields["price"]
+    if price is None and volume > 0:
+        price = (amount / volume).quantize(Decimal("0.01"))
+    if price is None:
+        return None, ValidationError(
+            "INVALID_PRICE",
+            "payload.raw_unit_price is required when volume is zero",
+        )
+
+    started = _parse_timestamp(fields["started_at"])
+    completed = _parse_timestamp(fields["completed_at"] or fields["occurred_at"])
+    device_timestamp = _parse_timestamp(fields["occurred_at"]) or completed
+
+    return (
+        NormalizedTransaction(
+            transaction_id=transaction_id,
+            station_id=station_id,
+            device_id=fields["device_id"],
+            pump_id=pump_id,
+            nozzle_id=fields["nozzle_id"],
+            product=str(fields["product"]) if fields["product"] is not None else None,
+            volume_liters=volume,
+            amount=amount,
+            currency=fields["currency"],
+            price_per_liter=price,
+            raw_frame=None,
+            status=fields["status"],
+            device_timestamp=device_timestamp,
+            transaction_started_at=started,
+            transaction_completed_at=completed,
+            raw_payload=dict(payload),
+            source_topic=source_topic,
+            deduplication_key=fields["deduplication_key"],
         ),
         None,
     )

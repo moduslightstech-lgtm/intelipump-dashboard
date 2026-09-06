@@ -68,6 +68,7 @@ def extract_station_id_from_topic(topic: str) -> Optional[str]:
         intelipump/station/{stationId}/device/{deviceId}/connectivity
         intelipump/stations/{stationId}/devices/{deviceId}/heartbeat
         intelipump/stations/{stationId}/devices/{deviceId}/status
+        intelipump/{lab|prod}/stations/{stationId}/transactions
     """
     for station_marker in ("/stations/", "/station/"):
         if station_marker not in topic:
