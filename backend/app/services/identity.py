@@ -90,6 +90,34 @@ def mqtt_external_ids_for_pump(pump: Pump) -> list[str]:
     return ids
 
 
+def station_query_keys(db: Session, station_id: str) -> tuple[list[str], UUID | None]:
+    """MQTT/catalog station keys that match ledger and edge_devices rows.
+
+    Always includes the caller string so a sale is visible before a catalog
+    row exists (e.g. ``InteliPump-US-Lab`` from Phase 9).
+    """
+    text = (station_id or "").strip()
+    if not text:
+        return [], None
+    keys: list[str] = [text]
+    station = resolve_station(db, text)
+    if station is None:
+        return keys, None
+    for extra in mqtt_external_ids_for_station(station):
+        if extra and extra not in keys:
+            keys.append(extra)
+    aliases = db.scalars(
+        select(MqttIdentityMap.mqtt_external_id).where(
+            MqttIdentityMap.entity_type == "station",
+            MqttIdentityMap.internal_id == station.id,
+        )
+    )
+    for alias in aliases:
+        if alias and alias not in keys:
+            keys.append(alias)
+    return keys, station.id
+
+
 def resolve_station(
     db: Session, station_id_or_code: str | UUID
 ) -> Station | None:

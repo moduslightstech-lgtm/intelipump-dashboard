@@ -7,16 +7,16 @@ import {
   StatusDot,
 } from '../components/edge/EdgeConnectivity'
 import { formatRelativeHeartbeat } from '../lib/relativeTime'
-import { EdgeDeviceApiError, getDevicesStatus } from '../services/edgeDeviceApi'
+import { DeviceApiError, fetchStationDevices, type StationDevicesSummary } from '../services/deviceApi'
 import type { EdgeDeviceStatus } from '../types/edgeDevice'
 import { parseEdgeDeviceStatus } from '../types/edgeDevice'
 
-vi.mock('../services/edgeDeviceApi', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../services/edgeDeviceApi')>()
+vi.mock('../services/deviceApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/deviceApi')>()
   return {
     ...actual,
-    getDeviceStatus: vi.fn(),
-    getDevicesStatus: vi.fn(),
+    fetchDeviceStatus: vi.fn(),
+    fetchStationDevices: vi.fn(),
   }
 })
 
@@ -29,8 +29,8 @@ function wrap(ui: React.ReactNode) {
 
 function status(partial: Partial<EdgeDeviceStatus> = {}): EdgeDeviceStatus {
   return {
-    deviceId: 'EnergySwitch-pi-001',
-    stationId: 'EnergySwitch-Ibadan-Boluwaji',
+    deviceId: 'InteliPump-Lab-pi-001',
+    stationId: 'InteliPump-US-Lab',
     hostname: 'raspberrypi',
     status: 'ONLINE',
     mqttConnectionStatus: 'ONLINE',
@@ -40,7 +40,19 @@ function status(partial: Partial<EdgeDeviceStatus> = {}): EdgeDeviceStatus {
   }
 }
 
-const mockedGetDevicesStatus = vi.mocked(getDevicesStatus)
+function summary(devices: EdgeDeviceStatus[], stationId = 'InteliPump-US-Lab'): StationDevicesSummary {
+  return {
+    stationId,
+    onlineCount: devices.filter((d) => d.status === 'ONLINE').length,
+    delayedCount: devices.filter((d) => d.status === 'DELAYED').length,
+    offlineCount: devices.filter((d) => d.status === 'OFFLINE').length,
+    totalCount: devices.length,
+    lastStationHeartbeat: devices[0]?.lastSeen ?? null,
+    devices,
+  }
+}
+
+const mockedFetchStationDevices = vi.mocked(fetchStationDevices)
 
 describe('relative heartbeat formatting', () => {
   it('formats relative ages', () => {
@@ -68,20 +80,20 @@ describe('status dots', () => {
 
 describe('EdgeConnectivityNetworkPanel', () => {
   beforeEach(() => {
-    mockedGetDevicesStatus.mockReset()
+    mockedFetchStationDevices.mockReset()
   })
   afterEach(() => cleanup())
 
   it('shows ONLINE response and online KPI', async () => {
-    mockedGetDevicesStatus.mockResolvedValue([
-      status({ status: 'ONLINE', secondsSinceLastHeartbeat: 25 }),
-    ])
+    mockedFetchStationDevices.mockResolvedValue(
+      summary([status({ status: 'ONLINE', secondsSinceLastHeartbeat: 25 })]),
+    )
 
     render(
       wrap(
         <EdgeConnectivityNetworkPanel
           stations={[
-            { id: '1', name: 'Boluwaji', mqttId: 'EnergySwitch-Ibadan-Boluwaji' },
+            { id: '1', name: 'InteliPump US Lab', mqttId: 'InteliPump-US-Lab' },
           ]}
         />,
       ),
@@ -89,17 +101,17 @@ describe('EdgeConnectivityNetworkPanel', () => {
 
     expect(await screen.findByText('Online edge devices')).toBeInTheDocument()
     expect(await screen.findByTestId('status-dot-online')).toBeInTheDocument()
-    expect(screen.getByText('EnergySwitch-pi-001')).toBeInTheDocument()
+    expect(screen.getByText('InteliPump-Lab-pi-001')).toBeInTheDocument()
   })
 
   it('renders DELAYED status', async () => {
-    mockedGetDevicesStatus.mockResolvedValue([
-      status({ status: 'DELAYED', secondsSinceLastHeartbeat: 120 }),
-    ])
+    mockedFetchStationDevices.mockResolvedValue(
+      summary([status({ status: 'DELAYED', secondsSinceLastHeartbeat: 120 })]),
+    )
     render(
       wrap(
         <EdgeConnectivityNetworkPanel
-          stations={[{ id: '1', name: 'Boluwaji', mqttId: 'EnergySwitch-Ibadan-Boluwaji' }]}
+          stations={[{ id: '1', name: 'InteliPump US Lab', mqttId: 'InteliPump-US-Lab' }]}
         />,
       ),
     )
@@ -109,36 +121,37 @@ describe('EdgeConnectivityNetworkPanel', () => {
 
 describe('EdgeDeviceStatusDetailCard', () => {
   beforeEach(() => {
-    mockedGetDevicesStatus.mockReset()
+    mockedFetchStationDevices.mockReset()
   })
   afterEach(() => cleanup())
 
   it('shows ONLINE detail with separate pump activity', async () => {
-    mockedGetDevicesStatus.mockResolvedValue([status({ status: 'ONLINE' })])
-    render(wrap(<EdgeDeviceStatusDetailCard stationId="EnergySwitch-Ibadan-Boluwaji" />))
+    mockedFetchStationDevices.mockResolvedValue(summary([status({ status: 'ONLINE' })]))
+    render(wrap(<EdgeDeviceStatusDetailCard stationId="InteliPump-US-Lab" />))
     expect(await screen.findByTestId('status-dot-online')).toBeInTheDocument()
     expect(screen.getByText(/No recent transaction/i)).toBeInTheDocument()
-    expect(screen.getByText('EnergySwitch-pi-001')).toBeInTheDocument()
+    expect(screen.getByText('InteliPump-Lab-pi-001')).toBeInTheDocument()
     expect(screen.getByText('raspberrypi')).toBeInTheDocument()
   })
 
   it('shows 404 not registered', async () => {
-    mockedGetDevicesStatus.mockRejectedValue(
-      new EdgeDeviceApiError('Edge device is not registered', 404),
+    mockedFetchStationDevices.mockRejectedValue(
+      new DeviceApiError('Edge device is not registered', 404),
     )
-    render(wrap(<EdgeDeviceStatusDetailCard stationId="EnergySwitch-Ibadan-Boluwaji" />))
+    render(wrap(<EdgeDeviceStatusDetailCard stationId="InteliPump-US-Lab" />))
     expect(await screen.findByText(/Edge device is not registered/i)).toBeInTheDocument()
   })
 
   it('shows API unavailable on failure', async () => {
-    mockedGetDevicesStatus.mockRejectedValue(
-      new EdgeDeviceApiError('Unable to reach device status API'),
+    mockedFetchStationDevices.mockRejectedValue(
+      new DeviceApiError('Unable to reach device status API'),
     )
-    render(wrap(<EdgeDeviceStatusDetailCard stationId="EnergySwitch-Ibadan-Boluwaji" />))
+    render(wrap(<EdgeDeviceStatusDetailCard stationId="InteliPump-US-Lab" />))
     expect(await screen.findByText(/Device status temporarily unavailable/i)).toBeInTheDocument()
   })
 
-  it('shows no edge device assigned when station unmapped', async () => {
+  it('shows no edge device assigned when station has none', async () => {
+    mockedFetchStationDevices.mockResolvedValue(summary([], 'Unknown-Station'))
     render(wrap(<EdgeDeviceStatusDetailCard stationId="Unknown-Station" />))
     expect(await screen.findByText(/No edge device assigned/i)).toBeInTheDocument()
   })
@@ -146,15 +159,15 @@ describe('EdgeDeviceStatusDetailCard', () => {
 
 describe('polling cleanup', () => {
   beforeEach(() => {
-    mockedGetDevicesStatus.mockReset()
-    mockedGetDevicesStatus.mockResolvedValue([status({})])
+    mockedFetchStationDevices.mockReset()
+    mockedFetchStationDevices.mockResolvedValue(summary([status({})]))
   })
   afterEach(() => cleanup())
 
   it('clears interval on unmount', async () => {
     const clearSpy = vi.spyOn(window, 'clearInterval')
     const { unmount } = render(
-      wrap(<EdgeDeviceStatusDetailCard stationId="EnergySwitch-Ibadan-Boluwaji" />),
+      wrap(<EdgeDeviceStatusDetailCard stationId="InteliPump-US-Lab" />),
     )
     await screen.findByTestId('status-dot-online')
     unmount()
@@ -164,10 +177,10 @@ describe('polling cleanup', () => {
 })
 
 describe('parseEdgeDeviceStatus', () => {
-  it('parses live DigitalOcean payload safely', () => {
+  it('parses live device payload safely', () => {
     const parsed = parseEdgeDeviceStatus({
-      deviceId: 'EnergySwitch-pi-001',
-      stationId: 'EnergySwitch-Ibadan-Boluwaji',
+      deviceId: 'InteliPump-Lab-pi-001',
+      stationId: 'InteliPump-US-Lab',
       hostname: 'raspberrypi',
       status: 'ONLINE',
       mqttConnectionStatus: 'ONLINE',
@@ -175,7 +188,7 @@ describe('parseEdgeDeviceStatus', () => {
       secondsSinceLastHeartbeat: 25,
     })
     expect(parsed.status).toBe('ONLINE')
-    expect(parsed.deviceId).toBe('EnergySwitch-pi-001')
+    expect(parsed.deviceId).toBe('InteliPump-Lab-pi-001')
     expect(parsed.secondsSinceLastHeartbeat).toBe(25)
   })
 })

@@ -1,18 +1,19 @@
 import { useQuery } from '@tanstack/react-query'
-import { EdgeDeviceApiError, getDeviceStatus, getDevicesStatus } from '../services/edgeDeviceApi'
-import { EdgeDeviceStatus } from '../types/edgeDevice'
 import {
-  edgeDeviceIdsForStation,
-  primaryEdgeDeviceIdForStation,
-} from '../config/edgeDevices'
+  DeviceApiError,
+  fetchDeviceStatus,
+  fetchStationDevices,
+  type StationDevicesSummary,
+} from '../services/deviceApi'
+import { EdgeDeviceStatus } from '../types/edgeDevice'
 
 const POLL_MS = 30_000
 
 export function useDeviceStatus(deviceId?: string | null) {
   const id = deviceId?.trim() || ''
-  return useQuery<EdgeDeviceStatus, EdgeDeviceApiError>({
+  return useQuery<EdgeDeviceStatus, DeviceApiError>({
     queryKey: ['edge-device-status', id],
-    queryFn: () => getDeviceStatus(id),
+    queryFn: () => fetchDeviceStatus(id),
     enabled: Boolean(id),
     refetchInterval: POLL_MS,
     staleTime: 10_000,
@@ -22,21 +23,22 @@ export function useDeviceStatus(deviceId?: string | null) {
 }
 
 export function useStationEdgeDevices(stationKey?: string | null) {
-  const deviceIds = edgeDeviceIdsForStation(stationKey)
-  const primaryId = primaryEdgeDeviceIdForStation(stationKey)
+  const key = stationKey?.trim() || ''
 
-  const query = useQuery<EdgeDeviceStatus[], EdgeDeviceApiError>({
-    queryKey: ['edge-station-devices', stationKey, ...deviceIds],
-    queryFn: () => getDevicesStatus(deviceIds),
-    enabled: deviceIds.length > 0,
+  const query = useQuery<StationDevicesSummary, DeviceApiError>({
+    queryKey: ['edge-station-devices', key],
+    queryFn: () => fetchStationDevices(key),
+    enabled: Boolean(key),
     refetchInterval: POLL_MS,
     staleTime: 10_000,
     retry: false,
     placeholderData: (previous) => previous,
   })
 
-  const devices = query.data || []
-  const primary = devices.find((d) => d.deviceId === primaryId) || devices[0]
+  const devices = query.data?.devices || []
+  const primary = devices[0]
+  const deviceIds = devices.map((d) => d.deviceId)
+  const primaryId = primary?.deviceId
 
   const onlineCount = devices.filter((d) => d.status === 'ONLINE').length
   const delayedCount = devices.filter((d) => d.status === 'DELAYED').length
@@ -47,6 +49,8 @@ export function useStationEdgeDevices(stationKey?: string | null) {
   const notFound =
     query.error?.status === 404 ||
     /not registered/i.test(query.error?.message || '')
+
+  const hasMapping = devices.length > 0 || query.isLoading || query.isError
 
   return {
     ...query,
@@ -59,20 +63,20 @@ export function useStationEdgeDevices(stationKey?: string | null) {
     offlineCount,
     neverCount,
     unknownCount,
-    totalCount: deviceIds.length,
-    hasMapping: deviceIds.length > 0,
+    totalCount: devices.length || query.data?.totalCount || 0,
+    hasMapping,
     notFound,
   }
 }
 
 export function useEdgeNetworkSummary(stationKeys: string[]) {
   const keys = stationKeys.filter(Boolean)
-  const allIds = [...new Set(keys.flatMap((k) => edgeDeviceIdsForStation(k)))]
 
   return useQuery({
-    queryKey: ['edge-network-from-devices', ...allIds],
+    queryKey: ['edge-network-from-stations', ...keys],
     queryFn: async () => {
-      const devices = await getDevicesStatus(allIds)
+      const summaries = await Promise.all(keys.map((k) => fetchStationDevices(k)))
+      const devices = summaries.flatMap((row) => row.devices)
       return {
         devices,
         online: devices.filter((d) => d.status === 'ONLINE').length,
@@ -83,7 +87,7 @@ export function useEdgeNetworkSummary(stationKeys: string[]) {
         ).length,
       }
     },
-    enabled: allIds.length > 0,
+    enabled: keys.length > 0,
     refetchInterval: POLL_MS,
     staleTime: 10_000,
     retry: false,

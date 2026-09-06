@@ -20,9 +20,9 @@ import {
   paginateItems,
   saleInDateRange,
 } from '../lib/salesDateFilter'
+import { liveStationId } from '../config/stations'
 import { formatSaleAmount } from '../types/sales'
 
-const DEFAULT_LIVE_STATION = 'EnergySwitch-Ibadan-Boluwaji'
 const PAGE_SIZE = 20
 
 export default function TransactionsPage() {
@@ -43,19 +43,17 @@ export default function TransactionsPage() {
     queryFn: async () => (await getStations()).data,
   })
 
+  const catalogStations = stationsQ.data || []
   const selectedStation = useMemo(
-    () => (stationsQ.data || []).find((s) => s.station_code === stationId),
-    [stationsQ.data, stationId],
+    () => catalogStations.find((s) => s.station_code === stationId) || catalogStations[0],
+    [catalogStations, stationId],
   )
-  const liveStationId =
-    selectedStation?.mqtt_station_id ||
-    (stationId ? undefined : DEFAULT_LIVE_STATION) ||
-    selectedStation?.station_code ||
-    DEFAULT_LIVE_STATION
+  const liveStationKey = liveStationId(selectedStation)
+  const stationFilterCode = stationId || selectedStation?.station_code || ''
 
   const live = useStationLiveSales({
-    stationId: liveStationId,
-    enabled: Boolean(liveStationId),
+    stationId: liveStationKey,
+    enabled: Boolean(liveStationKey),
     recentLimit: SALES_HISTORY_FETCH_LIMIT,
   })
 
@@ -66,7 +64,7 @@ export default function TransactionsPage() {
       page: localPage,
       size: PAGE_SIZE,
       sort: 'received_at,desc',
-      station_id: stationId || undefined,
+      station_id: stationFilterCode || undefined,
       pump_id: pumpId || undefined,
       product: product || undefined,
       status: status || undefined,
@@ -74,7 +72,7 @@ export default function TransactionsPage() {
       start,
       end,
     }
-  }, [localPage, stationId, pumpId, product, status, q, dateFrom, dateTo])
+  }, [localPage, stationFilterCode, pumpId, product, status, q, dateFrom, dateTo])
 
   const txQ = useQuery({
     queryKey: ['transactions', localParams],
@@ -90,7 +88,7 @@ export default function TransactionsPage() {
 
   const downloadCsv = () => {
     const url = exportTransactionsUrl({
-      station_id: stationId || undefined,
+      station_id: stationFilterCode || undefined,
       pump_id: pumpId || undefined,
       product: product || undefined,
       status: status || undefined,
@@ -155,7 +153,7 @@ export default function TransactionsPage() {
         <div>
           <h1 className="section-title">Transactions</h1>
           <p className="text-slate-400 text-sm mt-1">
-            Live and recent sales from DigitalOcean · filter by date, then page through results
+            Live and recent sales from the catalog station · filter by date, then page through results
           </p>
         </div>
         <button type="button" className="btn-secondary" onClick={downloadCsv}>
@@ -166,14 +164,15 @@ export default function TransactionsPage() {
       <div className="card grid md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3">
         <select
           className="input"
-          value={stationId}
+          value={stationFilterCode}
           onChange={(e) => {
             setStationId(e.target.value)
             resetPages()
           }}
+          aria-label="Station"
         >
-          <option value="">Live: {DEFAULT_LIVE_STATION}</option>
-          {stationsQ.data?.map((s) => (
+          {catalogStations.length === 0 && <option value="">No stations yet</option>}
+          {catalogStations.map((s) => (
             <option key={s.id} value={s.station_code}>
               {s.name}
             </option>
@@ -300,7 +299,8 @@ export default function TransactionsPage() {
         <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
           <div>
             <h2 className="text-white font-semibold text-sm">
-              {viewingHistorical ? 'Sales search' : 'Recent live sales'} · {liveStationId}
+              {viewingHistorical ? 'Sales search' : 'Recent live sales'} ·{' '}
+              {selectedStation?.name || liveStationKey || '—'}
             </h2>
             <p className="text-[11px] text-slate-500 mt-0.5">
               Showing {filteredLive.length ? (safeLivePage - 1) * PAGE_SIZE + 1 : 0}–

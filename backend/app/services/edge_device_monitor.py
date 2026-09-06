@@ -17,6 +17,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models import PumpTransaction, Station
+from app.services.identity import station_query_keys
 from app.services.edge_device_status import (
     aggregate_station_availability,
     as_utc,
@@ -107,8 +108,17 @@ def fetch_edge_device_rows(
     where = ["TRUE"]
     params: dict[str, Any] = {}
     if station_id:
-        where.append("station_id = :station_id")
-        params["station_id"] = station_id
+        keys, _uuid = station_query_keys(db, station_id)
+        if len(keys) == 1:
+            where.append("station_id = :station_id")
+            params["station_id"] = keys[0]
+        elif keys:
+            placeholders = ", ".join(f":sid_{i}" for i in range(len(keys)))
+            where.append(f"station_id IN ({placeholders})")
+            for i, key in enumerate(keys):
+                params[f"sid_{i}"] = key
+        else:
+            where.append("FALSE")
     if device_id:
         where.append("device_id = :device_id")
         params["device_id"] = device_id
@@ -207,28 +217,20 @@ def resolve_station_mqtt_id(db: Session, station_id: str) -> str:
 
 
 def latest_station_transaction_at(db: Session, mqtt_station_id: str) -> Optional[datetime]:
+    keys, station_uuid = station_query_keys(db, mqtt_station_id)
+    clauses = []
+    if keys:
+        clauses.append(PumpTransaction.station_id.in_(keys))
+    if station_uuid is not None:
+        clauses.append(PumpTransaction.station_uuid == station_uuid)
+    if not clauses:
+        return None
     row = db.execute(
         select(PumpTransaction.received_at, PumpTransaction.transaction_completed_at)
-        .where(PumpTransaction.station_id == mqtt_station_id)
+        .where(or_(*clauses) if len(clauses) > 1 else clauses[0])
         .order_by(PumpTransaction.received_at.desc().nullslast())
         .limit(1)
     ).first()
-    if row is None:
-        station = db.scalar(
-            select(Station).where(
-                or_(
-                    Station.mqtt_station_id == mqtt_station_id,
-                    Station.station_code == mqtt_station_id,
-                )
-            )
-        )
-        if station and station.station_code != mqtt_station_id:
-            row = db.execute(
-                select(PumpTransaction.received_at, PumpTransaction.transaction_completed_at)
-                .where(PumpTransaction.station_id == station.station_code)
-                .order_by(PumpTransaction.received_at.desc().nullslast())
-                .limit(1)
-            ).first()
     if row is None:
         return None
     return as_utc(row[1] or row[0])
@@ -237,10 +239,7 @@ def latest_station_transaction_at(db: Session, mqtt_station_id: str) -> Optional
 def station_devices_summary(db: Session, station_id: str) -> dict[str, Any]:
     mqtt_id = resolve_station_mqtt_id(db, station_id)
     now = datetime.now(timezone.utc)
-    devices = list_device_statuses(db, station_id=mqtt_id)
-    # Also try original station_id if different
-    if not devices and mqtt_id != station_id:
-        devices = list_device_statuses(db, station_id=station_id)
+    devices = list_device_statuses(db, station_id=station_id)
 
     online = sum(1 for d in devices if d["status"] == "ONLINE")
     delayed = sum(1 for d in devices if d["status"] == "DELAYED")

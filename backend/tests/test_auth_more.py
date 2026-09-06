@@ -26,6 +26,16 @@ def _env(monkeypatch) -> None:
     database.get_session_factory.cache_clear()
 
 
+def test_database_url_encodes_at_in_password(monkeypatch):
+    _env(monkeypatch)
+    monkeypatch.setenv("POSTGRES_PASSWORD", "getgoal@123")
+    get_settings.cache_clear()
+    url = get_settings().database_url
+    assert "@postgres" not in url.split("://", 1)[-1].split("@", 1)[0]
+    assert "getgoal%40123" in url
+    assert url.endswith("@localhost:5432/intelipump")
+
+
 def test_password_hash_verify(monkeypatch):
     _env(monkeypatch)
     hashed = hash_password("hunter2-secret")

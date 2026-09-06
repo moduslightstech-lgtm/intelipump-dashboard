@@ -64,6 +64,36 @@ def upgrade() -> None:
         """
     )
 
+    # Old DigitalOcean consumer may already have a slim edge_devices table
+    # (no calculated_status / last_seen_at). CREATE TABLE IF NOT EXISTS is a
+    # no-op in that case — add the rich columns before indexing.
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS id UUID")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS device_name VARCHAR(255)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS hostname VARCHAR(255)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS agent_version VARCHAR(50)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS reported_status VARCHAR(30)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS calculated_status VARCHAR(30)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS mqtt_connected BOOLEAN DEFAULT FALSE")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS serial_port VARCHAR(255)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS serial_port_open BOOLEAN DEFAULT FALSE")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS local_ip VARCHAR(100)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS tailscale_ip VARCHAR(100)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS last_serial_data_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS last_transaction_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS last_successful_upload_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS pending_transactions INTEGER DEFAULT 0")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS synced_transactions INTEGER DEFAULT 0")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS failed_transactions INTEGER DEFAULT 0")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS uptime_seconds BIGINT")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS cpu_temperature_celsius NUMERIC(6,2)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS disk_usage_percent NUMERIC(6,2)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS memory_usage_percent NUMERIC(6,2)")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ")
+    op.execute("ALTER TABLE edge_devices ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ")
+
     op.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_edge_devices_station_id

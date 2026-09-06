@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useStationEdgeDevices, useEdgeNetworkSummary } from '../../hooks/useDeviceStatus'
-import { STATION_EDGE_DEVICES, resolveStationEdgeConfig } from '../../config/edgeDevices'
 import {
   availabilityLabel,
   availabilityTone,
@@ -166,28 +165,24 @@ export function EdgeConnectivityNetworkPanel({
 }: {
   stations: Array<{ id: string; name: string; mqttId: string }>
 }) {
-  const stationKeys = useMemo(() => {
-    const fromApi = stations.map((s) => s.mqttId).filter(Boolean)
-    const configured = STATION_EDGE_DEVICES.map((s) => s.mqttStationId)
-    return [...new Set([...fromApi, ...configured])]
-  }, [stations])
+  const stationKeys = useMemo(
+    () => [...new Set(stations.map((s) => s.mqttId).filter(Boolean))],
+    [stations],
+  )
 
   const networkQ = useEdgeNetworkSummary(stationKeys)
 
-  const cards = useMemo(() => {
-    const byMqtt = new Map(stations.map((s) => [s.mqttId, s]))
-    // Always show configured stations even if catalog API is empty/unavailable
-    const keys = stationKeys.filter((k) => resolveStationEdgeConfig(k))
-    return keys.map((mqttId) => {
-      const cfg = resolveStationEdgeConfig(mqttId)!
-      const catalog = byMqtt.get(mqttId)
-      return {
-        id: catalog?.id || mqttId,
-        name: catalog?.name || cfg.displayName || mqttId,
-        mqttId,
-      }
-    })
-  }, [stations, stationKeys])
+  const cards = useMemo(
+    () =>
+      stations
+        .filter((s) => s.mqttId)
+        .map((s) => ({
+          id: s.id,
+          name: s.name,
+          mqttId: s.mqttId,
+        })),
+    [stations],
+  )
 
   return (
     <section className="card space-y-4" data-testid="edge-connectivity-section">

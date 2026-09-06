@@ -17,6 +17,7 @@ from starlette.responses import StreamingResponse
 from app.config import Settings, get_settings
 from app.database import SessionLocal, get_db
 from app.models import PumpTransaction, Station, StationStatusHistory, User
+from app.services import sales as sales_service
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -44,11 +45,15 @@ def get_sse_user(
     settings: Settings = Depends(get_settings),
     authorization: Optional[str] = Header(None),
     access_token: Optional[str] = Query(None, description="JWT for EventSource clients"),
-) -> User:
+    station_id: Optional[str] = Query(None, alias="stationId"),
+) -> Optional[User]:
+    """JWT required for the twin stream. Live sales (?stationId=) is read-only."""
     token = access_token
     if not token and authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1]
     if not token:
+        if station_id and station_id.strip():
+            return None
         raise HTTPException(status_code=401, detail="Missing access token")
     return _user_from_token(token, db, settings)
 
@@ -68,6 +73,74 @@ def _station_event_name(row: StationStatusHistory) -> list[str]:
     if row.connectivity_status == "DEGRADED" and row.previous_connectivity_status != "DEGRADED":
         events.append("station.degraded")
     return events or ["station.status"]
+
+
+def _sse(event_name: str, payload: dict, event_id: Optional[str] = None) -> str:
+    lines: list[str] = []
+    if event_id:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event_name}")
+    lines.append(f"data: {json.dumps(payload, separators=(',', ':'))}")
+    return "\n".join(lines) + "\n\n"
+
+
+async def _sales_event_generator(
+    request: Request,
+    station_id: str,
+    pump_id: Optional[str],
+) -> AsyncGenerator[str, None]:
+    """Dashboard live sales: sale.created + heartbeat. No JWT (EventSource)."""
+    db = SessionLocal()
+    try:
+        cursor_at, cursor_id = sales_service.latest_sale_cursor(
+            db, station_id=station_id, pump_id=pump_id
+        )
+    finally:
+        db.close()
+
+    yield _sse(
+        "connected",
+        {
+            "type": "connected",
+            "stationId": station_id,
+            "pumpId": pump_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    last_heartbeat = datetime.now(timezone.utc)
+    while True:
+        if await request.is_disconnected():
+            break
+        db = SessionLocal()
+        try:
+            rows = sales_service.sales_after_cursor(
+                db,
+                station_id=station_id,
+                pump_id=pump_id,
+                cursor_received_at=cursor_at,
+                cursor_id=cursor_id,
+            )
+            for row in rows:
+                sale = sales_service.serialize_sale(row)
+                yield _sse(
+                    "sale.created",
+                    {
+                        "type": "sale.created",
+                        "occurredAt": sale.get("receivedAt"),
+                        "transaction": sale,
+                    },
+                    event_id=row.id,
+                )
+                if row.received_at is not None:
+                    cursor_at = row.received_at
+                cursor_id = row.id
+        finally:
+            db.close()
+        now = datetime.now(timezone.utc)
+        if (now - last_heartbeat).total_seconds() >= 15:
+            yield _sse("heartbeat", {"type": "heartbeat", "timestamp": now.isoformat()})
+            last_heartbeat = now
+        await asyncio.sleep(2)
 
 
 async def _event_generator(request: Request) -> AsyncGenerator[str, None]:
@@ -131,14 +204,23 @@ async def _event_generator(request: Request) -> AsyncGenerator[str, None]:
 @router.get("/stream")
 async def stream_events(
     request: Request,
-    _user: User = Depends(get_sse_user),
+    station_id: Optional[str] = Query(None, alias="stationId"),
+    pump_id: Optional[str] = Query(None, alias="pumpId"),
+    _user: Optional[User] = Depends(get_sse_user),
 ):
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    if station_id and station_id.strip():
+        return StreamingResponse(
+            _sales_event_generator(request, station_id.strip(), pump_id),
+            media_type="text/event-stream",
+            headers=headers,
+        )
     return StreamingResponse(
         _event_generator(request),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=headers,
     )

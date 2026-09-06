@@ -44,9 +44,11 @@ def get_edge_device(
 def get_device_status(
     device_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Pi availability from last_seen — deviceId is the MQTT external id string."""
+    """Pi availability from last_seen — deviceId is the MQTT external id string.
+
+    Read-only like live sales: the dashboard polls this without JWT.
+    """
     if not device_id.strip():
         raise HTTPException(status_code=422, detail="deviceId is required")
     row = monitor.get_device_status(db, device_id.strip())
@@ -69,9 +71,11 @@ def list_station_edge_devices(
 def station_devices(
     station_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    """Edge devices for a station with online/delayed/offline counts."""
+    """Edge devices for a station with online/delayed/offline counts.
+
+    Read-only like live sales: the dashboard polls this without JWT.
+    """
     if not station_id.strip():
         raise HTTPException(status_code=422, detail="stationId is required")
     return monitor.station_devices_summary(db, station_id.strip())

@@ -20,6 +20,7 @@ from app.routers import (
     events,
     executive,
     health,
+    sales,
     reconciliations,
     resources,
     station_manager,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     application.include_router(reconciliations.router, prefix=prefix)
     application.include_router(digital_twin.router, prefix=prefix)
     application.include_router(events.router, prefix=prefix)
+    application.include_router(sales.router, prefix=prefix)
     application.include_router(station_manager.router, prefix=prefix)
     application.include_router(executive.router, prefix=prefix)
     application.include_router(admin_ops.users_router, prefix=prefix)

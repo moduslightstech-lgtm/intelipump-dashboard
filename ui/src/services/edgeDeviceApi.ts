@@ -1,16 +1,15 @@
-import { apiUrls } from '../config/api'
+import { API_BASE_URL, apiUrls, jsonRequestHeaders } from '../config/api'
 import {
   EdgeDeviceStatus,
   parseEdgeDeviceStatus,
 } from '../types/edgeDevice'
 
 /**
- * Live DigitalOcean device status — uses VITE_API_BASE_URL (`…/api`).
+ * Edge device status — same-origin FastAPI (`VITE_API_BASE_URL`, default `/api`).
  * Login / catalog remain on VITE_APP_API_BASE_URL.
  */
 export function getEdgeApiBaseUrl(): string {
-  // Strip trailing /api so callers that append `/api/devices` still work if needed
-  return apiUrls.devices.replace(/\/devices$/, '')
+  return API_BASE_URL
 }
 
 /** @deprecated use getEdgeApiBaseUrl */
@@ -32,7 +31,7 @@ export async function getDeviceStatus(deviceId: string): Promise<EdgeDeviceStatu
   if (!id) throw new EdgeDeviceApiError('deviceId is required', 422)
   try {
     const res = await fetch(apiUrls.deviceStatus(id), {
-      headers: { Accept: 'application/json' },
+      headers: jsonRequestHeaders(),
     })
     if (res.status === 404) throw new EdgeDeviceApiError('Edge device is not registered', 404)
     if (!res.ok) throw new EdgeDeviceApiError(`Unable to retrieve device status: ${res.status}`, res.status)

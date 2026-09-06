@@ -1,27 +1,39 @@
 /**
- * Live DigitalOcean (or same-origin) InteliPump cloud API.
+ * Same-origin InteliPump cloud API (nginx / Vite proxy).
  * VITE_API_BASE_URL must end with `/api` and must not have a trailing slash after that.
  *
  * Auth / admin / twin catalog stay on VITE_APP_API_BASE_URL (local FastAPI).
  */
 export const API_BASE_URL = (
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() ||
-  'http://157.230.215.93:8000/api'
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || '/api'
 ).replace(/\/$/, '')
 
 export const USE_MOCK_DATA =
   String(import.meta.env.VITE_USE_MOCK_DATA || 'false').toLowerCase() === 'true'
 
+const ACCESS_TOKEN_KEY = 'intelipump_access_token'
+
+export function jsonRequestHeaders(): HeadersInit {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  try {
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY)
+    if (token) headers.Authorization = `Bearer ${token}`
+  } catch {
+    /* private mode / non-browser */
+  }
+  return headers
+}
+
 export const apiUrls = {
   health: API_BASE_URL.replace(/\/api$/, '') + '/health',
 
-  devices: `${API_BASE_URL}/devices`,
+  devices: `${API_BASE_URL}/v1/edge-devices`,
 
   deviceStatus: (deviceId: string) =>
-    `${API_BASE_URL}/devices/${encodeURIComponent(deviceId)}/status`,
+    `${API_BASE_URL}/v1/devices/${encodeURIComponent(deviceId)}/status`,
 
   stationDevices: (stationId: string) =>
-    `${API_BASE_URL}/stations/${encodeURIComponent(stationId)}/devices`,
+    `${API_BASE_URL}/v1/stations/${encodeURIComponent(stationId)}/devices`,
 
   recentSales: (stationId: string, limit = 50, pumpId?: string) => {
     const params = new URLSearchParams({

@@ -1,4 +1,4 @@
-import { apiUrls } from '../config/api'
+import { apiUrls, jsonRequestHeaders } from '../config/api'
 import {
   parseEdgeDeviceStatus,
   type EdgeDeviceStatus,
@@ -27,7 +27,7 @@ export class DeviceApiError extends Error {
 async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const res = await fetch(url, {
     signal,
-    headers: { Accept: 'application/json' },
+    headers: jsonRequestHeaders(),
   })
   if (!res.ok) {
     throw new DeviceApiError(`Device API ${res.status}`, res.status)

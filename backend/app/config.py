@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Optional
+from urllib.parse import quote_plus
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,8 +44,10 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        user = quote_plus(self.postgres_user)
+        password = quote_plus(self.postgres_password)
         return (
-            f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+psycopg2://{user}:{password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

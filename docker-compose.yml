@@ -1,9 +1,13 @@
-# InteliPump cloud stack — extends the production baseline (mqtt, postgres, consumer)
-# with FastAPI + Nginx. Dashboard image can be added when the React app is ready.
+# InteliPump cloud stack.
 #
-# Secrets: copy .env.example → .env (never commit .env).
-# Apply DB migrations before starting the improved consumer against production:
-#   ./scripts/migrate.sh
+# App images are published to Docker Hub as kacytunde/intelipump-*.
+#   Local:  docker compose up --build -d
+#   Droplet: docker compose pull && docker compose up -d
+#            Never: docker compose down -v  (wipes Postgres)
+#
+# API listens on the docker network only. Do not publish :8000 on the droplet;
+# the browser reaches FastAPI through nginx :80 at /api. Local laptop binding
+# of 127.0.0.1:8000 belongs in docker-compose.override.yml only.
 
 services:
   mqtt:
@@ -25,7 +29,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    # Do not publish 5432 publicly in production. Use docker-compose.override.yml locally.
+    # Do not publish 5432 publicly. Use docker-compose.override.yml locally.
     volumes:
       - ./postgres/data:/var/lib/postgresql/data
     healthcheck:
@@ -35,7 +39,9 @@ services:
       retries: 5
 
   consumer:
-    build: ./consumer
+    image: ${DOCKERHUB_NAMESPACE:-kacytunde}/intelipump-consumer:${IMAGE_TAG:-latest}
+    build:
+      context: ./consumer
     container_name: intelipump-consumer
     restart: always
     environment:
@@ -57,7 +63,9 @@ services:
         condition: service_started
 
   api:
-    build: ./backend
+    image: ${DOCKERHUB_NAMESPACE:-kacytunde}/intelipump-api:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
     container_name: intelipump-api
     restart: always
     environment:
@@ -76,23 +84,42 @@ services:
         condition: service_healthy
     expose:
       - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   dashboard:
+    image: ${DOCKERHUB_NAMESPACE:-kacytunde}/intelipump-dashboard:${IMAGE_TAG:-latest}
     build:
       context: ./ui
       dockerfile: Dockerfile
       args:
-        # Live DigitalOcean cloud API (devices/sales/SSE)
-        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://157.230.215.93:8000/api}
-        # Local FastAPI auth/admin/twin via Nginx same-origin
+        # Baked at image build. Must stay same-origin — never a droplet IP.
+        VITE_API_BASE_URL: /api
         VITE_APP_API_BASE_URL: ""
         VITE_USE_MOCK_DATA: "false"
     container_name: intelipump-dashboard
     restart: always
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     expose:
       - "80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   nginx:
     image: nginx:1.27-alpine
@@ -103,5 +130,7 @@ services:
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - api
-      - dashboard
+      api:
+        condition: service_healthy
+      dashboard:
+        condition: service_started

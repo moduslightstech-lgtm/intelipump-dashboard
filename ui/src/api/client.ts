@@ -2,7 +2,7 @@ import axios from 'axios'
 
 /**
  * Local / same-origin FastAPI for auth, admin, twin catalog.
- * Live DigitalOcean sales/devices/SSE use `src/config/api.ts` (VITE_API_BASE_URL).
+ * Live sales / devices / SSE use `src/config/api.ts` (VITE_API_BASE_URL, default `/api`).
  */
 const BASE_URL = (import.meta as any).env?.VITE_APP_API_BASE_URL ?? ''
 

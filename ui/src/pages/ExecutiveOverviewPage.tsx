@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
@@ -42,9 +42,8 @@ import SeverityPill from '../components/dashboard/SeverityPill'
 import { productColor } from '../components/dashboard/tokens'
 import { EdgeConnectivityNetworkPanel } from '../components/edge/EdgeConnectivity'
 import { useStationLiveSales } from '../hooks/useStationLiveSales'
+import { firstLiveStationId, liveStationId } from '../config/stations'
 import { formatSaleAmount } from '../types/sales'
-
-const LIVE_STATION = 'EnergySwitch-Ibadan-Boluwaji'
 
 const tooltipStyle = {
   background: '#0f172a',
@@ -80,18 +79,38 @@ export default function ExecutiveOverviewPage() {
     queryFn: async () => (await getStations()).data,
   })
 
-  const live = useStationLiveSales({ stationId: LIVE_STATION })
+  const catalogStations = stationsQ.data || []
+  const [pickedLiveId, setPickedLiveId] = useState('')
+  const liveOptions = useMemo(
+    () =>
+      catalogStations
+        .map((s) => ({
+          id: s.id,
+          name: s.name,
+          liveId: liveStationId(s),
+        }))
+        .filter((s) => s.liveId),
+    [catalogStations],
+  )
+  const liveStationKey = pickedLiveId || firstLiveStationId(catalogStations)
+  const liveStationLabel =
+    liveOptions.find((s) => s.liveId === liveStationKey)?.name || liveStationKey || '—'
+
+  const live = useStationLiveSales({
+    stationId: liveStationKey,
+    enabled: Boolean(liveStationKey),
+  })
 
   const d = dashQ.data
   const stations = perfQ.data || []
   const edgeStations = useMemo(
     () =>
-      (stationsQ.data || []).map((s) => ({
+      catalogStations.map((s) => ({
         id: s.id,
         name: s.name,
-        mqttId: s.mqtt_station_id || s.station_code,
+        mqttId: liveStationId(s),
       })),
-    [stationsQ.data],
+    [catalogStations],
   )
   const bestStation = stations[0]?.name || null
   const reconHealthy =
@@ -151,11 +170,27 @@ export default function ExecutiveOverviewPage() {
       <div className="card space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-white">
-            Live · {LIVE_STATION}
+            Live · {liveStationLabel}
           </h2>
-          <span className="text-[11px] text-slate-500">
-            Edge Pi status is separate from the live sales stream
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {liveOptions.length > 1 && (
+              <select
+                className="input py-1 text-xs"
+                value={liveStationKey}
+                onChange={(e) => setPickedLiveId(e.target.value)}
+                aria-label="Live station"
+              >
+                {liveOptions.map((s) => (
+                  <option key={s.id} value={s.liveId}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="text-[11px] text-slate-500">
+              Edge Pi status is separate from the live sales stream
+            </span>
+          </div>
         </div>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-8 gap-2">
           <MiniKpi label="Today’s sales" value={formatSaleAmount(live.summary?.totalAmount ?? null)} />
@@ -201,7 +236,7 @@ export default function ExecutiveOverviewPage() {
           value={fmtNaira(live.summary?.totalAmount ?? d?.salesToday)}
           accent="sales"
           icon={<IconCurrency className="h-5 w-5" />}
-          hint={peakHour ? `Peak hour: ${peakHour}` : 'Boluwaji live summary when available'}
+          hint={peakHour ? `Peak hour: ${peakHour}` : 'Live summary when available'}
           trend={bestStation ? { label: `Best: ${bestStation}`, direction: 'up' } : null}
         />
         <ExecutiveKpiCard

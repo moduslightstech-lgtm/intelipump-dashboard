@@ -16,28 +16,48 @@ import { pumpMatchesId } from '../lib/pumpIdentity'
 import { createRecentTransactionDedup } from '../hooks/useRecentTransactionDedup'
 import { parseEdgeDeviceStatus } from '../types/edgeDevice'
 import { API_BASE_URL, apiUrls } from '../config/api'
+import { firstLiveStationId, liveStationId } from '../config/stations'
 
 describe('API URL construction', () => {
   it('does not double /api', () => {
     expect(API_BASE_URL.endsWith('/api')).toBe(true)
-    expect(apiUrls.deviceStatus('EnergySwitch-pi-001')).toBe(
-      `${API_BASE_URL}/devices/EnergySwitch-pi-001/status`,
+    expect(apiUrls.deviceStatus('InteliPump-Lab-pi-001')).toBe(
+      `${API_BASE_URL}/v1/devices/InteliPump-Lab-pi-001/status`,
     )
-    expect(apiUrls.recentSales('EnergySwitch-Ibadan-Boluwaji', 50)).toContain(
-      '/v1/sales/recent?stationId=EnergySwitch-Ibadan-Boluwaji',
+    expect(apiUrls.recentSales('InteliPump-US-Lab', 50)).toContain(
+      '/v1/sales/recent?stationId=InteliPump-US-Lab',
     )
-    expect(apiUrls.eventsStream('EnergySwitch-Ibadan-Boluwaji')).toContain(
-      '/v1/events/stream?stationId=EnergySwitch-Ibadan-Boluwaji',
+    expect(apiUrls.eventsStream('InteliPump-US-Lab')).toContain(
+      '/v1/events/stream?stationId=InteliPump-US-Lab',
     )
     expect(apiUrls.devices).not.toContain('/api/api/')
+    expect(apiUrls.stationDevices('InteliPump-US-Lab')).toBe(
+      `${API_BASE_URL}/v1/stations/InteliPump-US-Lab/devices`,
+    )
+  })
+})
+
+describe('live station id from catalog', () => {
+  it('prefers mqtt_station_id and never invents an id', () => {
+    expect(
+      liveStationId({ mqtt_station_id: 'InteliPump-US-Lab', station_code: 'US-LAB-001' }),
+    ).toBe('InteliPump-US-Lab')
+    expect(liveStationId({ station_code: 'US-LAB-001' })).toBe('US-LAB-001')
+    expect(liveStationId({})).toBe('')
+    expect(
+      firstLiveStationId([
+        { station_code: '' },
+        { mqtt_station_id: 'InteliPump-US-Lab', station_code: 'US-LAB-001' },
+      ]),
+    ).toBe('InteliPump-US-Lab')
   })
 })
 
 describe('device status parsing', () => {
   it('parses ONLINE DELAYED OFFLINE NEVER_CONNECTED', () => {
     const online = parseEdgeDeviceStatus({
-      deviceId: 'EnergySwitch-pi-001',
-      stationId: 'EnergySwitch-Ibadan-Boluwaji',
+      deviceId: 'InteliPump-Lab-pi-001',
+      stationId: 'InteliPump-US-Lab',
       hostname: 'raspberrypi',
       status: 'ONLINE',
       mqttConnectionStatus: 'ONLINE',
@@ -56,7 +76,7 @@ describe('device status parsing', () => {
 describe('sale parsing and summary', () => {
   const saleRaw = {
     transactionId: 'tx-1',
-    stationId: 'EnergySwitch-Ibadan-Boluwaji',
+    stationId: 'InteliPump-US-Lab',
     pumpId: 'PUMP-05-06',
     nozzleId: 'NOZZLE-06',
     product: 'PMS',
@@ -82,7 +102,7 @@ describe('sale parsing and summary', () => {
 
   it('increments summary once per unique sale', () => {
     const base = parseSalesSummary({
-      stationId: 'EnergySwitch-Ibadan-Boluwaji',
+      stationId: 'InteliPump-US-Lab',
       period: 'TODAY',
       transactionCount: 25,
       totalAmount: 450000,
@@ -163,7 +183,7 @@ describe('EventSource mock listeners', () => {
 
   it('sale.created updates only matching pump totals conceptually', () => {
     const sales: string[] = []
-    const es = new MockEventSource(apiUrls.eventsStream('EnergySwitch-Ibadan-Boluwaji'))
+    const es = new MockEventSource(apiUrls.eventsStream('InteliPump-US-Lab'))
     es.addEventListener('sale.created', (ev) => {
       const parsed = parseSaleCreatedEvent(JSON.parse(String(ev.data)))
       if (parsed) sales.push(parsed.transaction.pumpId)
@@ -177,7 +197,7 @@ describe('EventSource mock listeners', () => {
       occurredAt: '2026-07-14T13:00:00+00:00',
       transaction: {
         transactionId: 'tx-9',
-        stationId: 'EnergySwitch-Ibadan-Boluwaji',
+        stationId: 'InteliPump-US-Lab',
         pumpId: 'PUMP-05-06',
         nozzleId: null,
         product: 'PMS',

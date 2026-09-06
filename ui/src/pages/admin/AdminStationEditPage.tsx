@@ -192,7 +192,7 @@ export default function AdminStationEditPage() {
               className="input font-mono"
               value={form.mqtt_station_id}
               onChange={(e) => setForm({ ...form, mqtt_station_id: e.target.value })}
-              placeholder="EnergySwitch-Ibadan-Boluwaji"
+              placeholder="InteliPump-US-Lab"
             />
           </label>
           <label className="space-y-1 sm:col-span-2">

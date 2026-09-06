@@ -27,11 +27,27 @@ The browser never receives MQTT or Postgres credentials.
 ./scripts/migrate.sh
 ```
 
-4. Start stack:
+4. Start stack (laptop, builds locally and tags Hub names):
 
 ```bash
 docker compose up --build -d
 ```
+
+On DigitalOcean, pull published images instead of building:
+
+```bash
+# from your Mac (DigitalTwin/)
+./scripts/sync-cloud-to-droplet.sh root@157.230.215.93
+
+# on the droplet — mqtt/postgres stay up; do not down -v
+cd /opt/intelipump-cloud
+# add JWT_SECRET to .env if the old file does not have it
+./scripts/droplet-cutover.sh
+./scripts/create_admin_via_api.sh admin@example.com 'your-strong-password'
+```
+
+Images: `kacytunde/intelipump-consumer`, `kacytunde/intelipump-api`, `kacytunde/intelipump-dashboard`.
+The dashboard image is baked with `VITE_API_BASE_URL=/api`. Nginx publishes `:80` only; `:8000` stays on the docker network.
 
 5. Create an admin user:
 

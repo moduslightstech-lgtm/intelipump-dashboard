@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="intelipump-api"
+LABEL org.opencontainers.image.source="DigitalTwin/backend"
+
 WORKDIR /app
 
 COPY requirements.txt .

@@ -1,4 +1,5 @@
-# Local-only overrides — do not use on the DigitalOcean droplet.
+# Local-only overrides — do not copy this file to the DigitalOcean droplet.
+# On the droplet the API must stay on the docker network (nginx :80 only).
 services:
   postgres:
     ports:

@@ -1,8 +1,9 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
-const liveApi = process.env.VITE_API_BASE_URL || 'http://157.230.215.93:8000/api'
+const liveApi = process.env.VITE_API_BASE_URL || '/api'
 const useRelativeApi = liveApi === '/api' || liveApi.startsWith('/')
+const apiTarget = process.env.VITE_DEV_API_TARGET || 'http://localhost:8000'
 
 export default defineConfig({
   plugins: [react()],
@@ -11,15 +12,14 @@ export default defineConfig({
     proxy: useRelativeApi
       ? {
           '/api': {
-            target: 'http://157.230.215.93:8000',
+            target: apiTarget,
             changeOrigin: true,
-            secure: false,
           },
         }
       : {
           // Local auth/admin when VITE_APP_API_BASE_URL is empty
           '/api/v1': {
-            target: 'http://localhost:8000',
+            target: apiTarget,
             changeOrigin: true,
           },
         },

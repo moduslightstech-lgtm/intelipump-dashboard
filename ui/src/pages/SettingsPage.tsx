@@ -109,7 +109,7 @@ export default function SettingsPage() {
           <input className="input" placeholder="Name" value={stationName} onChange={(e) => setStationName(e.target.value)} required />
           <button type="submit" className="btn-primary w-full">Create station</button>
           <p className="text-xs text-slate-500">
-            MQTT stationId may differ from station code (e.g. EnergySwitch-Ibadan-Boluwaji vs BLJ-IB001).
+            MQTT stationId may differ from station code (e.g. InteliPump-US-Lab vs US-LAB-001).
           </p>
           <ul className="text-xs text-slate-400 space-y-1 max-h-32 overflow-auto">
             {stationsQ.data?.map((s) => (
