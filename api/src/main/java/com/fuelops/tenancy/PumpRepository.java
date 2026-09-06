@@ -13,4 +13,6 @@ public interface PumpRepository extends JpaRepository<Pump, UUID> {
     List<Pump> findByTenantId(UUID tenantId);
 
     List<Pump> findByStationIdAndActive(UUID stationId, boolean active);
+
+    java.util.Optional<Pump> findByStationIdAndExternalId(UUID stationId, String externalId);
 }

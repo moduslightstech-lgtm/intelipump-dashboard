@@ -18,10 +18,24 @@
         "strict": true,
         "noUnusedLocals": false,
         "noUnusedParameters": false,
-        "noFallthroughCasesInSwitch": true
+        "noFallthroughCasesInSwitch": true,
+        "types": ["vite/client"]
     },
     "include": [
         "src"
+    ],
+    "exclude": [
+        "src/test",
+        "src/**/*.test.tsx",
+        "src/**/*.test.ts",
+        "src/babylon/MQTTDigitalTwinService.ts",
+        "src/components/StationFlowDiagram.tsx",
+        "src/components/twin/FuelDigitalTwin.tsx",
+        "src/hooks/useMqttTwin.ts",
+        "src/lib/mqttClient.ts",
+        "src/pages/PumpsPage.tsx",
+        "src/pages/ReconciliationPage.tsx",
+        "src/pages/StationTwinPage.tsx"
     ],
     "references": [
         {

@@ -1,191 +1,388 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
-    LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-    ResponsiveContainer, Legend
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts'
-import { getDashboardOverview, getStations } from '../api/client'
+import {
+  fmtLiters,
+  fmtNaira,
+  fmtTime,
+  getAlerts,
+  getDashboardSummary,
+  getHourlySales,
+  getProductBreakdown,
+  getStationPerformance,
+  getTransactions,
+} from '../api/client'
+import ChartEmptyState from '../components/dashboard/ChartEmptyState'
+import DashboardPanel from '../components/dashboard/DashboardPanel'
+import ExecutiveKpiCard from '../components/dashboard/ExecutiveKpiCard'
+import {
+  IconAlert,
+  IconBuilding,
+  IconChart,
+  IconCheck,
+  IconCurrency,
+  IconDroplet,
+  IconReceipt,
+  IconTicket,
+  IconWifi,
+  IconWifiOff,
+} from '../components/dashboard/icons'
+import SeverityPill from '../components/dashboard/SeverityPill'
+import { productColor } from '../components/dashboard/tokens'
 
-interface OverviewData {
-    totalStations: number
-    stationsReportingToday: number
-    totalLitersToday: number
-    totalRevenueToday: number
-    totalVariance7Days: number
-    openAlerts: number
-    topStationsByVariance: Array<{ stationId: string; totalVariance: number }>
-    revenueTrend7Days: Array<{ date: string; revenue: number }>
-}
-
-interface Station { id: string; name: string }
-
-const fmt = (n: number) =>
-    n >= 1_000_000 ? `₦${(n / 1_000_000).toFixed(2)}M`
-        : n >= 1_000 ? `₦${(n / 1_000).toFixed(1)}K`
-            : `₦${n.toFixed(0)}`
-
-const StatusBadge = ({ status }: { status: string }) => {
-    const cls = { OK: 'badge-ok', WARN: 'badge-warn', CRITICAL: 'badge-critical' }[status] ?? 'badge-info'
-    return <span className={cls}>{status}</span>
+const tooltipStyle = {
+  background: '#0f172a',
+  border: '1px solid #334155',
+  borderRadius: 12,
+  color: '#e2e8f0',
+  fontSize: 12,
 }
 
 export default function OverviewPage() {
-    const navigate = useNavigate()
-    const [data, setData] = useState<OverviewData | null>(null)
-    const [stations, setStations] = useState<Station[]>([])
-    const [loading, setLoading] = useState(true)
-    const [error, setError] = useState('')
+  const summaryQ = useQuery({
+    queryKey: ['dashboard', 'summary'],
+    queryFn: async () => (await getDashboardSummary()).data,
+  })
+  const hourlyQ = useQuery({
+    queryKey: ['dashboard', 'hourly'],
+    queryFn: async () => (await getHourlySales()).data,
+  })
+  const productQ = useQuery({
+    queryKey: ['dashboard', 'products'],
+    queryFn: async () => (await getProductBreakdown()).data,
+  })
+  const stationQ = useQuery({
+    queryKey: ['dashboard', 'stations'],
+    queryFn: async () => (await getStationPerformance()).data,
+  })
+  const txQ = useQuery({
+    queryKey: ['transactions', 'recent'],
+    queryFn: async () => (await getTransactions({ page: 1, size: 8, sort: 'received_at,desc' })).data,
+  })
+  const alertsQ = useQuery({
+    queryKey: ['alerts', 'open'],
+    queryFn: async () => (await getAlerts('OPEN')).data,
+  })
 
-    useEffect(() => {
-        Promise.all([getDashboardOverview(), getStations()])
-            .then(([ov, st]) => {
-                setData(ov.data)
-                setStations(st.data)
-            })
-            .catch(() => setError('Failed to load dashboard data. Ensure the API is running and seed data is loaded.'))
-            .finally(() => setLoading(false))
-    }, [])
+  const s = summaryQ.data
+  const error = summaryQ.error || hourlyQ.error
+  const stations = stationQ.data || []
+  const maxStationAmount = Math.max(...stations.map((row) => Number(row.amount || 0)), 1)
+  const productTotal = useMemo(
+    () => (productQ.data || []).reduce((sum, row) => sum + Number(row.amount || 0), 0),
+    [productQ.data],
+  )
+  const bestStation = stations[0]?.station_name || stations[0]?.station_id || null
+  const peakHour = useMemo(() => {
+    const rows = hourlyQ.data || []
+    if (!rows.length) return null
+    let best = rows[0]
+    for (const row of rows) {
+      if (Number(row.amount || 0) > Number(best.amount || 0)) best = row
+    }
+    if (!best?.hour || !Number(best.amount)) return null
+    return new Date(best.hour).toLocaleTimeString('en-NG', { hour: 'numeric' })
+  }, [hourlyQ.data])
 
-    const stationName = (id: string) => stations.find(s => s.id === id)?.name ?? id.slice(0, 8)
-
-    if (loading) return <div className="flex items-center justify-center h-full text-slate-400">Loading…</div>
-    if (error) return (
-        <div className="p-8">
-            <div className="card border-red-900/40 bg-red-900/10">
-                <p className="text-red-400 text-sm">{error}</p>
-            </div>
+  return (
+    <div className="space-y-6 p-6">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">Overview</h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Today&apos;s sales ({s?.timezone || 'Africa/Lagos'}) · live updates via API events
+          </p>
         </div>
-    )
+        {summaryQ.isFetching && <span className="text-xs text-slate-500">Refreshing…</span>}
+      </div>
 
-    const d = data!
-    const coveragePct = d.totalStations > 0 ? Math.round((d.stationsReportingToday / d.totalStations) * 100) : 0
-    const varianceColor = d.totalVariance7Days < 0 ? 'text-red-400' : d.totalVariance7Days > 0 ? 'text-amber-400' : 'text-green-400'
+      {error && (
+        <div className="rounded-2xl border border-red-800/60 bg-red-950/40 p-4 text-sm text-red-300" role="alert">
+          Failed to load dashboard data. Check API connectivity.
+        </div>
+      )}
 
-    const chartData = d.revenueTrend7Days.map(r => ({
-        date: new Date(r.date).toLocaleDateString('en', { weekday: 'short', day: 'numeric' }),
-        revenue: Number(r.revenue),
-    }))
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <ExecutiveKpiCard
+          label="Sales today"
+          value={fmtNaira(s?.total_amount_today)}
+          accent="sales"
+          icon={<IconCurrency className="h-5 w-5" />}
+          hint={peakHour ? `Peak hour: ${peakHour}` : undefined}
+          trend={bestStation ? { label: `Best: ${bestStation}`, direction: 'up' } : null}
+        />
+        <ExecutiveKpiCard
+          label="Volume today"
+          value={fmtLiters(s?.total_volume_today)}
+          accent="volume"
+          icon={<IconDroplet className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Transactions"
+          value={String(s?.transaction_count_today ?? '—')}
+          accent="transactions"
+          icon={<IconReceipt className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Avg ticket"
+          value={fmtNaira(s?.average_transaction_amount)}
+          accent="ticket"
+          icon={<IconTicket className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Active stations"
+          value={String(s?.active_stations ?? '—')}
+          accent="stations"
+          icon={<IconBuilding className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Online devices"
+          value={String(s?.online_devices ?? '—')}
+          accent="online"
+          icon={<IconWifi className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Offline devices"
+          value={String(s?.offline_devices ?? '—')}
+          accent="offline"
+          icon={<IconWifiOff className="h-5 w-5" />}
+        />
+        <ExecutiveKpiCard
+          label="Rejected MQTT today"
+          value={String(s?.rejected_mqtt_messages_today ?? '—')}
+          accent="rejected"
+          icon={<IconAlert className="h-5 w-5" />}
+          hint={`Last tx: ${fmtTime(s?.last_transaction_time)}`}
+        />
+      </div>
 
-    return (
-        <div className="p-6 space-y-6">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div>
-                    <h1 className="text-2xl font-bold text-white">Executive Overview</h1>
-                    <p className="text-slate-400 text-sm mt-0.5">Real-time fuel retail intelligence across all stations</p>
-                </div>
-                <div className="text-right">
-                    <div className="text-xs text-slate-400">Last updated</div>
-                    <div className="text-sm text-white">{new Date().toLocaleTimeString()}</div>
-                </div>
-            </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DashboardPanel title="Hourly sales">
+          <div className="h-64">
+            {(hourlyQ.data?.length ?? 0) === 0 ? (
+              <ChartEmptyState
+                title="No sales yet today"
+                description="Hourly revenue will appear as transactions arrive."
+                icon={<IconChart className="h-6 w-6" />}
+              />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={hourlyQ.data}>
+                  <defs>
+                    <linearGradient id="overviewSalesFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.4} />
+                      <stop offset="100%" stopColor="#10b981" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                  <XAxis
+                    dataKey="hour"
+                    tickFormatter={(v) =>
+                      new Date(v).toLocaleTimeString('en-NG', { hour: '2-digit' })
+                    }
+                    stroke="#64748b"
+                    fontSize={11}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} width={48} />
+                  <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => fmtNaira(v)} />
+                  <Area
+                    type="monotone"
+                    dataKey="amount"
+                    stroke="#34d399"
+                    strokeWidth={2.5}
+                    fill="url(#overviewSalesFill)"
+                    dot={false}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </DashboardPanel>
 
-            {/* KPI cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="stat-card">
-                    <div className="label-text">Liters Today</div>
-                    <div className="value-text text-blue-400">{Number(d.totalLitersToday).toLocaleString('en', { maximumFractionDigits: 0 })}L</div>
-                    <div className="text-xs text-slate-500">All stations combined</div>
-                </div>
-                <div className="stat-card">
-                    <div className="label-text">Revenue Today</div>
-                    <div className="value-text text-green-400">{fmt(Number(d.totalRevenueToday))}</div>
-                    <div className="text-xs text-slate-500">Expected (dispense)</div>
-                </div>
-                <div className="stat-card">
-                    <div className="label-text">7-Day Variance</div>
-                    <div className={`value-text ${varianceColor}`}>{fmt(Math.abs(Number(d.totalVariance7Days)))}</div>
-                    <div className="text-xs text-slate-500">{Number(d.totalVariance7Days) < 0 ? 'Deficit' : 'Surplus'}</div>
-                </div>
-                <div className="stat-card">
-                    <div className="label-text">Open Alerts</div>
-                    <div className={`value-text ${d.openAlerts > 0 ? 'text-red-400' : 'text-green-400'}`}>{d.openAlerts}</div>
-                    <button onClick={() => navigate('/alerts')} className="text-xs text-blue-400 hover:underline text-left">View alerts →</button>
-                </div>
-            </div>
-
-            {/* Coverage + Revenue trend */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Coverage */}
-                <div className="card">
-                    <h2 className="font-semibold text-white mb-4">Station Coverage Today</h2>
-                    <div className="flex items-center justify-center">
-                        <div className="relative w-32 h-32">
-                            <svg viewBox="0 0 36 36" className="w-32 h-32 -rotate-90">
-                                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#1e293b" strokeWidth="3.5" />
-                                <circle cx="18" cy="18" r="15.9" fill="none" stroke="#3b5bdb" strokeWidth="3.5"
-                                    strokeDasharray={`${coveragePct} ${100 - coveragePct}`}
-                                    strokeLinecap="round" className="ring-fill" />
-                            </svg>
-                            <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                <span className="text-2xl font-bold text-white">{coveragePct}%</span>
-                                <span className="text-xs text-slate-400">{d.stationsReportingToday}/{d.totalStations}</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div className="mt-4 space-y-2">
-                        {stations.map(s => (
-                            <div key={s.id} className="flex items-center justify-between text-sm">
-                                <span className="text-slate-300 truncate">{s.name}</span>
-                                <button onClick={() => navigate(`/stations/${s.id}/twin`)}
-                                    className="text-xs text-blue-400 hover:underline">Twin →</button>
-                            </div>
+        <DashboardPanel title="Sales by product">
+          <div className="h-64">
+            {(productQ.data?.length ?? 0) === 0 ? (
+              <ChartEmptyState
+                title="No product breakdown yet"
+                description="Product mix will show once sales are recorded."
+                icon={<IconDroplet className="h-6 w-6" />}
+              />
+            ) : (
+              <div className="flex h-full flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="h-48 w-full sm:h-full sm:w-1/2">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={productQ.data}
+                        dataKey="amount"
+                        nameKey="product"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={48}
+                        outerRadius={74}
+                        paddingAngle={3}
+                      >
+                        {(productQ.data || []).map((row, i) => (
+                          <Cell key={i} fill={productColor(row.product)} stroke="#0f172a" strokeWidth={2} />
                         ))}
+                      </Pie>
+                      <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => fmtNaira(v)} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <ul className="flex-1 space-y-2">
+                  {(productQ.data || []).map((row) => {
+                    const pct = productTotal > 0 ? (Number(row.amount) / productTotal) * 100 : 0
+                    return (
+                      <li
+                        key={row.product}
+                        className="flex items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="h-2.5 w-2.5 rounded-full"
+                            style={{ backgroundColor: productColor(row.product) }}
+                          />
+                          <span className="text-sm text-slate-200">{row.product}</span>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-mono text-xs text-white">{fmtNaira(row.amount)}</div>
+                          <div className="text-[10px] text-slate-500">{pct.toFixed(1)}%</div>
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+        </DashboardPanel>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DashboardPanel title="Sales by station" action={{ to: '/stations', label: 'View stations' }}>
+          {stations.length === 0 ? (
+            <ChartEmptyState
+              title="No station sales yet"
+              description="Station rankings will appear as sales come in."
+              icon={<IconBuilding className="h-6 w-6" />}
+            />
+          ) : (
+            <div className="space-y-3">
+              {stations.slice(0, 8).map((row, idx) => {
+                const width = Math.max(6, (Number(row.amount || 0) / maxStationAmount) * 100)
+                return (
+                  <div key={row.station_id} className="rounded-xl border border-slate-800/80 bg-slate-950/40 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={`inline-flex h-5 w-5 items-center justify-center rounded-md text-[10px] font-bold ${
+                            idx === 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {idx + 1}
+                        </span>
+                        <span className="truncate text-sm font-medium text-white">
+                          {row.station_name || row.station_id}
+                        </span>
+                      </div>
+                      <div className="text-right font-mono text-sm text-emerald-300">{fmtNaira(row.amount)}</div>
                     </div>
-                </div>
-
-                {/* Revenue trend */}
-                <div className="card lg:col-span-2">
-                    <h2 className="font-semibold text-white mb-4">Revenue Trend — Last 7 Days</h2>
-                    <ResponsiveContainer width="100%" height={200}>
-                        <LineChart data={chartData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                            <XAxis dataKey="date" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-                            <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }}
-                                tickFormatter={v => `₦${(v / 1000).toFixed(0)}K`} />
-                            <Tooltip
-                                contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8, color: '#e2e8f0' }}
-                                formatter={(v: number) => [fmt(v), 'Expected Revenue']} />
-                            <Line type="monotone" dataKey="revenue" stroke="#3b5bdb" strokeWidth={2.5}
-                                dot={{ fill: '#3b5bdb', strokeWidth: 0, r: 3 }} activeDot={{ r: 5 }} />
-                        </LineChart>
-                    </ResponsiveContainer>
-                </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                      <div
+                        className={`h-full rounded-full ${idx === 0 ? 'bg-emerald-400' : 'bg-sky-400/80'}`}
+                        style={{ width: `${width}%` }}
+                      />
+                    </div>
+                    <div className="mt-1.5 flex justify-between text-[11px] text-slate-500">
+                      <span>{row.count} tx</span>
+                      <span>{fmtLiters(row.volume)}</span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
+          )}
+        </DashboardPanel>
 
-            {/* Top variance stations */}
-            <div className="card">
-                <h2 className="font-semibold text-white mb-4">Top Stations by Variance (7-Day)</h2>
-                {d.topStationsByVariance.length === 0 ? (
-                    <p className="text-slate-400 text-sm">No variance data yet — run reconciliation first.</p>
-                ) : (
-                    <table className="w-full">
-                        <thead>
-                            <tr className="border-b border-slate-700">
-                                <th className="table-header text-left">Station</th>
-                                <th className="table-header text-right">Total Variance (abs)</th>
-                                <th className="table-header text-right">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {d.topStationsByVariance.map((row, i) => (
-                                <tr key={i} className="border-b border-slate-700/50 hover:bg-slate-700/20 transition-colors">
-                                    <td className="table-cell">{stationName(row.stationId)}</td>
-                                    <td className="table-cell text-right">
-                                        <span className={Number(row.totalVariance) > 50000 ? 'text-red-400 font-semibold' : 'text-amber-400'}>
-                                            {fmt(Number(row.totalVariance))}
-                                        </span>
-                                    </td>
-                                    <td className="table-cell text-right">
-                                        <button onClick={() => navigate(`/stations/${row.stationId}/reconciliation`)}
-                                            className="text-xs text-blue-400 hover:underline">Drilldown →</button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                )}
-            </div>
-        </div>
-    )
+        <DashboardPanel title="Active alerts" action={{ to: '/alerts', label: 'View alerts' }}>
+          {(alertsQ.data?.length ?? 0) === 0 ? (
+            <ChartEmptyState
+              title="No open alerts"
+              description="Operations look clear right now."
+              icon={<IconCheck className="h-6 w-6" />}
+            />
+          ) : (
+            <ul className="space-y-2">
+              {alertsQ.data?.slice(0, 6).map((a) => (
+                <li key={a.id} className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="flex items-center gap-2">
+                    <SeverityPill severity={a.severity} />
+                    <span className="truncate text-sm font-medium text-white">{a.title}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">{a.message || a.alert_type}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </DashboardPanel>
+      </div>
+
+      <DashboardPanel title="Recent transactions" action={{ to: '/transactions', label: 'View all' }}>
+        {(txQ.data?.items.length ?? 0) === 0 ? (
+          <ChartEmptyState title="No transactions yet" description="Completed sales will list here." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-700 text-left text-slate-400">
+                  <th className="pb-2 font-medium">Time</th>
+                  <th className="pb-2 font-medium">Station</th>
+                  <th className="pb-2 font-medium">Pump</th>
+                  <th className="pb-2 font-medium">Product</th>
+                  <th className="pb-2 text-right font-medium">Volume</th>
+                  <th className="pb-2 text-right font-medium">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {txQ.data?.items.map((t) => (
+                  <tr key={t.id} className="border-b border-slate-800/80 hover:bg-slate-900/40">
+                    <td className="whitespace-nowrap py-2.5 text-slate-400">
+                      {fmtTime(t.received_at || t.device_timestamp)}
+                    </td>
+                    <td className="py-2.5 text-white">{t.station_id}</td>
+                    <td className="py-2.5 font-mono text-slate-300">{t.pump_id}</td>
+                    <td className="py-2.5">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: productColor(t.product) }}
+                        />
+                        {t.product || '—'}
+                      </span>
+                    </td>
+                    <td className="py-2.5 text-right font-mono text-cyan-300">{fmtLiters(t.volume_liters)}</td>
+                    <td className="py-2.5 text-right font-mono text-emerald-300">{fmtNaira(t.amount)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </DashboardPanel>
+    </div>
+  )
 }

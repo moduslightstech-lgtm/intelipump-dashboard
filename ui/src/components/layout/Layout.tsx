@@ -1,92 +1,225 @@
-import { Outlet, NavLink, useNavigate } from 'react-router-dom'
+import type { ReactNode } from 'react'
+import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
-import { useState, useEffect } from 'react'
-import { getStations, runAllReconciliation } from '../../api/client'
+import { useLiveEvents } from '../../hooks/useLiveEvents'
+import { normalizeRole, type AppRole } from '../../lib/roles'
 
-interface Station { id: string; name: string; location: string }
+type NavItem = {
+  to: string
+  label: string
+  end?: boolean
+  icon: (props: { className?: string }) => ReactNode
+}
+
+function NavIcon({
+  children,
+  className = 'h-5 w-5',
+}: {
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {children}
+    </svg>
+  )
+}
+
+const Icons = {
+  overview: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />
+    </NavIcon>
+  ),
+  twin: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
+    </NavIcon>
+  ),
+  transactions: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+    </NavIcon>
+  ),
+  recon: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M16 3l4 4-4 4" />
+      <path d="M20 7H8a4 4 0 0 0 0 8h1" />
+      <path d="M8 21l-4-4 4-4" />
+      <path d="M4 17h12a4 4 0 0 0 0-8h-1" />
+    </NavIcon>
+  ),
+  stations: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M4 21V7l8-4 8 4v14" />
+      <path d="M9 21v-6h6v6M9 10h.01M15 10h.01M9 14h.01M15 14h.01" />
+    </NavIcon>
+  ),
+  admin: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </NavIcon>
+  ),
+  devices: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <rect x="5" y="3" width="14" height="18" rx="2" />
+      <path d="M9 7h6M9 11h6M9 15h3" />
+    </NavIcon>
+  ),
+  tanks: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M8 4h8v4a6 6 0 0 1-8 0V4Z" />
+      <path d="M7 8v11a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V8" />
+      <path d="M10 14h4" />
+    </NavIcon>
+  ),
+  alerts: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M12 9v4M12 17h.01" />
+      <path d="M10.3 4.3 2.5 18a2 2 0 0 0 1.7 3h16a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0Z" />
+    </NavIcon>
+  ),
+  mqtt: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <path d="M5 12.5a9 9 0 0 1 14 0" />
+      <path d="M8.5 16a5 5 0 0 1 7 0" />
+      <circle cx="12" cy="20" r="1" fill="currentColor" stroke="none" />
+    </NavIcon>
+  ),
+  users: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <circle cx="9" cy="8" r="3" />
+      <path d="M3 20a6 6 0 0 1 12 0" />
+      <circle cx="17" cy="9" r="2.5" />
+      <path d="M16 20a4.5 4.5 0 0 1 5 0" />
+    </NavIcon>
+  ),
+  settings: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9c.3.6.9 1 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
+    </NavIcon>
+  ),
+  profile: (p: { className?: string }) => (
+    <NavIcon className={p.className}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
+    </NavIcon>
+  ),
+}
+
+const ADMIN_NAV: NavItem[] = [
+  { to: '/', label: 'Overview', end: true, icon: Icons.overview },
+  { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
+  { to: '/transactions', label: 'Transactions', icon: Icons.transactions },
+  { to: '/reconciliations', label: 'Reconciliations', icon: Icons.recon },
+  { to: '/stations', label: 'Stations', icon: Icons.stations },
+  { to: '/admin/stations', label: 'Admin Stations', icon: Icons.admin },
+  { to: '/station-manager/tank-readings', label: 'Nightly Tank Readings', icon: Icons.tanks },
+  { to: '/devices', label: 'Devices', icon: Icons.devices },
+  { to: '/tanks', label: 'Tanks', icon: Icons.tanks },
+  { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
+  { to: '/mqtt', label: 'MQTT Monitoring', icon: Icons.mqtt },
+  { to: '/users', label: 'Users', icon: Icons.users },
+  { to: '/settings', label: 'Settings', icon: Icons.settings },
+]
+
+const EXEC_NAV: NavItem[] = [
+  { to: '/executive', label: 'Executive Overview', end: true, icon: Icons.overview },
+  { to: '/transactions', label: 'Sales', icon: Icons.transactions },
+  { to: '/reconciliations', label: 'Reconciliations', icon: Icons.recon },
+  { to: '/stations', label: 'Stations', icon: Icons.stations },
+  { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
+  { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
+]
+
+const MANAGER_NAV: NavItem[] = [
+  { to: '/station-manager/tank-readings', label: 'Nightly Tank Readings', end: true, icon: Icons.tanks },
+  { to: '/station-manager/history', label: 'Submission History', icon: Icons.transactions },
+  { to: '/station-manager/reconciliation', label: 'Reconciliation Result', icon: Icons.recon },
+  { to: '/station-manager/profile', label: 'Profile', icon: Icons.profile },
+]
+
+function navForRole(role: AppRole): NavItem[] {
+  if (role === 'STATION_MANAGER') return MANAGER_NAV
+  if (role === 'EXECUTIVE') return EXEC_NAV
+  return ADMIN_NAV
+}
 
 export default function Layout() {
-    const { user, logout } = useAuth()
-    const navigate = useNavigate()
-    const [stations, setStations] = useState<Station[]>([])
+  const { user, logout } = useAuth()
+  const role = normalizeRole(user?.normalizedRole || user?.role)
+  useLiveEvents(role !== 'STATION_MANAGER')
+  const nav = navForRole(role)
 
-    useEffect(() => {
-        getStations().then(r => setStations(r.data)).catch(() => { })
-    }, [])
-
-    const handleRunRecon = async () => {
-        try { await runAllReconciliation(); alert('Reconciliation complete!') } catch { alert('Reconciliation failed') }
-    }
-
-    return (
-        <div className="flex h-screen overflow-hidden">
-            {/* Sidebar */}
-            <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col flex-shrink-0">
-                {/* Logo */}
-                <div className="p-5 border-b border-slate-800">
-                    <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 bg-blue-600 rounded-lg flex items-center justify-center">
-                            <span className="text-white font-bold text-sm">F</span>
-                        </div>
-                        <div>
-                            <div className="text-white font-bold text-sm leading-tight">FuelOps</div>
-                            <div className="text-slate-400 text-xs">Intelligence Platform</div>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Nav */}
-                <nav className="flex-1 p-3 overflow-y-auto">
-                    <div className="mb-4">
-                        <p className="text-xs text-slate-500 uppercase tracking-wider px-4 mb-2 font-semibold">Overview</p>
-                        <NavLink to="/" end className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" /></svg>
-                            Executive Overview
-                        </NavLink>
-                        <NavLink to="/alerts" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" /></svg>
-                            Alerts
-                        </NavLink>
-                    </div>
-
-                    <div>
-                        <p className="text-xs text-slate-500 uppercase tracking-wider px-4 mb-2 font-semibold">Stations</p>
-                        {stations.map(s => (
-                            <div key={s.id} className="mb-1">
-                                <NavLink
-                                    to={`/stations/${s.id}/twin`}
-                                    className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
-                                >
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" /></svg>
-                                    <span className="truncate">{s.name}</span>
-                                </NavLink>
-                            </div>
-                        ))}
-                    </div>
-                </nav>
-
-                {/* Footer */}
-                <div className="p-3 border-t border-slate-800 space-y-2">
-                    <button onClick={handleRunRecon} className="w-full btn-secondary text-left flex items-center gap-2 text-xs">
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                        Run Reconciliation
-                    </button>
-                    <div className="flex items-center justify-between px-2">
-                        <div>
-                            <div className="text-xs font-medium text-white">{user?.username}</div>
-                            <div className="text-xs text-slate-400">{user?.roles?.[0]}</div>
-                        </div>
-                        <button onClick={logout} className="text-slate-400 hover:text-white transition-colors">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
-                        </button>
-                    </div>
-                </div>
-            </aside>
-
-            {/* Main content */}
-            <main className="flex-1 overflow-y-auto bg-slate-900">
-                <Outlet />
-            </main>
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <aside className="flex w-64 flex-shrink-0 flex-col border-r border-slate-800/90 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
+        <div className="border-b border-slate-800 p-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-[0_0_20px_rgba(16,185,129,0.35)]">
+              <span className="text-sm font-bold text-white">IP</span>
+            </div>
+            <div>
+              <div className="text-sm font-bold leading-tight text-white">InteliPump</div>
+              <div className="text-xs text-slate-400">
+                {role === 'STATION_MANAGER'
+                  ? 'Station Manager'
+                  : role === 'EXECUTIVE'
+                    ? 'Executive'
+                    : 'Cloud Dashboard'}
+              </div>
+            </div>
+          </div>
         </div>
-    )
+
+        <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+          <p className="mb-2 px-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            {role === 'STATION_MANAGER' ? 'Nightly workflow' : 'Operations'}
+          </p>
+          {nav.map((item) => {
+            const Icon = item.icon
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+              >
+                <span className="nav-icon">
+                  <Icon className="h-5 w-5" />
+                </span>
+                <span>{item.label}</span>
+              </NavLink>
+            )
+          })}
+        </nav>
+
+        <div className="flex items-center justify-between gap-2 border-t border-slate-800 p-4">
+          <div className="min-w-0">
+            <div className="truncate text-xs font-medium text-white">{user?.email}</div>
+            <div className="text-xs text-slate-400">{role}</div>
+          </div>
+          <button onClick={logout} className="btn-secondary px-3 py-1.5 text-xs" type="button">
+            Logout
+          </button>
+        </div>
+      </aside>
+
+      <main className="flex-1 overflow-y-auto bg-[#0b1220]">
+        <Outlet />
+      </main>
+    </div>
+  )
 }

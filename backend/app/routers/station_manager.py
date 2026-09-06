@@ -1,0 +1,229 @@
+"""Station Manager tank-reading APIs."""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Any, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import ReconciliationRun, User
+from app.services.rbac import (
+    accessible_stations,
+    assert_station_access,
+    is_admin,
+    require_admin,
+    require_station_manager_or_admin,
+)
+from app.services.tank_readings import (
+    admin_correct_batch,
+    batch_audit_history,
+    current_workspace,
+    list_reading_history,
+    save_draft,
+    station_business_date,
+    submit_batch,
+)
+
+router = APIRouter(prefix="/station-manager", tags=["station-manager"])
+
+
+class DraftReadingItem(BaseModel):
+    tank_id: UUID
+    closing_volume_liters: Optional[float] = None
+    opening_volume_liters: Optional[float] = None
+    measured_level_mm: Optional[float] = None
+    water_level_mm: Optional[float] = None
+    temperature_celsius: Optional[float] = None
+    measurement_method: Optional[str] = "DIP_STICK"
+    notes: Optional[str] = None
+
+
+class DraftRequest(BaseModel):
+    station_id: UUID
+    business_date: Optional[date] = None
+    readings: list[DraftReadingItem]
+    notes: Optional[str] = None
+    backdate_reason: Optional[str] = None
+
+
+class SubmitRequest(BaseModel):
+    station_id: UUID
+    business_date: Optional[date] = None
+    confirm: bool = False
+    backdate_reason: Optional[str] = None
+
+
+class CorrectRequest(BaseModel):
+    readings: list[DraftReadingItem]
+    correction_reason: str = Field(min_length=3)
+    version: Optional[int] = None
+    allow_over_capacity: bool = False
+
+
+def _stations_payload(db: Session, user: User) -> list[dict[str, Any]]:
+    stations = accessible_stations(db, user)
+    return [
+        {
+            "id": str(s.id),
+            "name": s.name,
+            "stationCode": s.station_code,
+            "mqttStationId": s.mqtt_station_id,
+            "timezone": s.timezone,
+        }
+        for s in stations
+    ]
+
+
+@router.get("/stations")
+def my_stations(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> list[dict[str, Any]]:
+    return _stations_payload(db, user)
+
+
+@router.get("/tank-readings/current")
+def current_readings(
+    station_id: UUID = Query(...),
+    business_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    return current_workspace(db, user, station_id, business_date)
+
+
+@router.get("/tank-readings/history")
+def history(
+    station_id: Optional[UUID] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    return list_reading_history(
+        db,
+        user,
+        station_id=station_id,
+        date_from=date_from,
+        date_to=date_to,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/tank-readings/batches/{batch_id}/audit")
+def reading_audit(
+    batch_id: UUID,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> list[dict[str, Any]]:
+    if not is_admin(user):
+        # Managers may view audit for their stations (read-only)
+        pass
+    return batch_audit_history(db, user, batch_id)
+
+
+@router.get("/tank-readings/{business_date}")
+def readings_for_date(
+    business_date: date,
+    station_id: UUID = Query(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    return current_workspace(db, user, station_id, business_date)
+
+
+@router.post("/tank-readings/draft")
+def draft(
+    body: DraftRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    return save_draft(
+        db,
+        user,
+        station_id=body.station_id,
+        business_date=body.business_date,
+        readings=[r.model_dump() for r in body.readings],
+        notes=body.notes,
+        backdate_reason=body.backdate_reason,
+    )
+
+
+@router.post("/tank-readings/submit")
+def submit(
+    body: SubmitRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    return submit_batch(
+        db,
+        user,
+        station_id=body.station_id,
+        business_date=body.business_date,
+        confirm=body.confirm,
+        backdate_reason=body.backdate_reason,
+    )
+
+
+@router.put("/admin/tank-readings/{batch_id}/correct")
+def correct_reading(
+    batch_id: UUID,
+    body: CorrectRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> dict[str, Any]:
+    return admin_correct_batch(
+        db,
+        admin,
+        batch_id=batch_id,
+        readings=[r.model_dump() for r in body.readings],
+        correction_reason=body.correction_reason,
+        version=body.version,
+        allow_over_capacity=body.allow_over_capacity,
+    )
+
+
+@router.get("/reconciliation")
+def my_reconciliation(
+    station_id: UUID = Query(...),
+    business_date: Optional[date] = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_station_manager_or_admin),
+) -> dict[str, Any]:
+    station = assert_station_access(db, user, station_id)
+    biz = business_date or station_business_date(station)
+    code = station.mqtt_station_id or station.station_code
+    run = db.scalar(
+        select(ReconciliationRun).where(
+            ReconciliationRun.business_date == biz,
+            ReconciliationRun.station_id.in_([station.station_code, code]),
+        )
+    )
+    if run is None:
+        return {"businessDate": biz.isoformat(), "status": "NOT_STARTED", "run": None}
+    return {
+        "businessDate": biz.isoformat(),
+        "status": run.status,
+        "run": {
+            "id": str(run.id),
+            "transactionSalesVolume": float(run.transaction_sales_volume or 0),
+            "transactionSalesAmount": float(run.transaction_sales_amount or 0),
+            "openingStockVolume": float(run.opening_stock_volume or 0),
+            "deliveryVolume": float(run.delivery_volume or 0),
+            "expectedClosingVolume": float(run.expected_closing_volume or 0),
+            "actualClosingVolume": float(run.actual_closing_volume or 0),
+            "tankVarianceVolume": float(run.tank_variance_volume or 0),
+            "tankVariancePercentage": float(run.tank_variance_percentage or 0),
+        },
+    }

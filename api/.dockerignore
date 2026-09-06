@@ -1,0 +1,9 @@
+target
+.mvn
+.git
+.github
+*.class
+*.jar
+*.war
+.idea
+*.iml

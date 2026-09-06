@@ -124,3 +124,76 @@ docs/         Architecture notes
 
 Products: PMS @ ₦617/L · AGO @ ₦1,200/L · DPK @ ₦750/L  
 Each station: 2 tanks, 4 pumps, 8 nozzles
+
+## Edge Device Status Integration
+
+The local Vite dashboard reads live Raspberry Pi availability from the DigitalOcean FastAPI
+device-status endpoint. It does **not** talk to MQTT or PostgreSQL from the browser.
+
+### API base URL
+
+```env
+# ui/.env.local  (gitignored) — leave empty for same-origin + proxy (avoids CORS)
+VITE_API_BASE_URL=
+VITE_EDGE_API_BASE_URL=
+```
+
+Nginx (`http://localhost`) and Vite (`http://localhost:5173`) proxy:
+- `/api/devices/*` → DigitalOcean `http://157.230.215.93:8000` (edge status only)
+- `/api/*` → local FastAPI (login, stations, etc.)
+
+Do **not** point `VITE_API_BASE_URL` at DigitalOcean, or login will hit the remote API.
+Use port **8000** for edge status (not 8080).
+
+### Endpoint
+
+```text
+GET /api/devices/{deviceId}/status
+```
+
+Current development mapping (`ui/src/config/edgeDevices.ts`):
+
+| Station | Device |
+|---------|--------|
+| `EnergySwitch-Ibadan-Boluwaji` | `EnergySwitch-pi-001` |
+
+### Polling
+
+TanStack Query refreshes every **30 seconds** (`refetchInterval: 30000`), keeps the last
+successful payload on temporary failures, and clears timers on unmount.
+
+### Status meanings
+
+| Status | Meaning |
+|--------|---------|
+| ONLINE | Heartbeat within ~90s |
+| DELAYED | Heartbeat 91–180s old |
+| OFFLINE | Heartbeat older than 180s |
+| NEVER_CONNECTED | No heartbeat yet |
+| UNKNOWN / API error | Show warning — do not flash red offline on first load |
+
+Pi connectivity is independent of pump sales.
+
+### Local startup
+
+```bash
+cd ui
+cp .env.example .env.local   # set VITE_API_BASE_URL (local) + VITE_EDGE_API_BASE_URL (DigitalOcean)
+npm install
+npm run dev
+# open http://localhost:5173
+```
+
+### CORS
+
+Prefer empty `VITE_EDGE_API_BASE_URL` so the browser never calls DigitalOcean cross-origin.
+Nginx/Vite proxy `/api/devices` instead. Do not use `mode: "no-cors"` as a workaround.
+
+### HTTP vs HTTPS
+
+Plain HTTP is fine while the dashboard also runs on HTTP. When the UI is served over HTTPS,
+the API must be HTTPS too or the browser will block mixed content.
+
+### Prefer
+
+Keep using the DigitalOcean HTTPS API from production builds; never put DB/MQTT passwords in the frontend.

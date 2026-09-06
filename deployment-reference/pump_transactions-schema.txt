@@ -1,0 +1,18 @@
+                                                   Table "public.pump_transactions"
+     Column      |           Type           | Collation | Nullable |   Default   | Storage  | Compression | Stats target | Description 
+-----------------+--------------------------+-----------+----------+-------------+----------+-------------+--------------+-------------
+ id              | text                     |           | not null |             | extended |             |              | 
+ station_id      | text                     |           | not null |             | extended |             |              | 
+ pump_id         | text                     |           | not null |             | extended |             |              | 
+ nozzle_id       | text                     |           |          |             | extended |             |              | 
+ product         | text                     |           |          |             | extended |             |              | 
+ volume_liters   | numeric(12,2)            |           |          |             | main     |             |              | 
+ amount          | numeric(12,2)            |           |          |             | main     |             |              | 
+ currency        | text                     |           |          | 'NGN'::text | extended |             |              | 
+ price_per_liter | numeric(12,2)            |           |          |             | main     |             |              | 
+ raw_frame       | text                     |           |          |             | extended |             |              | 
+ status          | text                     |           |          |             | extended |             |              | 
+ source_topic    | text                     |           |          |             | extended |             |              | 
+ received_at     | timestamp with time zone |           |          | now()       | plain    |             |              | 
+Indexes:
+    "pump_transactions_pkey" PRIMARY KEY, btree (id)

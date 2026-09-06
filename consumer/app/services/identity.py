@@ -1,0 +1,84 @@
+"""Resolve MQTT external stationId / pumpId to internal catalog UUIDs.
+
+Never rewrites the external identifiers stored on pump_transactions.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+from uuid import UUID
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_station_uuid(cur, mqtt_station_id: str) -> Optional[UUID]:
+    """Lookup order: mqtt_station_id → mqtt_identity_map → station_code (legacy)."""
+    text = (mqtt_station_id or "").strip()
+    if not text:
+        return None
+    cur.execute(
+        """
+        SELECT id FROM stations WHERE mqtt_station_id = %s
+        LIMIT 1
+        """,
+        (text,),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        SELECT internal_id FROM mqtt_identity_map
+        WHERE entity_type = 'station' AND mqtt_external_id = %s
+        LIMIT 1
+        """,
+        (text,),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        SELECT id FROM stations WHERE station_code = %s
+        LIMIT 1
+        """,
+        (text,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def resolve_pump_uuid(cur, station_uuid: UUID, mqtt_pump_id: str) -> Optional[UUID]:
+    text = (mqtt_pump_id or "").strip()
+    if not text or station_uuid is None:
+        return None
+    cur.execute(
+        """
+        SELECT id FROM pumps
+        WHERE station_id = %s
+          AND (mqtt_pump_id = %s OR pump_code = %s)
+        LIMIT 1
+        """,
+        (str(station_uuid), text, text),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        SELECT m.internal_id
+        FROM mqtt_identity_map m
+        JOIN pumps p ON p.id = m.internal_id
+        WHERE m.entity_type = 'pump'
+          AND m.mqtt_external_id = %s
+          AND p.station_id = %s
+        LIMIT 1
+        """,
+        (text, str(station_uuid)),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None

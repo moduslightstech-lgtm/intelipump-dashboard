@@ -13,4 +13,6 @@ public interface NozzleRepository extends JpaRepository<Nozzle, UUID> {
     List<Nozzle> findByPumpId(UUID pumpId);
 
     List<Nozzle> findByStationIdAndActive(UUID stationId, boolean active);
+
+    java.util.Optional<Nozzle> findByPumpIdAndExternalId(UUID pumpId, String externalId);
 }

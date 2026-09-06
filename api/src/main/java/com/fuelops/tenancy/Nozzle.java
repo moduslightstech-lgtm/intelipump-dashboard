@@ -34,6 +34,9 @@ public class Nozzle {
     @Column(nullable = false)
     private boolean active = true;
 
+    @Column(name = "external_id")
+    private String externalId;
+
     @Column(nullable = false)
     private Instant createdAt = Instant.now();
 }

@@ -21,6 +21,13 @@ import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import com.fuelops.tenancy.PumpRepository;
+import com.fuelops.reporting.PumpTransactionRepository;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.Instant;
+import java.util.*;
+
 @RestController
 @RequestMapping("/api/dashboard")
 @RequiredArgsConstructor
@@ -28,10 +35,60 @@ import java.util.stream.Collectors;
 public class DashboardController {
 
     private final StationRepository stationRepository;
+    private final PumpRepository pumpRepository;
+    private final PumpTransactionRepository pumpTransactionRepository;
     private final CanonicalEventRepository canonicalEventRepository;
     private final PaymentEventRepository paymentEventRepository;
     private final ReconciliationResultRepository reconciliationResultRepository;
     private final AlertRepository alertRepository;
+
+    @GetMapping("/summary")
+    @Operation(summary = "Get global dashboard summary metrics")
+    public ResponseEntity<?> summary(@RequestHeader("X-Tenant-Id") UUID tenantId) {
+        var stations = stationRepository.findByTenantId(tenantId);
+        Instant todayStart = java.time.ZonedDateTime.now(java.time.ZoneId.of("Africa/Lagos"))
+                .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+                .toInstant();
+        Instant threshold = Instant.now().minusSeconds(300); // 5 minutes
+
+        int totalStations = stations.size();
+        long onlineStations = stations.stream()
+                .filter(s -> s.getLastSeenAt() != null && s.getLastSeenAt().isAfter(threshold))
+                .count();
+        long offlineStations = totalStations - onlineStations;
+
+        var pumps = pumpRepository.findByTenantId(tenantId);
+        int totalPumps = pumps.size();
+        long onlinePumps = pumps.stream()
+                .filter(p -> p.getLastSeenAt() != null && p.getLastSeenAt().isAfter(threshold))
+                .count();
+
+        long txCount = 0;
+        BigDecimal volume = BigDecimal.ZERO;
+        BigDecimal revenue = BigDecimal.ZERO;
+
+        for (var station : stations) {
+            txCount += pumpTransactionRepository.countByStationIdAndDeviceTimestampAfter(station.getId(), todayStart);
+            volume = volume.add(pumpTransactionRepository.sumVolumeByStationIdAndDeviceTimestampAfter(station.getId(), todayStart));
+            revenue = revenue.add(pumpTransactionRepository.sumAmountByStationIdAndDeviceTimestampAfter(station.getId(), todayStart));
+        }
+
+        long openAlerts = alertRepository.findByTenantIdOrderByTriggeredAtDesc(tenantId).stream()
+                .filter(a -> "OPEN".equals(a.getStatus())).count();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("totalStations", totalStations);
+        response.put("onlineStations", (int) onlineStations);
+        response.put("offlineStations", (int) offlineStations);
+        response.put("totalPumps", totalPumps);
+        response.put("onlinePumps", (int) onlinePumps);
+        response.put("transactionsToday", txCount);
+        response.put("litersToday", volume.setScale(2, RoundingMode.HALF_UP).doubleValue());
+        response.put("revenueToday", revenue.setScale(2, RoundingMode.HALF_UP).doubleValue());
+        response.put("openAlerts", openAlerts);
+
+        return ResponseEntity.ok(response);
+    }
 
     @GetMapping("/overview")
     @Operation(summary = "Executive overview: total liters, revenue, variance, station coverage")

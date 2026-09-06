@@ -1,8 +1,14 @@
 FROM node:20-alpine AS build
 WORKDIR /app
-ARG VITE_API_BASE_URL=http://localhost:8080
+# Live DigitalOcean cloud API (devices / sales / SSE) — ends with /api
+ARG VITE_API_BASE_URL=http://157.230.215.93:8000/api
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-COPY package.json .
+# Local FastAPI auth/admin/twin (empty = same-origin via gateway Nginx)
+ARG VITE_APP_API_BASE_URL=
+ENV VITE_APP_API_BASE_URL=$VITE_APP_API_BASE_URL
+ARG VITE_USE_MOCK_DATA=false
+ENV VITE_USE_MOCK_DATA=$VITE_USE_MOCK_DATA
+COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
 RUN npm run build

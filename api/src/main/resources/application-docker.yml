@@ -6,7 +6,7 @@ spring:
 
 fuelops:
   seed:
-    auto-run: true
+    auto-run: false
 
 logging:
   level:

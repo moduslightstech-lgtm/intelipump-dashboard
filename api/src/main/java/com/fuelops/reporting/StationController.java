@@ -17,6 +17,8 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.*;
 
@@ -37,22 +39,155 @@ public class StationController {
     private final AdjustmentEventRepository adjustmentEventRepository;
     private final CanonicalEventRepository canonicalEventRepository;
     private final PaymentEventRepository paymentEventRepository;
+    private final PumpTransactionRepository pumpTransactionRepository;
+    private final AlertRepository alertRepository;
 
     @GetMapping
     @Operation(summary = "List all stations for tenant")
     public ResponseEntity<?> listStations(@RequestHeader("X-Tenant-Id") UUID tenantId) {
         var stations = stationRepository.findByTenantId(tenantId);
         List<Map<String, Object>> result = new ArrayList<>();
+
+        Instant todayStart = java.time.ZonedDateTime.now(java.time.ZoneId.of("Africa/Lagos"))
+                .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+                .toInstant();
+
+        Instant pumpThreshold = Instant.now().minusSeconds(300); // 5 minutes
+
         for (var station : stations) {
             Map<String, Object> s = new LinkedHashMap<>();
-            s.put("id", station.getId());
+            s.put("id", station.getId()); // Internal UUID
+            s.put("stationId", station.getExternalId() != null ? station.getExternalId() : station.getId().toString());
             s.put("name", station.getName());
-            s.put("location", station.getLocation());
-            s.put("timezone", station.getTimezone());
-            s.put("active", station.isActive());
-            s.put("tankCount", tankRepository.findByStationId(station.getId()).size());
-            s.put("pumpCount", pumpRepository.findByStationId(station.getId()).size());
+
+            boolean isOnline = station.getLastSeenAt() != null && station.getLastSeenAt().isAfter(pumpThreshold);
+            s.put("status", isOnline ? "ONLINE" : "OFFLINE");
+            s.put("lastSeenAt", station.getLastSeenAt() != null ? station.getLastSeenAt().toString() : null);
+
+            var pumps = pumpRepository.findByStationId(station.getId());
+            s.put("pumpCount", pumps.size());
+
+            long onlinePumps = pumps.stream()
+                    .filter(p -> p.getLastSeenAt() != null && p.getLastSeenAt().isAfter(pumpThreshold))
+                    .count();
+            s.put("onlinePumpCount", (int) onlinePumps);
+
+            s.put("todayTransactionCount", pumpTransactionRepository.countByStationIdAndDeviceTimestampAfter(station.getId(), todayStart));
+
+            BigDecimal todayVol = pumpTransactionRepository.sumVolumeByStationIdAndDeviceTimestampAfter(station.getId(), todayStart);
+            s.put("todayVolumeLiters", todayVol.setScale(2, RoundingMode.HALF_UP).doubleValue());
+
+            BigDecimal todayRev = pumpTransactionRepository.sumAmountByStationIdAndDeviceTimestampAfter(station.getId(), todayStart);
+            s.put("todayRevenue", todayRev.setScale(2, RoundingMode.HALF_UP).doubleValue());
+
             result.add(s);
+        }
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/{stationId}/overview")
+    @Operation(summary = "Get overview metrics for a station")
+    public ResponseEntity<?> getOverview(@PathVariable UUID stationId) {
+        Station station = stationRepository.findById(stationId).orElseThrow();
+
+        Instant todayStart = java.time.ZonedDateTime.now(java.time.ZoneId.of("Africa/Lagos"))
+                .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+                .toInstant();
+        Instant threshold = Instant.now().minusSeconds(300); // 5 minutes
+
+        boolean isOnline = station.getLastSeenAt() != null && station.getLastSeenAt().isAfter(threshold);
+        var pumps = pumpRepository.findByStationId(stationId);
+        long pumpsOnline = pumps.stream()
+                .filter(p -> p.getLastSeenAt() != null && p.getLastSeenAt().isAfter(threshold))
+                .count();
+        long pumpsOffline = pumps.size() - pumpsOnline;
+
+        long txCount = pumpTransactionRepository.countByStationIdAndDeviceTimestampAfter(stationId, todayStart);
+        BigDecimal volume = pumpTransactionRepository.sumVolumeByStationIdAndDeviceTimestampAfter(stationId, todayStart);
+        BigDecimal revenue = pumpTransactionRepository.sumAmountByStationIdAndDeviceTimestampAfter(stationId, todayStart);
+
+        double avgSale = txCount > 0 ? revenue.divide(BigDecimal.valueOf(txCount), 2, RoundingMode.HALF_UP).doubleValue() : 0.0;
+        double avgVol = txCount > 0 ? volume.divide(BigDecimal.valueOf(txCount), 2, RoundingMode.HALF_UP).doubleValue() : 0.0;
+
+        long activeAlerts = alertRepository.findByStationIdOrderByTriggeredAtDesc(stationId).stream()
+                .filter(a -> "OPEN".equals(a.getStatus()))
+                .count();
+
+        List<PumpTransaction> recentTx = pumpTransactionRepository.findTop10ByStationIdOrderByDeviceTimestampDesc(stationId);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("stationId", station.getExternalId() != null ? station.getExternalId() : station.getId().toString());
+        response.put("id", station.getId().toString());
+        response.put("name", station.getName());
+        response.put("location", station.getLocation());
+        response.put("timezone", station.getTimezone());
+        response.put("status", isOnline ? "ONLINE" : "OFFLINE");
+        response.put("lastSeenAt", station.getLastSeenAt() != null ? station.getLastSeenAt().toString() : null);
+        response.put("todayTransactionCount", txCount);
+        response.put("todayVolumeLiters", volume.setScale(2, RoundingMode.HALF_UP).doubleValue());
+        response.put("todayRevenue", revenue.setScale(2, RoundingMode.HALF_UP).doubleValue());
+        response.put("averageTransactionAmount", avgSale);
+        response.put("averageLitersPerTransaction", avgVol);
+        response.put("pumpsOnline", (int) pumpsOnline);
+        response.put("pumpsOffline", (int) pumpsOffline);
+        response.put("activeAlertsCount", (int) activeAlerts);
+        response.put("recentTransactions", recentTx);
+
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/{stationId}/pumps")
+    @Operation(summary = "Get pumps list for a station")
+    public ResponseEntity<?> getPumps(@PathVariable UUID stationId) {
+        var pumps = pumpRepository.findByStationId(stationId);
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        Instant todayStart = java.time.ZonedDateTime.now(java.time.ZoneId.of("Africa/Lagos"))
+                .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+                .toInstant();
+        Instant threshold = Instant.now().minusSeconds(300); // 5 minutes
+
+        for (var pump : pumps) {
+            Map<String, Object> p = new LinkedHashMap<>();
+            p.put("id", pump.getId().toString());
+            p.put("pumpId", pump.getExternalId() != null ? pump.getExternalId() : pump.getId().toString());
+            p.put("label", pump.getLabel());
+
+            boolean isOnline = pump.getLastSeenAt() != null && pump.getLastSeenAt().isAfter(threshold);
+            String status = "OFFLINE";
+            if (isOnline) {
+                status = pump.getStatus() != null ? pump.getStatus() : "IDLE";
+            }
+            p.put("status", status);
+            p.put("lastSeenAt", pump.getLastSeenAt() != null ? pump.getLastSeenAt().toString() : null);
+
+            long txCount = pumpTransactionRepository.countByPumpIdAndDeviceTimestampAfter(pump.getId(), todayStart);
+            BigDecimal vol = pumpTransactionRepository.sumVolumeByPumpIdAndDeviceTimestampAfter(pump.getId(), todayStart);
+            BigDecimal rev = pumpTransactionRepository.sumAmountByPumpIdAndDeviceTimestampAfter(pump.getId(), todayStart);
+
+            p.put("todayTransactionCount", txCount);
+            p.put("todayVolumeLiters", vol.setScale(2, RoundingMode.HALF_UP).doubleValue());
+            p.put("todayRevenue", rev.setScale(2, RoundingMode.HALF_UP).doubleValue());
+
+            List<PumpTransaction> txList = pumpTransactionRepository.findTop10ByStationIdOrderByDeviceTimestampDesc(stationId);
+            PumpTransaction lastTx = txList.stream()
+                    .filter(t -> t.getPumpId().equals(pump.getId()))
+                    .findFirst()
+                    .orElse(null);
+
+            if (lastTx != null) {
+                Map<String, Object> lt = new LinkedHashMap<>();
+                lt.put("transactionId", lastTx.getId());
+                lt.put("volumeLiters", lastTx.getVolumeLiters().doubleValue());
+                lt.put("amount", lastTx.getAmount().doubleValue());
+                lt.put("product", lastTx.getProduct());
+                lt.put("timestamp", lastTx.getDeviceTimestamp().toString());
+                p.put("lastTransaction", lt);
+            } else {
+                p.put("lastTransaction", null);
+            }
+
+            result.add(p);
         }
         return ResponseEntity.ok(result);
     }

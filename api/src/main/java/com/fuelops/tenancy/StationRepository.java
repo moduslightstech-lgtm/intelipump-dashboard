@@ -11,4 +11,6 @@ public interface StationRepository extends JpaRepository<Station, UUID> {
     List<Station> findByTenantId(UUID tenantId);
 
     List<Station> findByTenantIdAndActive(UUID tenantId, boolean active);
+
+    java.util.Optional<Station> findByTenantIdAndExternalId(UUID tenantId, String externalId);
 }

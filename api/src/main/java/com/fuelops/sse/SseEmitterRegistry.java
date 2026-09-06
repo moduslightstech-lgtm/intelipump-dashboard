@@ -35,13 +35,17 @@ public class SseEmitterRegistry {
     }
 
     public void broadcast(UUID stationId, Object payload) {
+        broadcast(stationId, "twin-update", payload);
+    }
+
+    public void broadcast(UUID stationId, String eventName, Object payload) {
         List<SseEmitter> list = emitters.getOrDefault(stationId, List.of());
         List<SseEmitter> dead = new ArrayList<>();
 
         for (SseEmitter emitter : list) {
             try {
                 emitter.send(SseEmitter.event()
-                        .name("twin-update")
+                        .name(eventName)
                         .data(payload));
             } catch (IOException e) {
                 dead.add(emitter);

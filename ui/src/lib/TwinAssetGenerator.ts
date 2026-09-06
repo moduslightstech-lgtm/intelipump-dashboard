@@ -172,4 +172,93 @@ export class TwinAssetGenerator {
 
         return root;
     }
+
+    /** Full fallback petrol-station environment (no GLB required). */
+    static buildDemoStation(scene: Scene): void {
+        const asphalt = new StandardMaterial("demoAsphalt", scene);
+        asphalt.diffuseColor = new Color3(0.12, 0.13, 0.15);
+        const ground = MeshBuilder.CreateGround("Forecourt", { width: 40, height: 28 }, scene);
+        ground.material = asphalt;
+        ground.receiveShadows = true;
+
+        const roadMat = new StandardMaterial("demoRoad", scene);
+        roadMat.diffuseColor = new Color3(0.18, 0.18, 0.2);
+        const road = MeshBuilder.CreateGround("Road", { width: 40, height: 6 }, scene);
+        road.position.z = 12;
+        road.material = roadMat;
+
+        const markMat = new StandardMaterial("demoMark", scene);
+        markMat.emissiveColor = new Color3(0.9, 0.75, 0.2);
+        markMat.disableLighting = true;
+        const entrance = MeshBuilder.CreateGround("Entrance", { width: 4, height: 1.2 }, scene);
+        entrance.position.set(-8, 0.02, 12);
+        entrance.material = markMat;
+        const exit = MeshBuilder.CreateGround("Exit", { width: 4, height: 1.2 }, scene);
+        exit.position.set(8, 0.02, 12);
+        exit.material = markMat;
+
+        const canopyMat = new StandardMaterial("demoCanopy", scene);
+        canopyMat.diffuseColor = new Color3(0.75, 0.15, 0.12);
+        const canopy = MeshBuilder.CreateBox("Canopy", { width: 22, height: 0.4, depth: 10 }, scene);
+        canopy.position.set(0, 5.2, 2);
+        canopy.material = canopyMat;
+
+        const pillarMat = new StandardMaterial("demoPillar", scene);
+        pillarMat.diffuseColor = new Color3(0.7, 0.7, 0.72);
+        for (const [x, z] of [
+            [-9, -1],
+            [9, -1],
+            [-9, 5],
+            [9, 5],
+        ] as const) {
+            const p = MeshBuilder.CreateCylinder(`Pillar_${x}_${z}`, { height: 5, diameter: 0.45 }, scene);
+            p.position.set(x, 2.5, z);
+            p.material = pillarMat;
+        }
+
+        const officeMat = new StandardMaterial("demoOffice", scene);
+        officeMat.diffuseColor = new Color3(0.22, 0.28, 0.35);
+        const office = MeshBuilder.CreateBox("Office", { width: 8, height: 4, depth: 5 }, scene);
+        office.position.set(0, 2, -9);
+        office.material = officeMat;
+
+        const windowMat = new StandardMaterial("demoWindow", scene);
+        windowMat.emissiveColor = new Color3(0.4, 0.7, 0.95);
+        windowMat.disableLighting = true;
+        const win = MeshBuilder.CreatePlane("OfficeWindow", { width: 3, height: 1.4 }, scene);
+        win.position.set(0, 2.2, -6.45);
+        win.material = windowMat;
+
+        const gwMat = new StandardMaterial("demoGateway", scene);
+        gwMat.diffuseColor = new Color3(0.1, 0.12, 0.14);
+        gwMat.emissiveColor = new Color3(0.05, 0.25, 0.1);
+        const gateway = MeshBuilder.CreateBox("Gateway", { width: 0.8, height: 1.6, depth: 0.5 }, scene);
+        gateway.position.set(5.5, 0.8, -7);
+        gateway.material = gwMat;
+        const ant = MeshBuilder.CreateCylinder("GatewayAntenna", { height: 1.2, diameter: 0.08 }, scene);
+        ant.position.set(5.5, 2.2, -7);
+        ant.material = pillarMat;
+
+        const tank1 = TwinAssetGenerator.createTank("Tank_T1", scene);
+        tank1.position = new Vector3(-6, 0, -4);
+        tank1.scaling = new Vector3(0.45, 0.45, 0.45);
+        const tank2 = TwinAssetGenerator.createTank("Tank_T2", scene);
+        tank2.position = new Vector3(6, 0, -4);
+        tank2.scaling = new Vector3(0.45, 0.45, 0.45);
+
+        const positions = [
+            [-7.5, 3],
+            [-2.5, 3],
+            [2.5, 3],
+            [7.5, 3],
+        ] as const;
+        positions.forEach(([x, z], i) => {
+            const pump = TwinAssetGenerator.createPump(`Pump_P${i + 1}`, scene);
+            pump.position = new Vector3(x, 0, z);
+            // Alias names MeshRegistry / GLB animations expect
+            const alias = MeshBuilder.CreateBox(`pump_${i + 1}`, { width: 0.01, height: 0.01, depth: 0.01 }, scene);
+            alias.isVisible = false;
+            alias.parent = pump;
+        });
+    }
 }

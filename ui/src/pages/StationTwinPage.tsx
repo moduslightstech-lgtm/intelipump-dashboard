@@ -1,47 +1,46 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { useAuth } from '../context/AuthContext'
-import { getStations } from '../api/client'
+import { getStationOverview, getStationPumps } from '../api/client'
 import BabylonStationTwin from '../components/BabylonStationTwin'
 import { SimState } from '../types/simulation'
 
-interface TankState {
-    label: string; productId: string; capacityLiters: number
-    reportedLiters: number; expectedLiters: number
-    deltaLiters: number; deltaPercent: number; fillPercent: number
+interface TransactionItem {
+    transactionId: string
+    volumeLiters: number
+    amount: number
+    product: string
+    timestamp: string
+    pumpId: string
+    nozzleId: string
+    status: string
 }
+
 interface PumpState {
-    label: string; active: boolean; transactionCount: number; totalLiters: number
-    nozzleCount: number; lastNozzleId?: string
+    id: string // UUID
+    pumpId: string // External ID
+    label: string
+    status: string
+    lastSeenAt?: string
+    todayTransactionCount: number
+    todayVolumeLiters: number
+    todayRevenue: number
 }
-interface TwinData {
-    stationId: string; stationName: string; snapshotTime: string
-    state: string
-    tankStates: Record<string, TankState>
-    pumpStates: Record<string, PumpState>
-    lastDispenseAt?: string; lastTankReadingAt?: string; lastPaymentAt?: string
+
+interface TankState {
+    id: string
+    label: string
+    capacity: number
+    measuredLiters: number | null // null if no physical probe
+    estimatedLiters: number // Capacity - dispensed
+    percent: number
 }
 
 const STATE_COLORS: Record<string, { bg: string; text: string; dot: string }> = {
     ONLINE: { bg: 'bg-green-900/30', text: 'text-green-400', dot: 'bg-green-400' },
+    OFFLINE: { bg: 'bg-red-900/30', text: 'text-red-400', dot: 'bg-red-400' },
     DEGRADED: { bg: 'bg-amber-900/30', text: 'text-amber-400', dot: 'bg-amber-400' },
-    DATA_GAP: { bg: 'bg-slate-700/50', text: 'text-slate-400', dot: 'bg-slate-400' },
-    RECONCILING: { bg: 'bg-blue-900/30', text: 'text-blue-400', dot: 'bg-blue-400' },
-    ALERTING: { bg: 'bg-red-900/30', text: 'text-red-400', dot: 'bg-red-400' },
-}
-
-const fresh = (t?: string, isStaleWarning: boolean = false) => {
-    if (!t) return { label: 'Never', cls: 'text-slate-500', stale: true }
-    const secs = Math.floor((Date.now() - new Date(t).getTime()) / 1000)
-    if (secs < 30 && isStaleWarning) return { label: 'Just now', cls: 'text-green-400', stale: false }
-    if (secs >= 30 && isStaleWarning) return { label: `${secs}s ago`, cls: 'text-amber-400', stale: true }
-    
-    // Normal format
-    const mins = Math.floor(secs / 60)
-    if (mins < 2) return { label: 'Just now', cls: 'text-green-400', stale: false }
-    if (mins < 60) return { label: `${mins}m ago`, cls: 'text-green-400', stale: false }
-    return { label: `${Math.floor(mins / 60)}h ago`, cls: 'text-red-400', stale: true }
 }
 
 export default function StationTwinPage() {
@@ -49,138 +48,336 @@ export default function StationTwinPage() {
     const navigate = useNavigate()
     const { user } = useAuth()
     const tenantId = user?.tenantId
-    const [twin, setTwin] = useState<TwinData | null>(null)
+
+    const [stationName, setStationName] = useState('')
+    const [stationExternalId, setStationExternalId] = useState('')
+    const [stationStatus, setStationStatus] = useState('ONLINE')
+    const [stationLastSeen, setStationLastSeen] = useState<string | null>(null)
+    const [activeAlertsCount, setActiveAlertsCount] = useState(0)
+
+    const [todayTransactions, setTodayTransactions] = useState(0)
+    const [todayVolume, setTodayVolume] = useState(0)
+    const [todayRevenue, setTodayRevenue] = useState(0)
+    const [avgSale, setAvgSale] = useState(0)
+    const [avgVol, setAvgVol] = useState(0)
+
+    const [pumps, setPumps] = useState<PumpState[]>([])
+    const [tank, setTank] = useState<TankState>({
+        id: 'T1',
+        label: 'PMS Tank 1',
+        capacity: 33000,
+        measuredLiters: null,
+        estimatedLiters: 33000,
+        percent: 100
+    })
+
+    const [recentTx, setRecentTx] = useState<TransactionItem[]>([])
     const [loading, setLoading] = useState(true)
     const [connected, setConnected] = useState(false)
+    const [reconnecting, setReconnecting] = useState(false)
     const [activePumpId, setActivePumpId] = useState<string | null>(null)
-    const [stationName, setStationName] = useState('')
-    
-    // --- Simulation State ---
-    const [sim, setSim] = useState<SimState>({
-        tank: { 
-            id: 'pms', 
-            label: 'Tank 1 (PMS)', 
-            capacity: 33000, 
-            currentLiters: 28450.5, 
-            percent: 86.2,
-            startLiters: 28450.5
-        },
-        pumps: [
-            { id: 'pump_1', label: 'Pump 1', transactions: 14, totalLiters: 1240.2, status: 'IDLE', currentDispenseRate: 0 },
-            { id: 'pump_2', label: 'Pump 2', transactions: 9, totalLiters: 850.8, status: 'IDLE', currentDispenseRate: 0 }
-        ]
-    });
 
     const esRef = useRef<EventSource | null>(null)
 
-    // --- Simulation Loop ---
-    useEffect(() => {
-        const interval = setInterval(() => {
-            setSim(prev => {
-                const newSim = { ...prev };
-                const dispensingPump = newSim.pumps.find(p => p.status === 'DISPENSING');
+    // Map external pump ID to Babylon visualizer pump IDs ("pump_1" or "pump_2")
+    const mapPumpIdToSimId = (extId: string) => {
+        if (extId.toLowerCase().includes('pump-02') || extId.includes('2')) return 'pump_2';
+        return 'pump_1';
+    }
 
-                if (dispensingPump) {
-                    // Update current dispense
-                    const dispenseAmount = 0.5 + Math.random() * 0.5; // Liters per tick
-                    dispensingPump.totalLiters += dispenseAmount;
-                    newSim.tank.currentLiters -= dispenseAmount;
-                    newSim.tank.percent = (newSim.tank.currentLiters / newSim.tank.capacity) * 100;
+    const loadSnapshot = async () => {
+        if (!stationId) return
+        try {
+            const [ovRes, pumpsRes] = await Promise.all([
+                getStationOverview(stationId),
+                getStationPumps(stationId)
+            ])
 
-                    // Randomly stop dispensing
-                    if (Math.random() > 0.95) {
-                        console.log(`Simulation: ${dispensingPump.label} finished dispensing.`);
-                        dispensingPump.status = 'IDLE';
-                        dispensingPump.transactions += 1;
-                        setActivePumpId(null);
+            const ov = ovRes.data
+            setStationName(ov.name)
+            setStationExternalId(ov.stationId)
+            setStationStatus(ov.status)
+            setStationLastSeen(ov.lastSeenAt)
+            setTodayTransactions(ov.todayTransactionCount)
+            setTodayVolume(ov.todayVolumeLiters)
+            setTodayRevenue(ov.todayRevenue)
+            setAvgSale(ov.averageTransactionAmount)
+            setAvgVol(ov.averageLitersPerTransaction)
+            setActiveAlertsCount(ov.activeAlertsCount)
+            setRecentTx(ov.recentTransactions || [])
+
+            const pumpList: PumpState[] = pumpsRes.data
+            setPumps(pumpList)
+
+            // Compute tank state: capacity defaults to 33000 L, estimated starts at 33000 minus total volume dispensed
+            const dispensed = pumpList.reduce((acc, p) => acc + p.todayVolumeLiters, 0)
+            setTank(prev => ({
+                ...prev,
+                estimatedLiters: Math.max(0, 33000 - dispensed),
+                percent: Math.max(0, ((33000 - dispensed) / 33000) * 100)
+            }))
+
+            setLoading(false)
+            setReconnecting(false)
+        } catch (err) {
+            console.error("Failed to load station snapshot", err)
+            setLoading(false)
+        }
+    }
+
+    const connectSSE = () => {
+        if (!stationId) return
+        if (esRef.current) {
+            esRef.current.close()
+        }
+
+        const baseUrl = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080'
+        const sseUrl = `${baseUrl}/api/stations/${stationId}/stream?tenantId=${tenantId}`
+        
+        console.log("Connecting to SSE stream:", sseUrl)
+        const es = new EventSource(sseUrl)
+        esRef.current = es
+
+        es.onopen = () => {
+            console.log("SSE Stream Connected")
+            setConnected(true)
+            setReconnecting(false)
+            // Reload snapshot in case we missed events while offline
+            loadSnapshot()
+        }
+
+        es.onerror = () => {
+            console.warn("SSE Stream Disconnected. Retrying in 5 seconds...")
+            setConnected(false)
+            setReconnecting(true)
+            es.close()
+            setTimeout(connectSSE, 5000)
+        }
+
+        // Listen for new transactions
+        es.addEventListener('transaction-completed', (e: any) => {
+            try {
+                const txData: TransactionItem = JSON.parse(e.data)
+                console.log("SSE: transaction-completed received", txData)
+
+                // Highlight pump briefly
+                const simPumpId = mapPumpIdToSimId(txData.pumpId)
+                setActivePumpId(simPumpId === 'pump_2' ? '2' : '1')
+                setTimeout(() => setActivePumpId(null), 5000)
+
+                // Prepend transaction to recent list
+                setRecentTx(prev => [txData, ...prev.slice(0, 9)])
+
+                // Update counters
+                setTodayTransactions(prev => prev + 1)
+                setTodayVolume(prev => prev + txData.volumeLiters)
+                setTodayRevenue(prev => prev + txData.amount)
+
+                // Update specific pump data in state
+                setPumps(prev => prev.map(p => {
+                    if (p.pumpId === txData.pumpId) {
+                        return {
+                            ...p,
+                            todayTransactionCount: p.todayTransactionCount + 1,
+                            todayVolumeLiters: p.todayVolumeLiters + txData.volumeLiters,
+                            todayRevenue: p.todayRevenue + txData.amount
+                        }
                     }
-                } else {
-                    // Randomly start dispensing on a pump
-                    if (Math.random() > 0.90) {
-                        const pumpIndex = Math.floor(Math.random() * newSim.pumps.length);
-                        const selectedPump = newSim.pumps[pumpIndex];
-                        console.log(`Simulation: ${selectedPump.label} started dispensing...`);
-                        selectedPump.status = 'DISPENSING';
-                        setActivePumpId(selectedPump.id === 'pump_1' ? '1' : '2'); // Mapping to Babylon IDs
-                    }
-                }
-                return { ...newSim };
-            });
-        }, 1000);
+                    return p
+                }))
 
-        return () => clearInterval(interval);
-    }, []);
+                // Deplete estimated tank balance
+                setTank(prev => {
+                    const newEst = Math.max(0, prev.estimatedLiters - txData.volumeLiters)
+                    return {
+                        ...prev,
+                        estimatedLiters: newEst,
+                        percent: (newEst / prev.capacity) * 100
+                    }
+                })
+
+                setStationLastSeen(new Date().toISOString())
+            } catch (err) {
+                console.error("Error handling transaction sse event", err)
+            }
+        })
+
+        // Listen for pump status transitions
+        es.addEventListener('pump-status', (e: any) => {
+            try {
+                const statusData = JSON.parse(e.data)
+                console.log("SSE: pump-status received", statusData)
+                
+                setPumps(prev => prev.map(p => {
+                    if (p.pumpId === statusData.pumpId) {
+                        return {
+                            ...p,
+                            status: statusData.status
+                        }
+                    }
+                    return p
+                }))
+            } catch (err) {
+                console.error("Error handling pump status sse event", err)
+            }
+        })
+
+        // Listen for tank probe readings
+        es.addEventListener('tank-reading', (e: any) => {
+            try {
+                const readingData = JSON.parse(e.data)
+                console.log("SSE: tank-reading received", readingData)
+                setTank(prev => ({
+                    ...prev,
+                    measuredLiters: readingData.reportedLiters,
+                    percent: (readingData.reportedLiters / prev.capacity) * 100
+                }))
+            } catch (err) {
+                console.error("Error handling tank reading sse event", err)
+            }
+        })
+
+        // Listen for heartbeats
+        es.addEventListener('station-heartbeat', (e: any) => {
+            try {
+                const hb = JSON.parse(e.data)
+                console.log("SSE: station-heartbeat received", hb)
+                setStationStatus(hb.status)
+                setStationLastSeen(hb.timestamp || new Date().toISOString())
+            } catch (err) {
+                console.error("Error handling heartbeat sse event", err)
+            }
+        })
+
+        // Listen for new alerts
+        es.addEventListener('alert-created', (e: any) => {
+            try {
+                console.log("SSE: alert-created received", e.data)
+                setActiveAlertsCount(prev => prev + 1)
+            } catch (err) {
+                console.error("Error handling alert sse event", err)
+            }
+        })
+    }
 
     useEffect(() => {
         if (!stationId) return
+        setLoading(true)
+        loadSnapshot().then(() => connectSSE())
 
-        // Load station name
-        getStations().then(r => {
-            const st = r.data.find((s: any) => s.id === stationId)
-            if (st) setStationName(st.name)
-        })
-
-        setLoading(false); // Skip SSE loading for local simulation
-        setConnected(true);
+        return () => {
+            if (esRef.current) {
+                esRef.current.close()
+            }
+        }
     }, [stationId, tenantId])
 
-    if (loading) return (
-        <div className="flex items-center justify-center h-full">
-            <div className="text-center space-y-3">
-                <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto" />
-                <p className="text-slate-400 text-sm">Connecting to live twin…</p>
-            </div>
-        </div>
-    )
+    const fmtNaira = (val: number) => {
+        return new Intl.NumberFormat('en-NG', {
+            style: 'currency',
+            currency: 'NGN',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(val);
+    }
 
+    if (loading) return <div className="p-6 text-slate-400">Connecting to station stream...</div>
 
-    const stateStyle = STATE_COLORS.ONLINE
+    const stateStyle = STATE_COLORS[stationStatus] || STATE_COLORS.ONLINE
 
-    const pumpChartData = sim.pumps.map((p) => ({
+    // Build SimState payload for BabylonJS 3D visualizer
+    const simPayload: SimState = {
+        tank: {
+            id: 'pms',
+            label: tank.label,
+            capacity: tank.capacity,
+            currentLiters: tank.measuredLiters !== null ? tank.measuredLiters : tank.estimatedLiters,
+            percent: tank.percent,
+            startLiters: tank.capacity
+        },
+        pumps: [
+            {
+                id: 'pump_1',
+                label: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_1')?.label || 'Pump 1',
+                transactions: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_1')?.todayTransactionCount || 0,
+                totalLiters: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_1')?.todayVolumeLiters || 0,
+                status: (pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_1')?.status === 'DISPENSING' ? 'DISPENSING' : 'IDLE') as 'IDLE' | 'DISPENSING',
+                currentDispenseRate: 0
+            },
+            {
+                id: 'pump_2',
+                label: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_2')?.label || 'Pump 2',
+                transactions: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_2')?.todayTransactionCount || 0,
+                totalLiters: pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_2')?.todayVolumeLiters || 0,
+                status: (pumps.find(p => mapPumpIdToSimId(p.pumpId) === 'pump_2')?.status === 'DISPENSING' ? 'DISPENSING' : 'IDLE') as 'IDLE' | 'DISPENSING',
+                currentDispenseRate: 0
+            }
+        ]
+    }
+
+    const pumpChartData = simPayload.pumps.map((p) => ({
         name: p.label, liters: Number(p.totalLiters), txns: p.transactions
     }))
 
     return (
-        <div className="p-6 space-y-5">
+        <div className="p-6 space-y-6 bg-slate-950 min-h-screen text-slate-100">
             {/* Header */}
-            <div className="flex items-start justify-between flex-wrap gap-3">
+            <div className="flex items-start justify-between flex-wrap gap-3 border-b border-slate-900 pb-4">
                 <div>
-                    <div className="flex items-center gap-3 mb-1 flex-wrap">
-                        <div className={`flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full ${connected ? 'bg-green-900/30 text-green-400' : 'bg-slate-700 text-slate-400'}`}>
-                            <div className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
-                            {connected ? 'Live' : 'Reconnecting…'}
+                    <div className="flex items-center gap-3 mb-2 flex-wrap">
+                        <div className={`flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full font-bold border ${connected ? 'bg-green-950 text-green-400 border-green-500/20' : 'bg-red-950 text-red-400 border-red-500/20 animate-pulse'}`}>
+                            <div className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-400' : 'bg-red-400'}`} />
+                            {connected ? 'Live Stream Connected' : reconnecting ? 'Reconnecting...' : 'Delayed'}
                         </div>
-                        <div className={`flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full font-semibold ${stateStyle.bg} ${stateStyle.text}`}>
+                        <div className={`flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full font-bold border ${stateStyle.bg} ${stateStyle.text} border-slate-800`}>
                             <div className={`w-1.5 h-1.5 rounded-full ${stateStyle.dot}`} />
-                            ONLINE
+                            {stationStatus}
                         </div>
                     </div>
-                    <h1 className="text-2xl font-bold text-white">{stationName || 'Fuel Station'}</h1>
-                    <p className="text-slate-400 text-sm">Digital Twin — live SSE feed</p>
+                    <h1 className="text-2xl font-bold text-white tracking-tight">{stationName}</h1>
+                    <p className="text-slate-500 text-xs">External ID: <span className="font-mono text-slate-400 font-semibold">{stationExternalId}</span> • Last telemetry received: {stationLastSeen ? new Date(stationLastSeen).toLocaleTimeString() : 'Never'}</p>
                 </div>
-                <button onClick={() => navigate(`/stations/${stationId}/reconciliation`)} className="btn-primary">
-                    Reconciliation →
-                </button>
+                <div className="flex gap-2">
+                    <button onClick={() => navigate(`/stations/${stationId}/reconciliation`)} className="btn-secondary">
+                        Reconciliation Reports
+                    </button>
+                </div>
             </div>
 
-            {/* Data freshness */}
-            <div className="grid grid-cols-3 gap-3">
-                {[['Last Dispense', 'Just now'], ['Tank Reading', 'Live'], ['Payment', 'Pending']].map(([label, val]) => {
-                    return (
-                        <div key={label} className="card py-3">
-                            <div className="label-text">{label}</div>
-                            <div className={`text-sm font-semibold text-green-400`}>{val}</div>
-                        </div>
-                    )
-                })}
+            {/* KPI Cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Transactions Today</div>
+                    <div className="text-2xl font-bold text-blue-400 mt-2">{todayTransactions}</div>
+                </div>
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Liters Today</div>
+                    <div className="text-2xl font-bold text-indigo-400 mt-2">{todayVolume.toFixed(2)} L</div>
+                </div>
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Revenue Today</div>
+                    <div className="text-2xl font-bold text-green-400 mt-2 truncate" title={fmtNaira(todayRevenue)}>{fmtNaira(todayRevenue)}</div>
+                </div>
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Average Sale</div>
+                    <div className="text-2xl font-bold text-slate-200 mt-2 truncate" title={fmtNaira(avgSale)}>{fmtNaira(avgSale)}</div>
+                </div>
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Pumps Online</div>
+                    <div className="text-2xl font-bold text-slate-200 mt-2">{pumps.filter(p => p.status !== 'OFFLINE').length} / {pumps.length}</div>
+                </div>
+                <div className="card p-4 bg-slate-900 border-slate-800">
+                    <div className="text-xs text-slate-400 font-medium">Open Alerts</div>
+                    <div className={`text-2xl font-bold mt-2 ${activeAlertsCount > 0 ? 'text-red-400' : 'text-green-400'}`}>{activeAlertsCount}</div>
+                </div>
             </div>
 
-            {/* 3D Digital Twin */}
+            {/* 3D Digital Twin Visualizer */}
             <div className="mb-6">
                 <BabylonStationTwin 
                     tenantId={tenantId} 
                     stationId={stationId} 
-                    sim={sim}
+                    sim={simPayload}
                     onDispenseStateChange={(pumpId, active) => {
                         if (active) setActivePumpId(pumpId);
                         else setActivePumpId(null);
@@ -188,98 +385,134 @@ export default function StationTwinPage() {
                 />
             </div>
 
-            {/* Tank cards */}
-            <div>
-                <h2 className="section-title mb-3">Tank Inventory — PMS</h2>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="card space-y-4">
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <div className="flex items-center gap-2">
-                                    <h3 className="font-semibold text-white">{sim.tank.label}</h3>
-                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-900/40 text-green-400 border border-green-500/30 uppercase tracking-wider animate-pulse">
-                                        Live Updating
-                                    </span>
+            {/* Tank Section */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="card p-5 bg-slate-900 border-slate-800 space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="font-bold text-lg text-white">Measured Tank Level</h3>
+                            <span className="text-xs text-slate-500">Physical ATG Probe Telemetry</span>
+                        </div>
+                        <span className={`px-2 py-0.5 text-xs font-semibold rounded-full ${tank.measuredLiters !== null ? 'bg-green-950 text-green-400 border border-green-500/20' : 'bg-slate-950 text-slate-500'}`}>
+                            {tank.measuredLiters !== null ? 'ATG Probe Online' : 'No ATG Probe'}
+                        </span>
+                    </div>
+
+                    {tank.measuredLiters !== null ? (
+                        <div className="space-y-4">
+                            <div className="space-y-1.5">
+                                <div className="flex justify-between text-xs">
+                                    <span className="text-slate-400">Probe Level</span>
+                                    <span className="text-white font-semibold">{tank.percent.toFixed(1)}%</span>
                                 </div>
-                                <p className="text-xs text-slate-400">Cap: {Number(sim.tank.capacity).toLocaleString()}L</p>
+                                <div className="h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                                    <div className="h-full rounded-full transition-all duration-500 bg-green-500"
+                                        style={{ width: `${Math.min(tank.percent, 100)}%` }} />
+                                </div>
                             </div>
-                            <div className="text-right">
-                                <div className={`font-semibold text-sm text-green-400`}>
-                                    {(sim.tank.currentLiters - sim.tank.startLiters).toFixed(2)}L
-                                </div>
-                                <div className="text-xs text-slate-400">Since Start</div>
+                            <div className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg text-center">
+                                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Reported Liters</span>
+                                <span className="text-xl font-bold font-mono text-white">{tank.measuredLiters.toLocaleString()} L</span>
                             </div>
                         </div>
+                    ) : (
+                        <div className="p-8 bg-slate-950/40 border border-slate-850 rounded-lg text-center text-sm text-slate-500 font-medium">
+                            Tank probe not connected
+                        </div>
+                    )}
+                </div>
+
+                <div className="card p-5 bg-slate-900 border-slate-800 space-y-4">
+                    <div>
+                        <h3 className="font-bold text-lg text-white">Estimated Tank Balance</h3>
+                        <span className="text-xs text-slate-500">Calculated from dispenser transaction depletion</span>
+                    </div>
+                    <div className="space-y-4">
                         <div className="space-y-1.5">
                             <div className="flex justify-between text-xs">
-                                <span className="text-slate-400">Fill Level</span>
-                                <span className="text-white font-semibold">{Number(sim.tank.percent).toFixed(1)}%</span>
+                                <span className="text-slate-400">Depletion Percentage</span>
+                                <span className="text-white font-semibold">{((tank.estimatedLiters / tank.capacity) * 100).toFixed(1)}%</span>
                             </div>
-                            <div className="h-2.5 bg-slate-700 rounded-full overflow-hidden">
-                                <div className="h-full rounded-full transition-all duration-500"
-                                    style={{ width: `${Math.min(sim.tank.percent, 100)}%`, background: '#22c55e' }} />
+                            <div className="h-3 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
+                                <div className="h-full rounded-full transition-all duration-500 bg-indigo-500"
+                                    style={{ width: `${Math.min((tank.estimatedLiters / tank.capacity) * 100, 100)}%` }} />
                             </div>
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                            <div className="bg-slate-700/50 rounded-lg p-2.5 border border-blue-500/20">
-                                <div className="text-xs text-slate-400 mb-0.5">Reported (Current)</div>
-                                <div className="text-lg font-bold text-white">{Number(sim.tank.currentLiters).toLocaleString(undefined, { maximumFractionDigits: 2 })}L</div>
-                            </div>
-                            <div className="bg-slate-700/50 rounded-lg p-2.5 border border-slate-600">
-                                <div className="text-xs text-slate-400 mb-0.5">Expected (Start - Dispensed)</div>
-                                <div className="text-lg font-bold text-slate-300">
-                                    {(sim.tank.startLiters - sim.pumps.reduce((acc, p) => acc + (p.totalLiters - (p.id === 'pump_1' ? 1240.2 : 850.8)), 0)).toLocaleString(undefined, { maximumFractionDigits: 2 })}L
-                                </div>
-                            </div>
+                        <div className="p-3 bg-slate-950/60 border border-slate-800/80 rounded-lg text-center">
+                            <span className="text-[10px] text-slate-500 uppercase font-bold tracking-wider block">Estimated balance</span>
+                            <span className="text-xl font-bold font-mono text-indigo-400">{tank.estimatedLiters.toLocaleString(undefined, { maximumFractionDigits: 2 })} L</span>
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* Pump section */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="card">
-                    <h2 className="section-title mb-3">Pump Activity — Today</h2>
-                    <table className="w-full text-sm">
-                        <thead>
-                            <tr className="border-b border-slate-700">
-                                <th className="table-header text-left">Pump</th>
-                                <th className="table-header text-right">Transactions</th>
-                                <th className="table-header text-right">Liters</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {sim.pumps.map((p) => (
-                                <tr key={p.id}
-                                    className={`border-b border-slate-700/50 transition-colors ${activePumpId === (p.id === 'pump_1' ? '1' : '2') ? 'bg-blue-900/40 border-l-2 border-l-blue-500' : 'hover:bg-slate-700/20'}`}>
-                                    <td className="table-cell font-medium flex items-center gap-2">
-                                        {p.label}
-                                        {p.status === 'DISPENSING' && (
-                                            <span className="flex h-2 w-2 relative">
-                                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
-                                                <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
-                                            </span>
-                                        )}
-                                    </td>
-                                    <td className="table-cell text-right text-blue-400 font-semibold">{p.transactions}</td>
-                                    <td className="table-cell text-right font-mono">{Number(p.totalLiters).toFixed(2)}L</td>
+            {/* Pumps Activity Grid & Live Feed */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="card p-5 bg-slate-900 border-slate-800 lg:col-span-2 space-y-4">
+                    <h3 className="text-lg font-bold text-white">Dispenser Telemetry</h3>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm">
+                            <thead>
+                                <tr className="border-b border-slate-800 text-slate-400">
+                                    <th className="pb-2">Pump</th>
+                                    <th className="pb-2">Status</th>
+                                    <th className="pb-2">Last Seen</th>
+                                    <th className="pb-2 text-right">Transactions</th>
+                                    <th className="pb-2 text-right">Volume</th>
+                                    <th className="pb-2 text-right">Revenue</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                            </thead>
+                            <tbody>
+                                {pumps.map(p => (
+                                    <tr key={p.id} 
+                                        className={`border-b border-slate-800/40 transition-colors ${activePumpId === (mapPumpIdToSimId(p.pumpId) === 'pump_1' ? '1' : '2') ? 'bg-blue-900/20 border-l-2 border-l-blue-500' : 'hover:bg-slate-800/20'}`}
+                                    >
+                                        <td className="py-3 font-semibold text-slate-300">{p.label} <span className="text-xs text-slate-500 font-mono">({p.pumpId})</span></td>
+                                        <td className="py-3">
+                                            <span className={`px-2 py-0.5 text-xs font-semibold rounded-full border ${
+                                                p.status === 'DISPENSING' ? 'bg-blue-900/30 text-blue-400 border-blue-500/20 animate-pulse' :
+                                                p.status === 'IDLE' || p.status === 'ONLINE' ? 'bg-green-900/30 text-green-400 border-green-500/20' :
+                                                'bg-slate-950 text-slate-500 border-slate-800'
+                                            }`}>
+                                                {p.status}
+                                            </span>
+                                        </td>
+                                        <td className="py-3 text-slate-400">
+                                            {p.lastSeenAt ? new Date(p.lastSeenAt).toLocaleTimeString() : 'Never'}
+                                        </td>
+                                        <td className="py-3 text-right text-blue-400 font-bold">{p.todayTransactionCount}</td>
+                                        <td className="py-3 text-right font-mono text-slate-300">{p.todayVolumeLiters.toFixed(2)} L</td>
+                                        <td className="py-3 text-right font-mono text-green-400 font-semibold">{fmtNaira(p.todayRevenue)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
-                <div className="card">
-                    <h2 className="section-title mb-3">Volume by Pump</h2>
-                    <ResponsiveContainer width="100%" height={200}>
-                        <BarChart data={pumpChartData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                            <XAxis dataKey="name" tick={{ fill: '#94a3b8', fontSize: 11 }} />
-                            <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} />
-                            <Tooltip contentStyle={{ background: '#1e293b', border: '1px solid #334155', borderRadius: 8 }} />
-                            <Bar dataKey="liters" fill="#3b5bdb" radius={[4, 4, 0, 0]} name="Liters" />
-                        </BarChart>
-                    </ResponsiveContainer>
+                <div className="card p-5 bg-slate-900 border-slate-800 space-y-4">
+                    <h3 className="text-lg font-bold text-white flex items-center justify-between">
+                        Live Transactions
+                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    </h3>
+                    <div className="space-y-3 h-[240px] overflow-y-auto pr-1">
+                        {recentTx.length === 0 ? (
+                            <div className="text-center py-16 text-slate-500 text-sm">Waiting for transactions...</div>
+                        ) : (
+                            recentTx.map(tx => (
+                                <div key={tx.transactionId} className="p-3 bg-slate-950/60 border border-slate-850/80 rounded-lg flex items-center justify-between hover:border-slate-700 transition-colors animate-fadeIn">
+                                    <div className="min-w-0">
+                                        <span className="font-mono text-xs text-white block truncate font-bold">{tx.transactionId}</span>
+                                        <span className="text-[10px] text-slate-500 font-mono block mt-0.5">{tx.pumpId} • {tx.product} • {new Date(tx.timestamp).toLocaleTimeString()}</span>
+                                    </div>
+                                    <div className="text-right flex-shrink-0">
+                                        <span className="font-mono text-green-400 text-sm font-semibold block">{fmtNaira(tx.amount)}</span>
+                                        <span className="text-slate-400 font-mono text-xs block">{tx.volumeLiters.toFixed(2)} L</span>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
                 </div>
             </div>
         </div>

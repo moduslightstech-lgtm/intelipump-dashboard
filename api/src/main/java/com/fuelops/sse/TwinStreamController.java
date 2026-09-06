@@ -22,26 +22,35 @@ public class TwinStreamController {
 
     /**
      * GET /api/stations/{stationId}/twin/stream
-     * Clients connect once; server pushes twin-update events whenever state
-     * changes.
-     * No auth on SSE to keep EventSource simple (JWT can't set headers in
-     * EventSource).
+     * Deprecated path kept for backward compatibility.
      */
     @GetMapping(value = "/{stationId}/twin/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    @Operation(summary = "SSE stream of live twin updates for a station")
+    @Operation(summary = "SSE stream of live twin updates (legacy)")
     public SseEmitter streamTwin(@PathVariable UUID stationId,
-            @RequestHeader(value = "X-Tenant-Id", required = false) UUID headerTenantId,
-            @RequestParam(value = "tenantId", required = false) UUID queryTenantId) {
+                                 @RequestHeader(value = "X-Tenant-Id", required = false) UUID headerTenantId,
+                                 @RequestParam(value = "tenantId", required = false) UUID queryTenantId) {
+        return streamStation(stationId, headerTenantId, queryTenantId);
+    }
+
+    /**
+     * GET /api/stations/{stationId}/stream
+     * Pushes real-time transaction-completed, pump-status, heartbeats, and alerts.
+     */
+    @GetMapping(value = "/{stationId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    @Operation(summary = "SSE stream of live transaction, pump, and alert updates")
+    public SseEmitter streamStation(@PathVariable UUID stationId,
+                                    @RequestHeader(value = "X-Tenant-Id", required = false) UUID headerTenantId,
+                                    @RequestParam(value = "tenantId", required = false) UUID queryTenantId) {
         UUID tenantId = headerTenantId != null ? headerTenantId : queryTenantId;
         SseEmitter emitter = registry.addEmitter(stationId);
 
         // Push current snapshot immediately on connect
         try {
             if (tenantId != null) {
-                var snapshot = twinStateService.computeAndSave(tenantId, stationId);
+                var snapshot = twinStateService.buildSnapshotDto(tenantId, stationId);
                 emitter.send(SseEmitter.event()
                         .name("twin-update")
-                        .data(twinStateService.buildSnapshotDto(tenantId, stationId)));
+                        .data(snapshot));
             }
         } catch (IOException e) {
             emitter.completeWithError(e);

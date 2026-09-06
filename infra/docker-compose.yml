@@ -13,19 +13,10 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fuelops}" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fuelops} -d ${POSTGRES_DB:-fuelops}" ]
       interval: 10s
       timeout: 5s
       retries: 5
-
-  mosquitto:
-    image: eclipse-mosquitto:2.0
-    container_name: fuelops-mosquitto
-    ports:
-      - "1883:1883"
-    volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
-    restart: unless-stopped
 
   api:
     build:
@@ -33,53 +24,35 @@ services:
       dockerfile: Dockerfile
     container_name: fuelops-api
     environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-fuelops}
+      POSTGRES_USER: ${POSTGRES_USER:-fuelops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fuelops_secret}
+      MQTT_HOST: ${MQTT_HOST:-157.230.215.93}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_TOPIC: ${MQTT_TOPIC:-intelipump/#}
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-fuelops}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-fuelops}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-fuelops_secret}
       SPRING_PROFILES_ACTIVE: docker
       JWT_SECRET: ${JWT_SECRET:-fuelops-super-secret-jwt-key-at-least-32-chars}
-      SEED_AUTO_RUN: ${SEED_AUTO_RUN:-true}
-      MQTT_BROKER_URL: tcp://mosquitto:1883
-      MQTT_CLIENT_ID: fuelops-api-subscriber
+      SEED_AUTO_RUN: "false"
+      STATION_OFFLINE_THRESHOLD_SECONDS: ${STATION_OFFLINE_THRESHOLD_SECONDS:-300}
+      PUMP_OFFLINE_THRESHOLD_SECONDS: ${PUMP_OFFLINE_THRESHOLD_SECONDS:-300}
     ports:
       - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
-      mosquitto:
-        condition: service_started
     healthcheck:
       test: [ "CMD-SHELL", "curl -f http://localhost:8080/actuator/health || exit 1" ]
-      interval: 30s
-      timeout: 10s
+      interval: 15s
+      timeout: 5s
       retries: 5
-      start_period: 90s
-
-  simulator:
-    build:
-      context: ../api
-      dockerfile: Dockerfile
-    container_name: fuelops-simulator
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-fuelops}
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-fuelops}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-fuelops_secret}
-      SPRING_PROFILES_ACTIVE: simulator
-      JWT_SECRET: ${JWT_SECRET:-fuelops-super-secret-jwt-key-at-least-32-chars}
-      SEED_AUTO_RUN: false
-      MQTT_BROKER_URL: tcp://mosquitto:1883
-      MQTT_CLIENT_ID: fuelops-simulator
-      DISPENSE_RATE_PER_SEC: ${DISPENSE_RATE_PER_SEC:-0.3}
-      TANK_READING_INTERVAL_SEC: ${TANK_READING_INTERVAL_SEC:-30}
-      GAP_PROBABILITY: ${GAP_PROBABILITY:-0.05}
-      GAP_DURATION_SEC: ${GAP_DURATION_SEC:-20}
-      POS_DELAY_PROBABILITY: ${POS_DELAY_PROBABILITY:-0.2}
-    depends_on:
-      mosquitto:
-        condition: service_started
-      api:
-        condition: service_healthy
-    restart: unless-stopped
+      start_period: 30s
 
   ui:
     build:
@@ -93,6 +66,11 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:

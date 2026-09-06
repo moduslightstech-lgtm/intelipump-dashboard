@@ -30,6 +30,15 @@ public class Station {
     @Column(nullable = false)
     private boolean active = true;
 
+    @Column(name = "external_id")
+    private String externalId;
+
+    @Column(name = "last_seen_at")
+    private Instant lastSeenAt;
+
+    @Column(name = "status")
+    private String status = "ONLINE";
+
     @Column(nullable = false)
     private Instant createdAt = Instant.now();
 }

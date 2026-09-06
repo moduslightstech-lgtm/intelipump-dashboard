@@ -168,12 +168,14 @@ public class SeedDataGenerator {
         String[] names = { "Lekki Phase 1", "Victoria Island", "Ikeja Central" };
         String[] locations = { "Lekki-Epe Expressway, Lagos", "Adeola Odeku Street, VI, Lagos",
                 "Obafemi Awolowo Way, Ikeja, Lagos" };
+        String[] externalIds = { "SAO-LEKKI-01", "SAO-VI-01", "SAO-IKEJA-01" };
         List<Station> stations = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             Station s = new Station();
             s.setTenantId(tenant.getId());
             s.setName(names[i]);
             s.setLocation(locations[i]);
+            s.setExternalId(externalIds[i]);
             stations.add(stationRepository.save(s));
         }
         return stations;
@@ -201,6 +203,7 @@ public class SeedDataGenerator {
             p.setTenantId(tenant.getId());
             p.setStationId(station.getId());
             p.setLabel("Pump " + (i + 1));
+            p.setExternalId("PUMP-0" + (i + 1));
             pumps.add(pumpRepository.save(p));
         }
         return pumps;
@@ -216,6 +219,7 @@ public class SeedDataGenerator {
             n.setPumpId(pump.getId());
             n.setProductId(products.get(i % 2).getId()); // PMS or AGO
             n.setLabel(pump.getLabel() + " N" + (i + 1));
+            n.setExternalId("NOZZLE-0" + (i + 1));
             nozzles.add(nozzleRepository.save(n));
         }
         return nozzles;
