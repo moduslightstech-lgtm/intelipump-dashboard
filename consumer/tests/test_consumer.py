@@ -190,6 +190,71 @@ def test_valid_transaction_processed():
     assert status == "processed"
 
 
+def test_hangup_completed_merges_into_live_fill_row():
+    db, cur = _mock_db_with_cursor()
+    cur.fetchone.side_effect = [("tx-live", "DISPENSING")]
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "tx-hangup"
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+    update_sql = cur.execute.call_args_list[1].args[0]
+    assert "UPDATE pump_transactions" in update_sql
+
+
+def test_hangup_completed_skips_when_live_row_already_complete():
+    db, cur = _mock_db_with_cursor()
+    cur.fetchone.side_effect = [("tx-live", "COMPLETED")]
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "tx-hangup"
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+    assert all("UPDATE pump_transactions" not in call.args[0] for call in cur.execute.call_args_list)
+
+
+def test_stale_dispensing_after_complete_is_dropped():
+    db, cur = _mock_db_with_cursor()
+    cur.fetchone.side_effect = [("tx-live", "COMPLETED")]
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "tx-late-fill"
+    payload["status"] = "DISPENSING"
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+    assert all("INSERT INTO pump_transactions" not in call.args[0] for call in cur.execute.call_args_list)
+
+
 def test_rejected_message_insertion_on_missing_id():
     db, cur = _mock_db_with_cursor()
     service = TransactionService(db)

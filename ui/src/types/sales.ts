@@ -76,7 +76,7 @@ export function parsePumpSale(raw: unknown): PumpSale | null {
     product: d.product == null || d.product === '' ? null : String(d.product),
     volumeLiters: num(d.volumeLiters),
     amount: num(d.amount),
-    currency: String(d.currency || 'NGN'),
+    currency: displayCurrency(d.currency == null ? null : String(d.currency)),
     pricePerLiter: num(d.pricePerLiter),
     status: d.status == null || d.status === '' ? null : String(d.status),
     sourceTopic: d.sourceTopic == null || d.sourceTopic === '' ? null : String(d.sourceTopic),
@@ -133,11 +133,16 @@ export function applySaleToSummary(current: SalesSummary, sale: PumpSale): Sales
   }
 }
 
-export function formatSaleAmount(amount: number | null | undefined, currency = 'NGN'): string {
+/** Stations settle in naira. Ignore USD leftovers from older MQTT rows. */
+export function displayCurrency(_currency?: string | null): string {
+  return 'NGN'
+}
+
+export function formatSaleAmount(amount: number | null | undefined, _currency = 'NGN'): string {
   if (amount == null || !Number.isFinite(amount)) return '—'
   return new Intl.NumberFormat('en-NG', {
     style: 'currency',
-    currency: currency || 'NGN',
+    currency: 'NGN',
     maximumFractionDigits: 2,
   }).format(amount)
 }

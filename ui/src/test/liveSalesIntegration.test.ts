@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
   applySaleToSummary,
+  formatSaleAmount,
   parsePumpSale,
   parseSaleCreatedEvent,
   parseSalesSummary,
@@ -98,6 +99,13 @@ describe('sale parsing and summary', () => {
       transaction: saleRaw,
     })
     expect(ev?.transaction.transactionId).toBe('tx-1')
+  })
+
+  it('formats amounts as naira even when the row says USD', () => {
+    const formatted = formatSaleAmount(500, 'USD')
+    expect(formatted).not.toMatch(/US\$|USD/)
+    expect(formatted).toMatch(/₦|NGN/)
+    expect(parsePumpSale({ ...saleRaw, currency: 'USD' })?.currency).toBe('NGN')
   })
 
   it('increments summary once per unique sale', () => {

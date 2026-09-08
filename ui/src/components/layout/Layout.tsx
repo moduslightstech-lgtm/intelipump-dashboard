@@ -123,10 +123,10 @@ const ADMIN_NAV: NavItem[] = [
   { to: '/', label: 'Overview', end: true, icon: Icons.overview },
   { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
   { to: '/transactions', label: 'Transactions', icon: Icons.transactions },
-  { to: '/reconciliations', label: 'Reconciliations', icon: Icons.recon },
+  { to: '/reconciliations', label: 'Reconciliation', icon: Icons.recon },
   { to: '/stations', label: 'Stations', icon: Icons.stations },
   { to: '/admin/stations', label: 'Admin Stations', icon: Icons.admin },
-  { to: '/station-manager/tank-readings', label: 'Nightly Tank Readings', icon: Icons.tanks },
+  { to: '/station-manager/tank-readings', label: 'Tank Reading', icon: Icons.tanks },
   { to: '/devices', label: 'Devices', icon: Icons.devices },
   { to: '/tanks', label: 'Tanks', icon: Icons.tanks },
   { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
@@ -138,16 +138,15 @@ const ADMIN_NAV: NavItem[] = [
 const EXEC_NAV: NavItem[] = [
   { to: '/executive', label: 'Executive Overview', end: true, icon: Icons.overview },
   { to: '/transactions', label: 'Sales', icon: Icons.transactions },
-  { to: '/reconciliations', label: 'Reconciliations', icon: Icons.recon },
+  { to: '/reconciliations', label: 'Reconciliation', icon: Icons.recon },
   { to: '/stations', label: 'Stations', icon: Icons.stations },
   { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
   { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
 ]
 
 const MANAGER_NAV: NavItem[] = [
-  { to: '/station-manager/tank-readings', label: 'Nightly Tank Readings', end: true, icon: Icons.tanks },
+  { to: '/station-manager/tank-readings', label: 'Tank Reading', end: true, icon: Icons.tanks },
   { to: '/station-manager/history', label: 'Submission History', icon: Icons.transactions },
-  { to: '/station-manager/reconciliation', label: 'Reconciliation Result', icon: Icons.recon },
   { to: '/station-manager/profile', label: 'Profile', icon: Icons.profile },
 ]
 
@@ -164,8 +163,8 @@ export default function Layout() {
   const nav = navForRole(role)
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <aside className="flex w-64 flex-shrink-0 flex-col border-r border-slate-800/90 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
+    <div className="grid min-h-screen grid-cols-[16rem_minmax(0,1fr)]">
+      <aside className="sticky top-0 flex h-screen flex-col self-start overflow-hidden border-r border-slate-800/90 bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900">
         <div className="border-b border-slate-800 p-5">
           <div className="flex items-center gap-3">
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 shadow-[0_0_20px_rgba(16,185,129,0.35)]">
@@ -184,9 +183,9 @@ export default function Layout() {
           </div>
         </div>
 
-        <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-3">
           <p className="mb-2 px-4 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-500">
-            {role === 'STATION_MANAGER' ? 'Nightly workflow' : 'Operations'}
+            {role === 'STATION_MANAGER' ? 'Station workflow' : 'Operations'}
           </p>
           {nav.map((item) => {
             const Icon = item.icon
@@ -217,7 +216,7 @@ export default function Layout() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto bg-[#0b1220]">
+      <main className="min-w-0 bg-[#0b1220]">
         <Outlet />
       </main>
     </div>

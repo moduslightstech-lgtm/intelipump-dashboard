@@ -274,7 +274,7 @@ def current_workspace(
                 "email": u.email,
                 "name": " ".join(x for x in [u.first_name, u.last_name] if x).strip() or u.email,
             }
-    return {
+    payload = {
         "station": {
             "id": str(station.id),
             "name": station.name,
@@ -297,6 +297,13 @@ def current_workspace(
                 "version": getattr(batch, "version", 1) or 1,
                 "correctionReason": getattr(batch, "correction_reason", None),
                 "isLate": bool(getattr(batch, "is_late", False)),
+                "correctedByAdministrator": display_status == "CORRECTED",
+                "correctedAt": (
+                    batch.last_modified_at.isoformat()
+                    if display_status == "CORRECTED" and getattr(batch, "last_modified_at", None)
+                    else None
+                ),
+                "notes": getattr(batch, "notes", None),
                 "lastModifiedAt": (
                     batch.last_modified_at.isoformat()
                     if getattr(batch, "last_modified_at", None)
@@ -315,6 +322,9 @@ def current_workspace(
                 "version": 0,
                 "correctionReason": None,
                 "isLate": False,
+                "correctedByAdministrator": False,
+                "correctedAt": None,
+                "notes": None,
                 "lastModifiedAt": None,
             }
         ),
@@ -325,6 +335,9 @@ def current_workspace(
         "managerLocked": display_status in {"SUBMITTED", "ACCEPTED", "CORRECTED"},
         "adminCanCorrect": display_status in {"SUBMITTED", "ACCEPTED", "CORRECTED"},
     }
+    if not is_admin(user) and payload["batch"]:
+        payload["batch"]["correctionReason"] = None
+    return payload
 
 
 def validate_reading_values(
@@ -804,7 +817,15 @@ def list_reading_history(
                 "expectedTankCount": b.expected_tank_count,
                 "totalClosingVolumeLiters": round(total_vol, 2),
                 "isLate": bool(getattr(b, "is_late", False)),
-                "correctionReason": getattr(b, "correction_reason", None),
+                "correctionReason": (
+                    getattr(b, "correction_reason", None) if is_admin(user) else None
+                ),
+                "correctedByAdministrator": b.status == "CORRECTED",
+                "correctedAt": (
+                    b.last_modified_at.isoformat()
+                    if b.status == "CORRECTED" and getattr(b, "last_modified_at", None)
+                    else None
+                ),
                 "lastModifiedAt": (
                     b.last_modified_at.isoformat()
                     if getattr(b, "last_modified_at", None)

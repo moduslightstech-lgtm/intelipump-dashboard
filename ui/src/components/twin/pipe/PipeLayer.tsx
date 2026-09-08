@@ -23,7 +23,7 @@ function routeStatus(
 ): PipeStatus {
   if (stationClosed) return 'IDLE'
   for (const s of Object.values(activeByPump)) {
-    if (s.phase !== 'DISPENSING' && s.phase !== 'COMPLETED') continue
+    if (s.phase !== 'DISPENSING') continue
     const match =
       route.pumpId === s.pumpId ||
       pumpMatchesId(
@@ -36,7 +36,6 @@ function routeStatus(
       ) ||
       (s.connectionId && route.id === s.connectionId)
     if (match && s.phase === 'DISPENSING') return 'ACTIVE'
-    if (match && s.phase === 'COMPLETED') return 'ACTIVE'
   }
   return route.status
 }

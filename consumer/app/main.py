@@ -125,9 +125,24 @@ class ConsumerApp:
             return
 
         if kind == KIND_HEARTBEAT:
+            flat = flatten_device_fields(payload)
             result = self.handle_heartbeat_message(
-                topic=topic, payload=flatten_device_fields(payload), retained=retained
+                topic=topic, payload=flat, retained=retained
             )
+            if result == "processed":
+                station_id = str(flat.get("stationId") or "").strip()
+                device_id = str(flat.get("deviceId") or "").strip()
+                if station_id:
+                    try:
+                        self.status_service.touch_from_device_heartbeat(
+                            station_id=station_id,
+                            device_id=device_id or None,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to refresh station from device heartbeat stationId=%s",
+                            station_id,
+                        )
             logger.info("Edge heartbeat topic=%s result=%s", topic, result)
             return
 

@@ -96,14 +96,9 @@ export function useLiveSalesStream(opts: Opts) {
           const parsed = parseSaleCreatedEvent(JSON.parse(String((ev as MessageEvent).data)))
           if (!parsed) return
           const sale = parsed.transaction
-          if (sale.stationId !== stationId) {
-            if (import.meta.env.DEV) {
-              console.warn('Ignoring sale for mismatched station', sale.stationId, stationId)
-            }
-            return
-          }
-          if (dedup.current.has(sale.transactionId)) return
-          dedup.current.remember(sale.transactionId)
+          // Stream URL is already station-scoped. Do not drop US-LAB-001 vs
+          // InteliPump-US-Lab alias mismatches, and allow fill progress on the
+          // same transactionId (volume/amount updates during a dispense).
           markLive(sale.receivedAt)
           onSaleRef.current?.(sale)
         } catch {

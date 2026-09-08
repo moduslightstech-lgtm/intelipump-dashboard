@@ -10,6 +10,14 @@ import { useStationEdgeDevices } from '../../hooks/useDeviceStatus'
 import { useStationLiveSales } from '../../hooks/useStationLiveSales'
 import { canonicalPumpId, getConfiguredPumpId } from '../../utils/pumpMatching'
 import { formatSaleAmount } from '../../types/sales'
+import {
+  liveDispensingFromPumpState,
+  livePumpInferredStatus,
+  inProgressSaleStatus,
+  completedSaleStatus,
+} from '../../lib/liveDispensing'
+import { applyLiveTankDrawdown } from '../../lib/liveTankLevels'
+import { getConnections } from './forecourtLayout'
 import ForecourtMap, { type ForecourtSelection } from './ForecourtMap'
 import PumpCard from './PumpCard'
 import TankCard from './TankCard'
@@ -153,12 +161,20 @@ export default function OperationalTwinView({
       edgeStatus,
     )
     if (!base) return base
+    const connections = getConnections(base)
+    const catalogPumps = (base.pumps || []) as Record<string, unknown>[]
     return {
       ...base,
       salesToday: liveSales.summary?.totalAmount ?? base.salesToday,
       volumeToday: liveSales.summary?.totalVolumeLiters ?? base.volumeToday,
       transactionCountToday:
         liveSales.summary?.transactionCount ?? base.transactionCountToday,
+      tanks: applyLiveTankDrawdown(
+        (base.tanks || []) as Record<string, unknown>[],
+        liveSales.sales,
+        connections,
+        catalogPumps,
+      ),
       pumps: (base.pumps || []).map((p) => {
         const key = canonicalPumpId(getConfiguredPumpId(p))
         const live = liveSales.pumpLiveState[key]
@@ -171,10 +187,11 @@ export default function OperationalTwinView({
           product: live.latestSale.product || p.product,
           recentSaleCount: live.todayTransactionCount,
           isRecentlyActive: live.isRecentlyActive,
-          inferredStatus:
-            live.isRecentlyActive && liveOperational === 'OPEN'
-              ? 'DISPENSING'
-              : p.inferredStatus,
+          inferredStatus: livePumpInferredStatus(
+            liveOperational,
+            live,
+            p.inferredStatus,
+          ),
         }
       }),
     }
@@ -185,7 +202,28 @@ export default function OperationalTwinView({
     edgeStatus,
     liveSales.summary,
     liveSales.pumpLiveState,
+    liveSales.sales,
   ])
+
+  const pipeActiveByPump = useMemo(() => {
+    const live = liveDispensingFromPumpState(
+      liveSales.pumpLiveState,
+      getConnections(displayState),
+      (displayState?.pumps || []) as Record<string, unknown>[],
+      0,
+    )
+    const merged = { ...(activeByPump || {}) }
+    for (const [key, s] of Object.entries(live)) {
+      merged[key] = s
+    }
+    for (const [key, s] of Object.entries(merged)) {
+      const row = liveSales.pumpLiveState[key]
+      if (s.phase !== 'DISPENSING') delete merged[key]
+      else if (row && !row.isRecentlyActive) delete merged[key]
+      else if (completedSaleStatus(row?.latestSale?.status)) delete merged[key]
+    }
+    return merged
+  }, [activeByPump, displayState, liveSales.pumpLiveState])
 
   const displayStation = displayState?.station
   const tanks = displayState?.tanks || []
@@ -301,7 +339,7 @@ export default function OperationalTwinView({
 
       <ForecourtMap
         state={displayState}
-        activeByPump={activeByPump}
+        activeByPump={pipeActiveByPump}
         activePumpId={activePumpId}
         activeTankId={activeTankId}
         activeConnectionId={activeConnectionId}
@@ -336,12 +374,22 @@ export default function OperationalTwinView({
                 const active = activePumpId != null && pumpMatchesId(p, activePumpId)
                 const key = canonicalPumpId(getConfiguredPumpId(p))
                 const live = liveSales.pumpLiveState[key]
+                const liveDispensing = Boolean(
+                  live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status),
+                )
+                const playbackPulse = active && phase === 'pulse'
                 return (
                   <PumpCard
                     key={String(p.id)}
                     pump={p}
-                    animating={active || Boolean(live?.isRecentlyActive)}
-                    phase={active ? phase : live?.isRecentlyActive ? 'pulse' : 'idle'}
+                    animating={liveDispensing || playbackPulse}
+                    phase={
+                      liveDispensing || playbackPulse
+                        ? 'pulse'
+                        : active && phase === 'completed'
+                          ? 'completed'
+                          : 'idle'
+                    }
                     flashAmount={active ? flashTx?.amount : live?.latestSale?.amount}
                     flashVolume={active ? flashTx?.volumeLiters : live?.latestSale?.volumeLiters}
                     activePumpId={activePumpId}

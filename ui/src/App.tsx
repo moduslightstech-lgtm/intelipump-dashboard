@@ -20,7 +20,6 @@ import TankReadingsPage from './pages/station-manager/TankReadingsPage'
 import {
   StationManagerHistoryPage,
   StationManagerProfilePage,
-  StationManagerReconPage,
 } from './pages/station-manager/HistoryPages'
 import AdminStationsPage from './pages/admin/AdminStationsPage'
 import AdminStationLayout from './pages/admin/AdminStationLayout'
@@ -110,7 +109,10 @@ function AppRoutes() {
         </Route>
         <Route path="station-manager/tank-readings" element={<TankReadingsPage />} />
         <Route path="station-manager/history" element={<StationManagerHistoryPage />} />
-        <Route path="station-manager/reconciliation" element={<StationManagerReconPage />} />
+        <Route
+          path="station-manager/reconciliation"
+          element={<Navigate to="/station-manager/tank-readings" replace />}
+        />
         <Route path="station-manager/profile" element={<StationManagerProfilePage />} />
       </Route>
       <Route path="*" element={<Navigate to={isAuthenticated ? dest : '/login'} replace />} />

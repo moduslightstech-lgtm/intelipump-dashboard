@@ -1,4 +1,6 @@
 import axios from 'axios'
+import type { IntegrityAnomaly, IntegrityTransaction } from '../lib/anomalyPresentation'
+import type { ValueCheck } from '../lib/valueCheck'
 
 /**
  * Local / same-origin FastAPI for auth, admin, twin catalog.
@@ -407,6 +409,40 @@ export const getStationManagerReconciliation = (stationId: string, businessDate?
   api.get<any>('/api/v1/station-manager/reconciliation', {
     params: { station_id: stationId, business_date: businessDate },
   })
+export const putStationManagerTill = (body: {
+  station_id: string
+  business_date?: string
+  cash: number
+  pos: number
+  transfer: number
+  mobile_money?: number
+  fleet_or_credit?: number
+  other?: number
+}) => api.put<any>('/api/v1/station-manager/till', body)
+
+export const closeDayClose = (body: {
+  station_id: string
+  business_date?: string
+  comment?: string
+  approve_variance?: boolean
+}) => api.post<DayCloseRow>('/api/v1/reconciliations/day-close/close', body)
+
+export const reopenDayClose = (body: { station_id: string; business_date?: string; comment?: string }) =>
+  api.post<DayCloseRow>('/api/v1/reconciliations/day-close/reopen', body)
+
+export const getDayCloseAnomalies = (stationId: string, businessDate?: string) =>
+  api.get<{ anomalies: any[]; transactions: any[]; status: string }>(
+    '/api/v1/reconciliations/day-close/anomalies',
+    { params: { station_id: stationId, business_date: businessDate } },
+  )
+
+export const getDayCloseAudit = (stationId: string, businessDate?: string) =>
+  api.get<any[]>('/api/v1/reconciliations/day-close/audit', {
+    params: { station_id: stationId, business_date: businessDate },
+  })
+
+export const usePreviousOpening = (body: { station_id: string; business_date?: string }) =>
+  api.post<DayCloseRow>('/api/v1/reconciliations/day-close/use-previous-opening', body)
 export const saveTankReadingDraft = (body: Record<string, unknown>) =>
   api.post<any>('/api/v1/station-manager/tank-readings/draft', body)
 export const submitTankReadings = (body: Record<string, unknown>) =>
@@ -671,6 +707,98 @@ export type StationSearchResponse = {
   hasMore: boolean
 }
 
+export const getDayCloses = (params?: {
+  business_date?: string
+  station_id?: string
+  status?: string
+}) => api.get<DayCloseRow[]>('/api/v1/reconciliations/day-close', { params })
+
+export const recalculateDayClose = (body: { station_id: string; business_date?: string }) =>
+  api.post<DayCloseRow>('/api/v1/reconciliations/day-close/recalculate', body)
+
+export type DayCloseRow = {
+  stationId: string
+  stationName: string
+  stationCode: string
+  businessDate: string
+  status: string
+  verdict: string
+  stockVerdict: string
+  tillVerdict: string
+  sales?: {
+    amount: number
+    volumeLiters: number
+    transactionCount: number
+    currency?: string
+  }
+  till?: {
+    cash: number
+    pos: number
+    transfer: number
+    total: number
+    captured: boolean
+    currency?: string
+    methods?: Record<string, number | null>
+  }
+  tillVariance: number | null
+  valueCheck?: ValueCheck
+  workflowStatus?: string
+  readiness?: { complete: number; total: number; label: string }
+  financial?: {
+    pumpSales: number
+    reportedSales: number | null
+    variance: number | null
+    status: string
+    captured?: boolean
+    methods?: Record<string, number | null>
+  }
+  integrity?: {
+    transactionCount: number
+    pumpLiters: number
+    recordedAmount: number
+    calculatedAmount: number
+    difference: number | null
+    status: string
+    anomalyCount: number
+    anomalies?: IntegrityAnomaly[]
+    transactions?: IntegrityTransaction[]
+  }
+  inventory?: {
+    status: string
+    tanks: Array<{
+      tankId: string
+      tankCode: string
+      tankName?: string | null
+      product?: string | null
+      openingLiters: number | null
+      openingMissing: boolean
+      deliveryLiters: number
+      dispensedLiters: number
+      expectedClosingLiters: number | null
+      actualClosingLiters: number | null
+      varianceLiters: number | null
+      status: string
+      blocker?: string | null
+    }>
+    varianceLiters: number | null
+    usePreviousClosing?: boolean
+    enterBaselineOpening?: boolean
+  }
+  completeness?: Record<string, unknown>
+  lateData?: { flag?: boolean; summary?: string | null }
+  lateDataReceived?: boolean
+  stock?: {
+    openingLiters: number
+    deliveryLiters: number
+    salesLiters: number
+    expectedClosingLiters: number
+    actualClosingLiters: number
+    varianceLiters: number
+    variancePercent: number
+  } | null
+  runId: string | null
+}
+
 export const getReconciliations = (params?: Record<string, unknown>) =>
   api.get<ReconciliationRun[]>('/api/v1/reconciliations', { params })
 
@@ -783,6 +911,14 @@ export function fmtNaira(n: number | null | undefined) {
     currency: 'NGN',
     maximumFractionDigits: 2,
   }).format(Number(n))
+}
+
+export function fmtSignedNaira(n: number | null | undefined) {
+  if (n == null || Number.isNaN(Number(n))) return '—'
+  const formatted = fmtNaira(Math.abs(Number(n)))
+  if (Number(n) > 0) return `+${formatted}`
+  if (Number(n) < 0) return `-${formatted}`
+  return formatted
 }
 
 export function fmtLiters(n: number | null | undefined) {

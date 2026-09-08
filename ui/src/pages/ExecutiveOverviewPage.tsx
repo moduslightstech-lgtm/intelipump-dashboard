@@ -481,7 +481,7 @@ export default function ExecutiveOverviewPage() {
       </div>
 
       {/* Keep compact table for reconciliation deep-dive */}
-      <DashboardPanel title="Station detail table" action={{ to: '/reconciliations', label: 'Reconciliations' }}>
+      <DashboardPanel title="Station detail table" action={{ to: '/reconciliations', label: 'Reconciliation' }}>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>

@@ -11,6 +11,7 @@ import {
 } from '../../api/client'
 import { useAuth } from '../../context/AuthContext'
 import { normalizeRole } from '../../lib/roles'
+import TankReadingSummary from '../../components/tank-readings/TankReadingSummary'
 
 type Mode = 'create' | 'continue' | 'view' | 'correct'
 
@@ -36,6 +37,7 @@ export default function TankReadingsPage() {
   const [draft, setDraft] = useState<Record<string, any>>({})
   const [correctionReason, setCorrectionReason] = useState('')
   const [message, setMessage] = useState<string | null>(null)
+  const [submittedOk, setSubmittedOk] = useState(false)
   const [errors, setErrors] = useState<Record<string, string[]>>({})
 
   useEffect(() => {
@@ -105,6 +107,7 @@ export default function TankReadingsPage() {
     setViewDate(undefined)
     setMode(uiStatus === 'DRAFT' || uiStatus === 'REOPENED' ? 'continue' : 'create')
     setCorrectionReason('')
+    setSubmittedOk(false)
     setModalOpen(true)
     setMessage(null)
   }
@@ -113,6 +116,7 @@ export default function TankReadingsPage() {
     setViewDate(row.businessDate)
     setMode(nextMode)
     setCorrectionReason(row.correctionReason || '')
+    setSubmittedOk(false)
     setModalOpen(true)
     setMessage(null)
   }
@@ -174,12 +178,11 @@ export default function TankReadingsPage() {
     },
     onSuccess: (data) => {
       setConfirmOpen(false)
-      setModalOpen(false)
-      setMessage(
-        data?.batch?.isLate
-          ? 'Submitted (late). Reconciliation calculated.'
-          : 'Readings submitted — reconciliation calculated',
-      )
+      setMode('view')
+      setViewDate(data?.businessDate || viewDate || currentQ.data?.businessDate)
+      setSubmittedOk(true)
+      setModalOpen(true)
+      setMessage(data?.batch?.isLate ? 'Submitted (late).' : 'Reading submitted successfully.')
       qc.invalidateQueries({ queryKey: ['sm'] })
     },
     onError: (err: any) => {
@@ -223,9 +226,9 @@ export default function TankReadingsPage() {
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-6xl mx-auto">
       <div>
-        <h1 className="section-title">Nightly Tank Readings</h1>
+        <h1 className="section-title">Tank Reading</h1>
         <p className="text-slate-400 text-sm mt-1">
-          View previous submissions and add the closing tank readings for the current business date.
+          Record closing stock for each tank. Previous submissions stay on this page.
         </p>
       </div>
 
@@ -310,6 +313,11 @@ export default function TankReadingsPage() {
             {isAdmin ? ' Use Edit / Correct to change values.' : ' An administrator must make any corrections.'}
           </div>
         )}
+        {managerLocked && todayQ.data ? (
+          <div className="pt-2">
+            <TankReadingSummary data={todayQ.data} title="Today's Tank Reading" />
+          </div>
+        ) : null}
         {!stationsQ.isLoading && (stationsQ.data?.length ?? 0) === 0 && (
           <div className="text-sm text-amber-200">
             No stations assigned to your account. Ask an Admin to assign a station on Users.
@@ -451,18 +459,20 @@ export default function TankReadingsPage() {
           <div className="bg-slate-950 border border-slate-800 sm:rounded-xl w-full sm:max-w-3xl max-h-[100vh] sm:max-h-[90vh] overflow-auto">
             <div className="sticky top-0 bg-slate-950 border-b border-slate-800 px-4 py-3 flex items-start justify-between gap-3">
               <div>
-                <h2 className="text-white font-semibold">
-                  {mode === 'correct'
-                    ? 'Correct Nightly Tank Reading'
-                    : mode === 'view'
-                      ? 'View Nightly Tank Reading'
-                      : 'Add Nightly Tank Reading'}
-                </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  {currentQ.data?.station?.name || 'Station'} · {currentQ.data?.businessDate || '—'} ·
-                  Deadline {currentQ.data?.deadlineLocal || '—'} ·{' '}
-                  {currentQ.data?.uiStatus || currentQ.data?.batch?.status || '—'}
-                </p>
+                {mode !== 'view' ? (
+                  <>
+                    <h2 className="text-white font-semibold">
+                      {mode === 'correct' ? 'Correct Tank Reading' : 'Add Tank Reading'}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {currentQ.data?.station?.name || 'Station'} · {currentQ.data?.businessDate || '—'} ·
+                      Deadline {currentQ.data?.deadlineLocal || '—'} ·{' '}
+                      {currentQ.data?.uiStatus || currentQ.data?.batch?.status || '—'}
+                    </p>
+                  </>
+                ) : (
+                  <h2 className="text-white font-semibold">Tank Reading Summary</h2>
+                )}
               </div>
               <button type="button" className="btn-secondary text-xs" onClick={() => setModalOpen(false)}>
                 Close
@@ -470,6 +480,21 @@ export default function TankReadingsPage() {
             </div>
 
             <div className="p-4 space-y-4">
+              {mode === 'view' ? (
+                <>
+                  {currentQ.isLoading ? (
+                    <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-8 text-center text-sm text-slate-400">
+                      Loading submission…
+                    </div>
+                  ) : currentQ.isError ? (
+                    <div className="rounded-lg border border-red-900/50 bg-red-950/40 px-4 py-6 text-sm text-red-300">
+                      Could not load this tank-reading submission.
+                    </div>
+                  ) : currentQ.data ? (
+                    <TankReadingSummary data={currentQ.data} success={submittedOk} />
+                  ) : null}
+                </>
+              ) : null}
               {mode === 'correct' && (
                 <label className="block text-xs text-slate-400">
                   Correction reason *
@@ -482,12 +507,12 @@ export default function TankReadingsPage() {
                 </label>
               )}
 
-              {currentQ.isLoading && (
+              {mode !== 'view' && currentQ.isLoading && (
                 <div className="rounded-lg border border-slate-800 bg-slate-900/50 px-4 py-8 text-center text-sm text-slate-400">
                   Loading tanks…
                 </div>
               )}
-              {currentQ.isError && (
+              {mode !== 'view' && currentQ.isError && (
                 <div className="rounded-lg border border-red-900/50 bg-red-950/40 px-4 py-6 text-sm text-red-300">
                   Could not load tank readings for this station.
                   {(currentQ.error as any)?.response?.data?.detail
@@ -495,14 +520,14 @@ export default function TankReadingsPage() {
                     : ' Check that the database migration is applied, then try again.'}
                 </div>
               )}
-              {!currentQ.isLoading && !currentQ.isError && (currentQ.data?.tanks || []).length === 0 && (
+              {mode !== 'view' && !currentQ.isLoading && !currentQ.isError && (currentQ.data?.tanks || []).length === 0 && (
                 <div className="rounded-lg border border-amber-900/40 bg-amber-950/30 px-4 py-6 text-sm text-amber-200">
                   No active tanks are configured for this station. Add tanks in Admin before entering
-                  nightly readings.
+                  tank readings.
                 </div>
               )}
 
-              {(currentQ.data?.tanks || []).map((t: any) => {
+              {mode !== 'view' && (currentQ.data?.tanks || []).map((t: any) => {
                 const closing = Number(draft[t.tankId]?.closing_volume_liters)
                 const cap = Number(t.capacityLiters || 0)
                 const fill =
@@ -522,61 +547,26 @@ export default function TankReadingsPage() {
                         <div>Fill: {fill}</div>
                       </div>
                     </div>
-                    <div className="grid sm:grid-cols-2 gap-3">
-                      <Field
-                        label="Closing volume (L) *"
-                        type="number"
-                        disabled={readOnly}
-                        value={draft[t.tankId]?.closing_volume_liters ?? ''}
-                        onChange={(v) =>
-                          setDraft((d) => ({
-                            ...d,
-                            [t.tankId]: { ...d[t.tankId], closing_volume_liters: v },
-                          }))
-                        }
-                      />
-                      <Field
-                        label="Measured level (mm)"
-                        type="number"
-                        disabled={readOnly}
-                        value={draft[t.tankId]?.measured_level_mm ?? ''}
-                        onChange={(v) =>
-                          setDraft((d) => ({
-                            ...d,
-                            [t.tankId]: { ...d[t.tankId], measured_level_mm: v },
-                          }))
-                        }
-                      />
-                      <Field
-                        label="Water level (mm)"
-                        type="number"
-                        disabled={readOnly}
-                        value={draft[t.tankId]?.water_level_mm ?? ''}
-                        onChange={(v) =>
-                          setDraft((d) => ({
-                            ...d,
-                            [t.tankId]: { ...d[t.tankId], water_level_mm: v },
-                          }))
-                        }
-                      />
-                      <Field
-                        label="Temperature (°C)"
-                        type="number"
-                        disabled={readOnly}
-                        value={draft[t.tankId]?.temperature_celsius ?? ''}
-                        onChange={(v) =>
-                          setDraft((d) => ({
-                            ...d,
-                            [t.tankId]: { ...d[t.tankId], temperature_celsius: v },
-                          }))
-                        }
-                      />
-                    </div>
+                    <Field
+                      label="Closing volume (L) *"
+                      hint="Litres of fuel left in this tank at close of business."
+                      type="number"
+                      disabled={readOnly}
+                      value={draft[t.tankId]?.closing_volume_liters ?? ''}
+                      onChange={(v) =>
+                        setDraft((d) => ({
+                          ...d,
+                          [t.tankId]: { ...d[t.tankId], closing_volume_liters: v },
+                        }))
+                      }
+                    />
                     <label className="text-xs text-slate-400 block">
                       Notes
+                      <span className="text-slate-600 font-normal"> (optional)</span>
                       <textarea
                         className="input mt-1 w-full min-h-[56px]"
                         disabled={readOnly}
+                        placeholder="Anything unusual at close of business"
                         value={draft[t.tankId]?.notes ?? ''}
                         onChange={(e) =>
                           setDraft((d) => ({
@@ -632,9 +622,9 @@ export default function TankReadingsPage() {
       {confirmOpen && (
         <div className="fixed inset-0 bg-black/70 z-[60] flex items-end sm:items-center justify-center p-4">
           <div className="card max-w-lg w-full space-y-3">
-            <h2 className="text-white font-semibold">Confirm nightly submission</h2>
+            <h2 className="text-white font-semibold">Confirm tank reading</h2>
             <p className="text-sm text-slate-300">
-              Submit the nightly tank readings for {currentQ.data?.station?.name} on{' '}
+              Submit the tank readings for {currentQ.data?.station?.name} on{' '}
               {currentQ.data?.businessDate}? You will not be able to edit the submission after it is
               submitted. An administrator must make any corrections.
             </p>
@@ -709,12 +699,14 @@ export default function TankReadingsPage() {
 
 function Field({
   label,
+  hint,
   value,
   onChange,
   disabled,
   type,
 }: {
   label: string
+  hint?: string
   value: string | number
   onChange: (v: string) => void
   disabled?: boolean
@@ -730,6 +722,7 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
       />
+      {hint ? <p className="mt-1 text-[11px] leading-snug text-slate-500">{hint}</p> : null}
     </label>
   )
 }

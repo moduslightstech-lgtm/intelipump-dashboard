@@ -31,7 +31,11 @@ export default function TankCard({ tank }: Props) {
               : 'border-amber-700 text-amber-200 bg-amber-950/40'
           }`}
         >
-          {live ? 'Probe' : 'Source: Manual'}
+          {live
+            ? 'Probe'
+            : Number(tank.drawnLiters) > 0
+              ? 'After sales'
+              : 'Source: Manual'}
         </span>
       </div>
 
@@ -59,9 +63,14 @@ export default function TankCard({ tank }: Props) {
           {tank.isStale ? 'Stale' : 'OK'}
         </span>
       </div>
-      {!live && (
+      {!live && Number(tank.drawnLiters) > 0 && (
         <p className="mt-2 text-[10px] text-slate-500">
-          Manual nightly reading — not live probe telemetry.
+          Last reading {fmtLiters(tank.baselineLiters)} minus {fmtLiters(tank.drawnLiters)} sold.
+        </p>
+      )}
+      {!live && !(Number(tank.drawnLiters) > 0) && (
+        <p className="mt-2 text-[10px] text-slate-500">
+          Manual tank reading — not live probe telemetry.
         </p>
       )}
     </article>

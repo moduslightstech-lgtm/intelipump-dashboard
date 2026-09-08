@@ -22,6 +22,13 @@ export function applyLiveStationStatus(
       if (closed) {
         return { ...p, inferredStatus: 'POWERED_OFF' }
       }
+      const liveOnline = ['ONLINE', 'DELAYED'].includes(
+        String(connectivityStatus || '').toUpperCase(),
+      )
+      // Pi heartbeat is the site link. Do not keep catalog OFFLINE (red) on the map.
+      if (liveOnline && (status === 'OFFLINE' || status === 'DEGRADED' || status === 'UNKNOWN')) {
+        return { ...p, inferredStatus: 'IDLE' }
+      }
       if (status === 'POWERED_OFF' || status === 'CLOSED') {
         return { ...p, inferredStatus: 'IDLE' }
       }

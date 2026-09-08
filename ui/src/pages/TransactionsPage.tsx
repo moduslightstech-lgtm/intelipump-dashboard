@@ -351,10 +351,10 @@ export default function TransactionsPage() {
                     <td className="py-2">{s.product || '—'}</td>
                     <td className="py-2 text-right font-mono">{fmtLiters(s.volumeLiters)}</td>
                     <td className="py-2 text-right font-mono">
-                      {formatSaleAmount(s.pricePerLiter, s.currency)}
+                      {formatSaleAmount(s.pricePerLiter)}
                     </td>
                     <td className="py-2 text-right font-mono text-emerald-400">
-                      {formatSaleAmount(s.amount, s.currency)}
+                      {formatSaleAmount(s.amount)}
                     </td>
                     <td className="py-2">{s.status || '—'}</td>
                   </tr>

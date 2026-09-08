@@ -15,8 +15,9 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Optional
 
-# Wayne / InteliPump defaults when the Pi omits decimal metadata.
-DEFAULT_VOLUME_DECIMALS = 3
+# Wayne DC2 volume/amount on the lab pumps are 2 decimal places (1.70 L, ₦2000.00).
+# Do not default volume to 3: raw 170 would become 0.17 L on the dashboard.
+DEFAULT_VOLUME_DECIMALS = 2
 DEFAULT_AMOUNT_DECIMALS = 2
 DEFAULT_PRICE_DECIMALS = 2
 
@@ -25,10 +26,11 @@ TRANSACTION_COMPLETED = "TRANSACTION_COMPLETED"
 DEVICE_HEARTBEAT_EVENTS = frozenset({"HEARTBEAT"})
 DEVICE_STATUS_EVENTS = frozenset({"DEVICE_ONLINE", "DEVICE_OFFLINE"})
 
+FILLING_UPDATED = "FILLING_UPDATED"
+
 IGNORED_EVENTS = frozenset(
     {
         "TRANSACTION_STARTED",
-        "FILLING_UPDATED",
         "FILLING_STARTED",
         "FILLING_COMPLETED",
         "STATE_CHANGED",
@@ -131,8 +133,9 @@ def classify_phase9_message(topic: str, payload: dict[str, Any]) -> str:
         return KIND_HEARTBEAT
     if event in DEVICE_STATUS_EVENTS or is_phase9_device_status_topic(topic):
         return KIND_DEVICE_STATUS
-    if event == TRANSACTION_COMPLETED or (
-        is_phase9_transactions_topic(topic) and event == TRANSACTION_COMPLETED
+    if event in {TRANSACTION_COMPLETED, FILLING_UPDATED} or (
+        is_phase9_transactions_topic(topic)
+        and event in {TRANSACTION_COMPLETED, FILLING_UPDATED}
     ):
         return KIND_TRANSACTION
     if is_phase9_transactions_topic(topic) and not event:
@@ -229,6 +232,8 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
         first_present(inner, "price_decimals", "priceDecimals"),
         DEFAULT_PRICE_DECIMALS,
     )
+    raw_currency = _as_str(first_present(inner, "currency") or first_present(payload, "currency"))
+    currency = "NGN" if not raw_currency or raw_currency.upper() == "USD" else raw_currency
     return {
         "transaction_id": _as_str(
             first_present(
@@ -269,8 +274,7 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
             first_present(inner, "raw_unit_price", "rawUnitPrice", "raw_price", "rawPrice"),
             price_decimals,
         ),
-        "currency": _as_str(first_present(inner, "currency") or first_present(payload, "currency"))
-        or "USD",
+        "currency": currency,
         "status": _as_str(
             first_present(inner, "final_status", "status") or first_present(payload, "status")
         )

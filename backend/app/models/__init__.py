@@ -70,6 +70,7 @@ class Station(Base):
     state: Mapped[Optional[str]] = mapped_column(String)
     country: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timezone: Mapped[str] = mapped_column(String, default="Africa/Lagos")
+    business_day_cutoff: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     status: Mapped[str] = mapped_column(String, default="ACTIVE")
     operational_status: Mapped[str] = mapped_column(String, default="UNKNOWN")
     connectivity_status: Mapped[str] = mapped_column(String, default="UNKNOWN")
@@ -671,6 +672,18 @@ class ReconciliationRun(Base):
     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     approved_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    workflow_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    financial_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    integrity_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    inventory_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    closed_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    reopened_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reopened_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    late_data: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    late_data_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    snapshot_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -745,6 +758,34 @@ class PaymentSummary(Base):
     reference: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReconciliationAnomaly(Base):
+    __tablename__ = "reconciliation_anomalies"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    code: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, default="REVIEW", nullable=False)
+    transaction_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    details_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReconciliationRunVersion(Base):
+    __tablename__ = "reconciliation_run_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reconciliation_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("reconciliation_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ReconciliationApproval(Base):
@@ -828,6 +869,8 @@ __all__ = [
     "PumpTotalizerReading",
     "PaymentSummary",
     "ReconciliationApproval",
+    "ReconciliationAnomaly",
+    "ReconciliationRunVersion",
     "StationLayout",
     "StationLayoutItem",
     "UserStationAssignment",

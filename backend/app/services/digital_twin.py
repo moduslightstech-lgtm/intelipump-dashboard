@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.models import (
     Alert,
     Device,
+    EdgeDevice,
     Nozzle,
     Pump,
     PumpTransaction,
@@ -32,7 +33,8 @@ from app.services.identity import (
 )
 from app.services.tank_connections import build_connection_payloads
 
-DISPENSING_WINDOW = timedelta(minutes=2)
+DISPENSING_WINDOW = timedelta(seconds=15)
+COMPLETED_WINDOW = timedelta(minutes=10)
 DEVICE_ONLINE_WINDOW = timedelta(minutes=5)
 DEVICE_DEGRADED_WINDOW = timedelta(minutes=15)
 MANUAL_READING_STALE = timedelta(hours=36)
@@ -81,6 +83,60 @@ def _ledger_station_match(station: Station):
     if externals:
         clauses.append(PumpTransaction.station_id.in_(externals))
     return or_(*clauses)
+
+
+def station_has_live_edge(db: Session, station: Station, now: datetime) -> bool:
+    """True when a linked Raspberry Pi has sent a heartbeat recently."""
+    keys = mqtt_external_ids_for_station(station)
+    if not keys:
+        return False
+    rows = list(db.scalars(select(EdgeDevice).where(EdgeDevice.station_id.in_(keys))).all())
+    for row in rows:
+        last = _as_utc(row.last_heartbeat_at or row.last_seen_at)
+        if last is None or (now - last) > DEVICE_ONLINE_WINDOW:
+            continue
+        status = (row.calculated_status or row.reported_status or "ONLINE").upper()
+        if status not in {"OFFLINE", "NEVER_CONNECTED"}:
+            return True
+    return False
+
+
+def infer_catalog_pump_status(
+    *,
+    now: datetime,
+    last_tx_at: datetime | None,
+    last_tx_status: str | None,
+    db_status: str,
+    op_state: str,
+    station_op: str,
+    station_conn: str,
+    edge_online: bool,
+) -> str:
+    """Pump tile status. Live Pi heartbeat wins over stale catalog OFFLINE."""
+    db_status = (db_status or "UNKNOWN").upper()
+    op_state = (op_state or "").upper()
+    station_op = (station_op or "UNKNOWN").upper()
+    station_conn = (station_conn or "UNKNOWN").upper()
+    last_status = (last_tx_status or "").upper()
+    if op_state == "POWERED_OFF" or station_op == "CLOSED":
+        return "POWERED_OFF"
+    if not edge_online and (station_conn == "OFFLINE" or op_state == "OFFLINE"):
+        return "OFFLINE"
+    if not edge_online and (station_conn == "DEGRADED" or op_state == "DEGRADED"):
+        return "DEGRADED"
+    if db_status in {"ERROR", "FAULT"} or op_state == "FAULT":
+        return "FAULT"
+    in_progress = last_status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+    fresh = last_tx_at is not None and (now - last_tx_at) <= DISPENSING_WINDOW
+    if (in_progress or op_state == "DISPENSING") and fresh:
+        return "DISPENSING"
+    if last_tx_at is not None and (now - last_tx_at) <= COMPLETED_WINDOW:
+        return "COMPLETED"
+    if last_tx_at is None and db_status == "UNKNOWN" and not op_state:
+        return "UNKNOWN"
+    if op_state in {"IDLE", "DISPENSING"}:
+        return op_state
+    return "IDLE"
 
 
 def _ledger_pump_match(station: Station, pump: Pump):
@@ -364,6 +420,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             pump_alert_counts[str(pump_key)] = int(cnt)
 
     device_by_id = {d.id: d for d in devices}
+    edge_online = station_has_live_edge(db, station, now)
 
     pump_payloads: list[dict[str, Any]] = []
     current_statuses: dict[str, Any] = {"pumps": {}, "devices": {}}
@@ -387,23 +444,16 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         station_op = (getattr(station, "operational_status", None) or "UNKNOWN").upper()
         station_conn = (getattr(station, "connectivity_status", None) or "UNKNOWN").upper()
         status_source = getattr(station, "status_source", None)
-        # Expected closure / intentional power-off (gray) vs unexpected outage (red)
-        if op_state == "POWERED_OFF" or station_op == "CLOSED":
-            inferred_status = "POWERED_OFF"
-        elif station_conn == "OFFLINE" or op_state == "OFFLINE":
-            inferred_status = "OFFLINE"
-        elif station_conn == "DEGRADED" or op_state == "DEGRADED":
-            inferred_status = "DEGRADED"
-        elif db_status in {"OFFLINE", "ERROR", "FAULT"} or op_state == "FAULT":
-            inferred_status = "FAULT" if op_state == "FAULT" or db_status in {"ERROR", "FAULT"} else "OFFLINE"
-        elif last_tx_at is not None and (now - last_tx_at) <= DISPENSING_WINDOW:
-            inferred_status = "DISPENSING"
-        elif last_tx_at is not None and (now - last_tx_at) <= timedelta(minutes=10):
-            inferred_status = "COMPLETED"
-        elif last_tx_at is None and db_status == "UNKNOWN" and not op_state:
-            inferred_status = "UNKNOWN"
-        else:
-            inferred_status = op_state if op_state in {"IDLE", "DISPENSING"} else "IDLE"
+        inferred_status = infer_catalog_pump_status(
+            now=now,
+            last_tx_at=last_tx_at,
+            last_tx_status=getattr(last_tx, "status", None) if last_tx is not None else None,
+            db_status=db_status,
+            op_state=op_state,
+            station_op=station_op,
+            station_conn=station_conn,
+            edge_online=edge_online,
+        )
         display_code = pump.mqtt_pump_id or pump.pump_code
         linked_device = device_by_id.get(pump.device_id) if pump.device_id else None
         if pump.mqtt_pump_id and pump.mqtt_pump_id != pump.pump_code:
@@ -464,12 +514,16 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             else None
         )
         last_product = last_tx.product if last_tx is not None else None
-        if last_tx_at is not None and (now - last_tx_at) <= DISPENSING_WINDOW:
-            inferred_status = "DISPENSING"
-        elif last_tx_at is not None:
-            inferred_status = "IDLE"
-        else:
-            inferred_status = "UNKNOWN"
+        inferred_status = infer_catalog_pump_status(
+            now=now,
+            last_tx_at=last_tx_at,
+            last_tx_status=getattr(last_tx, "status", None) if last_tx is not None else None,
+            db_status="UNKNOWN",
+            op_state="",
+            station_op=(getattr(station, "operational_status", None) or "UNKNOWN").upper(),
+            station_conn=(getattr(station, "connectivity_status", None) or "UNKNOWN").upper(),
+            edge_online=edge_online,
+        )
         pump_payloads.append(
             {
                 "id": f"ledger:{code}",

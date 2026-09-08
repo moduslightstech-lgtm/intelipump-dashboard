@@ -83,6 +83,16 @@ def require_station_manager_or_admin(user: User = Depends(get_current_user)) -> 
     return user
 
 
+def require_reconciliation_access(user: User = Depends(get_current_user)) -> User:
+    """Financial / integrity / inventory reconciliation is Admin or Executive only."""
+    if normalize_role(user.role) not in {ROLE_ADMIN, ROLE_EXECUTIVE}:
+        raise HTTPException(
+            status_code=403,
+            detail="Reconciliation access requires Admin or Executive role",
+        )
+    return user
+
+
 def assigned_station_ids(db: Session, user: User) -> list[UUID]:
     rows = db.scalars(
         select(UserStationAssignment.station_id).where(

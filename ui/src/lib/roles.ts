@@ -28,6 +28,14 @@ export function canAccessPath(role: AppRole, path: string): boolean {
     if (path.startsWith('/station-manager')) return false
     return true
   }
-  // Station manager
-  return path.startsWith('/station-manager') || path === '/login'
+  // Station manager: tank readings, history, and profile only.
+  if (path === '/login') return true
+  if (path.startsWith('/station-manager/reconciliation')) return false
+  if (path.startsWith('/reconciliations')) return false
+  return (
+    path.startsWith('/station-manager/tank-readings') ||
+    path.startsWith('/station-manager/history') ||
+    path.startsWith('/station-manager/profile') ||
+    path === '/station-manager'
+  )
 }

@@ -151,6 +151,21 @@ def test_scale_raw_rejects_float():
     assert scale_raw(12500, 3) == Decimal("12.500")
     assert scale_raw(14688, 2) == Decimal("146.88")
     assert scale_raw(1175, 2) == Decimal("11.75")
+    assert scale_raw(170, 2) == Decimal("1.70")
+
+
+def test_omitted_volume_decimals_match_pump_face():
+    """Wayne display 1.70 L / ₦2000.00 is raw 170 / 200000 at 2 dp, not 3."""
+    payload = dict(PHASE9_SALE)
+    payload["payload"] = dict(PHASE9_SALE["payload"])
+    payload["payload"].pop("volume_decimals", None)
+    payload["payload"]["raw_volume"] = 170
+    payload["payload"]["raw_amount"] = 200000
+    tx, err = normalize_transaction(payload, source_topic=TX_TOPIC)
+    assert err is None
+    assert tx is not None
+    assert tx.volume_liters == Decimal("1.70")
+    assert tx.amount == Decimal("2000.00")
 
 
 def test_classify_phase9_topics_and_events():
@@ -158,7 +173,7 @@ def test_classify_phase9_topics_and_events():
     assert classify_phase9_message(HB_TOPIC, PHASE9_HEARTBEAT) == KIND_HEARTBEAT
     assert classify_phase9_message(STATUS_TOPIC, PHASE9_ONLINE) == KIND_DEVICE_STATUS
     filling = {**PHASE9_SALE, "eventType": "FILLING_UPDATED"}
-    assert classify_phase9_message(TX_TOPIC, filling) == KIND_IGNORED
+    assert classify_phase9_message(TX_TOPIC, filling) == KIND_TRANSACTION
     started = {**PHASE9_SALE, "eventType": "TRANSACTION_STARTED"}
     assert classify_phase9_message(TX_TOPIC, started) == KIND_IGNORED
 
@@ -183,7 +198,7 @@ def test_normalize_phase9_sale():
     assert tx.volume_liters == Decimal("12.500")
     assert tx.amount == Decimal("146.88")
     assert tx.price_per_liter == Decimal("11.75")
-    assert tx.currency == "USD"
+    assert tx.currency == "NGN"
     assert tx.status == "COMPLETED"
     assert tx.deduplication_key == (
         "tx-completed:complete:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -252,18 +267,32 @@ def test_handle_message_persists_phase9_sale():
     assert params[7] == Decimal("146.88")
 
 
-def test_handle_message_ignores_filling_updates():
-    db, cur = _mock_db()
+def test_handle_message_persists_filling_updates():
+    db, cur = _mock_db(
+        fetchone_side_effect=[
+            None,
+            None,
+            None,
+            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",),
+            None,
+        ]
+    )
     app = _app(db)
     filling = dict(PHASE9_SALE)
     filling["eventType"] = "FILLING_UPDATED"
+    filling["payload"] = dict(PHASE9_SALE["payload"])
+    filling["payload"]["final_status"] = "DISPENSING"
     app.handle_message(TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False)
     inserts = [
         c
         for c in cur.execute.call_args_list
         if "INSERT INTO pump_transactions" in str(c.args[0])
     ]
-    assert inserts == []
+    assert inserts
+    _sql, params = inserts[0].args
+    assert "ON CONFLICT (id) DO UPDATE" in _sql
+    assert params[0] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert params[11] == "DISPENSING"
 
 
 def test_handle_message_upserts_heartbeat():
@@ -277,6 +306,7 @@ def test_handle_message_upserts_heartbeat():
     params = upserts[0].args[1]
     assert params[1] == "InteliPump-Lab-pi-001"
     assert params[2] == "InteliPump-US-Lab"
+    app.status_service.touch_from_device_heartbeat.assert_called()
 
 
 def test_handle_message_device_online():

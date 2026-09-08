@@ -8,10 +8,15 @@ import {
   type SalesSummary,
 } from '../types/sales'
 import { canonicalPumpId, warnUnmappedPump } from '../utils/pumpMatching'
+import {
+  isHangupDuplicateSale,
+  isStaleDispensingAfterComplete,
+  collapseHangupDuplicates,
+} from '../lib/saleDuplicates'
 import { useLiveSalesStream } from './useLiveSalesStream'
 import { createRecentTransactionDedup } from './useRecentTransactionDedup'
 
-const RECENT_ACTIVE_MS = 8_000
+const RECENT_ACTIVE_MS = 5_000
 const DEFAULT_MAX_RECENT = 100
 /** DigitalOcean `/v1/sales/recent` rejects limits above 500. */
 export const SALES_HISTORY_FETCH_LIMIT = 500
@@ -58,54 +63,114 @@ export function useStationLiveSales(opts: Opts) {
   recentLimitRef.current = recentLimit
 
   const clearRecentTimer = useRef<Map<string, number>>(new Map())
+  const pumpLiveRef = useRef<Record<string, PumpLiveState>>({})
+
+  const countedCompleted = useRef(new Set<string>())
 
   const ingestSale = useCallback(
     (sale: PumpSale, optsIngest?: { fromRest?: boolean }) => {
-      if (sale.stationId !== stationId) return false
-      if (dedup.current.has(sale.transactionId)) return false
+      const isNew = !dedup.current.has(sale.transactionId)
+      const status = String(sale.status || '').toUpperCase()
+      const isComplete = status === 'COMPLETED' || status === 'COMPLETE'
+      const inProgress = status === 'DISPENSING' || status === 'IN_PROGRESS' || status === 'ACTIVE'
       dedup.current.remember(sale.transactionId)
 
       const key = canonicalPumpId(sale.pumpId)
+      const prevLive = pumpLiveRef.current[key]
+      const hangupDup = Boolean(
+        prevLive?.latestSale && isHangupDuplicateSale(prevLive.latestSale, sale),
+      )
+      if (isStaleDispensingAfterComplete(prevLive?.latestSale, sale)) {
+        return true
+      }
+      const replacing =
+        prevLive?.latestSale?.transactionId === sale.transactionId || hangupDup
+      const displaySale =
+        hangupDup && prevLive?.latestSale
+          ? { ...prevLive.latestSale, ...sale, transactionId: prevLive.latestSale.transactionId }
+          : sale
+
       setSales((prev) => {
-        const without = prev.filter((s) => s.transactionId !== sale.transactionId)
-        return [sale, ...without].slice(0, recentLimitRef.current)
+        const hangupOf = prev.find((s) => isHangupDuplicateSale(s, sale))
+        const dropIds = new Set(
+          [sale.transactionId, hangupOf?.transactionId].filter(Boolean) as string[],
+        )
+        const without = prev.filter((s) => !dropIds.has(s.transactionId))
+        const kept = hangupOf
+          ? { ...hangupOf, ...sale, transactionId: hangupOf.transactionId }
+          : sale
+        return [kept, ...without].slice(0, recentLimitRef.current)
       })
 
-      if (!optsIngest?.fromRest) {
+      if (
+        !optsIngest?.fromRest &&
+        isComplete &&
+        !hangupDup &&
+        !countedCompleted.current.has(sale.transactionId)
+      ) {
+        countedCompleted.current.add(sale.transactionId)
         setSummary((current) => (current ? applySaleToSummary(current, sale) : current))
       }
 
       setPumpLiveState((current) => {
         const prev = current[key]
-        return {
-          ...current,
-          [key]: {
-            pumpId: sale.pumpId,
-            latestSale: sale,
-            lastSaleAt: sale.receivedAt,
-            todaySalesAmount: (prev?.todaySalesAmount ?? 0) + (sale.amount ?? 0),
-            todayVolumeLiters: (prev?.todayVolumeLiters ?? 0) + (sale.volumeLiters ?? 0),
-            todayTransactionCount: (prev?.todayTransactionCount ?? 0) + 1,
-            liveActivityStatus: 'ACTIVE',
-            isRecentlyActive: !optsIngest?.fromRest,
-          },
+        const row: PumpLiveState = {
+          pumpId: sale.pumpId,
+          latestSale: displaySale,
+          lastSaleAt: sale.receivedAt,
+          todaySalesAmount: replacing
+            ? (prev?.todaySalesAmount ?? 0) - (prev?.latestSale?.amount ?? 0) + (sale.amount ?? 0)
+            : (prev?.todaySalesAmount ?? 0) + (isNew && !hangupDup ? (sale.amount ?? 0) : 0),
+          todayVolumeLiters: replacing
+            ? (prev?.todayVolumeLiters ?? 0) -
+              (prev?.latestSale?.volumeLiters ?? 0) +
+              (sale.volumeLiters ?? 0)
+            : (prev?.todayVolumeLiters ?? 0) +
+              (isNew && !hangupDup ? (sale.volumeLiters ?? 0) : 0),
+          todayTransactionCount: replacing
+            ? (prev?.todayTransactionCount ?? 0)
+            : (prev?.todayTransactionCount ?? 0) + (isNew && !hangupDup ? 1 : 0),
+          liveActivityStatus: inProgress ? 'ACTIVE' : 'IDLE',
+          isRecentlyActive: Boolean(inProgress && !optsIngest?.fromRest),
         }
+        const next: Record<string, PumpLiveState> = { ...current, [key]: row }
+        pumpLiveRef.current = next
+        return next
       })
 
-      if (!optsIngest?.fromRest) {
+      if (inProgress && !optsIngest?.fromRest) {
         const existing = clearRecentTimer.current.get(key)
         if (existing) window.clearTimeout(existing)
         const t = window.setTimeout(() => {
           setPumpLiveState((cur) => {
             const row = cur[key]
             if (!row) return cur
-            return {
+            const latest = row.latestSale
+            const settled =
+              latest &&
+              (String(latest.status || '').toUpperCase() === 'DISPENSING' ||
+                String(latest.status || '').toUpperCase() === 'IN_PROGRESS' ||
+                String(latest.status || '').toUpperCase() === 'ACTIVE')
+                ? { ...latest, status: 'COMPLETED' }
+                : latest
+            const idle: Record<string, PumpLiveState> = {
               ...cur,
-              [key]: { ...row, isRecentlyActive: false, liveActivityStatus: 'IDLE' },
+              [key]: {
+                ...row,
+                latestSale: settled,
+                isRecentlyActive: false,
+                liveActivityStatus: 'IDLE',
+              },
             }
+            pumpLiveRef.current = idle
+            return idle
           })
         }, RECENT_ACTIVE_MS)
         clearRecentTimer.current.set(key, t)
+      } else if (isComplete) {
+        const existing = clearRecentTimer.current.get(key)
+        if (existing) window.clearTimeout(existing)
+        clearRecentTimer.current.delete(key)
       }
 
       if (configured.size > 0 && !configured.has(key)) {
@@ -115,7 +180,7 @@ export function useStationLiveSales(opts: Opts) {
         )
       }
 
-      if (!optsIngest?.fromRest) onSaleRef.current?.(sale)
+      if (!optsIngest?.fromRest && !hangupDup) onSaleRef.current?.(sale)
       return true
     },
     [configured, stationId],
@@ -136,10 +201,14 @@ export function useStationLiveSales(opts: Opts) {
       setRestError(null)
 
       // Reset pump recent aggregates from limited recent feed (label as recent, not full day)
+      const recentSales = collapseHangupDuplicates(recent.sales)
       const nextPumps: Record<string, PumpLiveState> = {}
-      for (const sale of [...recent.sales].reverse()) {
-        if (sale.stationId !== stationId) continue
+      for (const sale of [...recentSales].reverse()) {
         dedup.current.remember(sale.transactionId)
+        const st = String(sale.status || '').toUpperCase()
+        if (st === 'COMPLETED' || st === 'COMPLETE') {
+          countedCompleted.current.add(sale.transactionId)
+        }
         const key = canonicalPumpId(sale.pumpId)
         const prev = nextPumps[key]
         nextPumps[key] = {
@@ -157,8 +226,9 @@ export function useStationLiveSales(opts: Opts) {
           setUnmappedPumpIds((p) => (p.includes(sale.pumpId) ? p : [...p, sale.pumpId]))
         }
       }
+      pumpLiveRef.current = nextPumps
       setPumpLiveState(nextPumps)
-      setSales(recent.sales.slice(0, recentLimit))
+      setSales(recentSales.slice(0, recentLimit))
       setBootstrapped(true)
     } catch (err) {
       // Preserve previous successful values
@@ -174,6 +244,8 @@ export function useStationLiveSales(opts: Opts) {
       return
     }
     dedup.current.clear()
+    countedCompleted.current.clear()
+    pumpLiveRef.current = {}
     setUnmappedPumpIds([])
     setPumpLiveState({})
     setSales([])

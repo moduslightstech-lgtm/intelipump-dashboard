@@ -3,9 +3,31 @@ import { pumpGridClass, pumpMatchesId, pumpStatusColor } from '../lib/pumpIdenti
 import { getTwinViewPreference, setTwinViewPreference } from '../lib/twinViewPreference'
 import { buildSceneAssets } from '../components/twin/StationSceneCanvas'
 import { applyLiveStationStatus } from '../lib/twinLiveStatus'
+import { liveDispensingFromPumpState, livePumpInferredStatus } from '../lib/liveDispensing'
+import { applyLiveTankDrawdown } from '../lib/liveTankLevels'
+import {
+  collapseHangupDuplicates,
+  isHangupDuplicateSale,
+  isStaleDispensingAfterComplete,
+} from '../lib/saleDuplicates'
 import { canAccessPath, normalizeRole } from '../lib/roles'
+import type { PumpSale } from '../types/sales'
 
 describe('applyLiveStationStatus', () => {
+  it('clears pump OFFLINE when the live Pi is ONLINE', () => {
+    const next = applyLiveStationStatus(
+      {
+        station: { operationalStatus: 'OPEN', connectivityStatus: 'OFFLINE' },
+        pumps: [{ id: 'p1', inferredStatus: 'OFFLINE' }],
+      },
+      'OPEN',
+      'ONLINE',
+      'ONLINE',
+    )
+    expect(next?.station?.connectivityStatus).toBe('ONLINE')
+    expect(next?.pumps?.[0]?.inferredStatus).toBe('IDLE')
+  })
+
   it('overlays edge connectivity and schedule on twin state', () => {
     const next = applyLiveStationStatus(
       {
@@ -64,6 +86,170 @@ describe('automatic pump grid classes', () => {
   })
 })
 
+describe('live dispensing pipes', () => {
+  it('animates pipes only while a fill is in progress', () => {
+    const live = liveDispensingFromPumpState({
+      'pump-2': {
+        pumpId: 'pump-2',
+        latestSale: {
+          transactionId: 'tx-a',
+          stationId: 'lab',
+          pumpId: 'pump-2',
+          nozzleId: null,
+          product: 'PMS',
+          volumeLiters: 0.17,
+          amount: 2000,
+          currency: 'NGN',
+          pricePerLiter: 11764,
+          status: 'DISPENSING',
+          sourceTopic: null,
+          receivedAt: '2026-09-07T16:44:00Z',
+        },
+        lastSaleAt: '2026-09-07T16:44:00Z',
+        todaySalesAmount: 2000,
+        todayVolumeLiters: 0.17,
+        todayTransactionCount: 1,
+        liveActivityStatus: 'ACTIVE',
+        isRecentlyActive: true,
+      },
+    })
+    expect(live['pump-2']?.phase).toBe('DISPENSING')
+    expect(live['pump-2']?.currentAmount).toBe(2000)
+  })
+
+  it('does not animate pipes after hang-up', () => {
+    const live = liveDispensingFromPumpState({
+      'pump-2': {
+        pumpId: 'pump-2',
+        latestSale: {
+          transactionId: 'tx-a',
+          stationId: 'lab',
+          pumpId: 'pump-2',
+          nozzleId: null,
+          product: 'PMS',
+          volumeLiters: 0.17,
+          amount: 2000,
+          currency: 'NGN',
+          pricePerLiter: 11764,
+          status: 'COMPLETED',
+          sourceTopic: null,
+          receivedAt: '2026-09-07T16:44:09Z',
+        },
+        lastSaleAt: '2026-09-07T16:44:09Z',
+        todaySalesAmount: 2000,
+        todayVolumeLiters: 0.17,
+        todayTransactionCount: 1,
+        liveActivityStatus: 'IDLE',
+        isRecentlyActive: true,
+      },
+    })
+    expect(live['pump-2']).toBeUndefined()
+  })
+})
+
+describe('hang-up duplicate collapse', () => {
+  it('treats a second same-pump sale as the holster twin', () => {
+    const live: PumpSale = {
+      transactionId: 'tx-live',
+      stationId: 'lab',
+      pumpId: 'pump-2',
+      nozzleId: null,
+      product: 'PMS',
+      volumeLiters: 1.7,
+      amount: 2000,
+      currency: 'NGN',
+      pricePerLiter: 1176.47,
+      status: 'DISPENSING',
+      sourceTopic: null,
+      receivedAt: '2026-09-07T16:44:00Z',
+    }
+    const hangup: PumpSale = {
+      ...live,
+      transactionId: 'tx-hangup',
+      status: 'COMPLETED',
+      receivedAt: '2026-09-07T16:44:06Z',
+    }
+    expect(isHangupDuplicateSale(live, hangup)).toBe(true)
+    expect(collapseHangupDuplicates([hangup, live])).toEqual([hangup])
+    expect(
+      isStaleDispensingAfterComplete(
+        { ...hangup, status: 'COMPLETED' },
+        { ...hangup, transactionId: 'tx-late', status: 'DISPENSING' },
+      ),
+    ).toBe(true)
+    const later = {
+      ...hangup,
+      transactionId: 'tx-minute-later',
+      receivedAt: '2026-09-07T16:45:01Z',
+    }
+    expect(isHangupDuplicateSale({ ...hangup, status: 'COMPLETED' }, later)).toBe(true)
+  })
+
+  it('does not overlay DISPENSING on a completed hang-up', () => {
+    expect(
+      livePumpInferredStatus(
+        'OPEN',
+        {
+          pumpId: 'pump-2',
+          latestSale: {
+            transactionId: 'tx-hangup',
+            stationId: 'lab',
+            pumpId: 'pump-2',
+            nozzleId: null,
+            product: 'PMS',
+            volumeLiters: 1.7,
+            amount: 2000,
+            currency: 'NGN',
+            pricePerLiter: 1176.47,
+            status: 'COMPLETED',
+            sourceTopic: null,
+            receivedAt: '2026-09-07T16:44:06Z',
+          },
+          lastSaleAt: '2026-09-07T16:44:06Z',
+          todaySalesAmount: 2000,
+          todayVolumeLiters: 1.7,
+          todayTransactionCount: 1,
+          liveActivityStatus: 'IDLE',
+          isRecentlyActive: false,
+        },
+        'IDLE',
+      ),
+    ).toBe('COMPLETED')
+  })
+
+  it('clears DISPENSING after live ticks go idle', () => {
+    expect(
+      livePumpInferredStatus(
+        'OPEN',
+        {
+          pumpId: 'pump-1',
+          latestSale: {
+            transactionId: 'tx-live',
+            stationId: 'lab',
+            pumpId: 'pump-1',
+            nozzleId: null,
+            product: 'PMS',
+            volumeLiters: 1.7,
+            amount: 2000,
+            currency: 'NGN',
+            pricePerLiter: 1176.47,
+            status: 'DISPENSING',
+            sourceTopic: null,
+            receivedAt: '2026-09-07T16:44:00Z',
+          },
+          lastSaleAt: '2026-09-07T16:44:00Z',
+          todaySalesAmount: 2000,
+          todayVolumeLiters: 1.7,
+          todayTransactionCount: 1,
+          liveActivityStatus: 'IDLE',
+          isRecentlyActive: false,
+        },
+        'DISPENSING',
+      ),
+    ).toBe('COMPLETED')
+  })
+})
+
 describe('pump status colors (closure vs outage)', () => {
   it('uses gray for powered off / closed, green for dispensing, blue for idle', () => {
     expect(pumpStatusColor('POWERED_OFF')).toBe('#64748b')
@@ -72,6 +258,76 @@ describe('pump status colors (closure vs outage)', () => {
     expect(pumpStatusColor('OFFLINE')).toBe('#ef4444')
     expect(pumpStatusColor('IDLE')).toBe('#3b82f6')
     expect(pumpStatusColor('DISPENSING')).toBe('#22c55e')
+  })
+})
+
+describe('live tank drawdown', () => {
+  it('reduces a 25 L lab tank by connected pump sales', () => {
+    const tanks = applyLiveTankDrawdown(
+      [
+        {
+          id: 'lab-tank',
+          tankCode: 'PMS-LAB',
+          reportedLiters: 25,
+          capacityLiters: 25,
+          fillPercent: 100,
+          measuredAt: '2026-09-07T10:00:00Z',
+        },
+      ],
+      [
+        {
+          transactionId: 'tx-1',
+          stationId: 'lab',
+          pumpId: 'pump-2',
+          nozzleId: null,
+          product: 'PMS',
+          volumeLiters: 1,
+          amount: 1175,
+          currency: 'NGN',
+          pricePerLiter: 1175,
+          status: 'COMPLETED',
+          sourceTopic: null,
+          receivedAt: '2026-09-07T11:00:00Z',
+        },
+      ],
+      [{ tankId: 'lab-tank', mqttPumpId: 'pump-2', pumpId: 'p2', isPrimary: true }],
+      [{ id: 'p2', mqttPumpId: 'pump-2', pumpCode: 'P2' }],
+    )
+    expect(tanks[0].reportedLiters).toBe(24)
+    expect(tanks[0].drawnLiters).toBe(1)
+    expect(tanks[0].fillPercent).toBe(96)
+  })
+
+  it('ignores sales from before the tank reading', () => {
+    const tanks = applyLiveTankDrawdown(
+      [
+        {
+          id: 'lab-tank',
+          reportedLiters: 25,
+          capacityLiters: 25,
+          measuredAt: '2026-09-07T12:00:00Z',
+        },
+      ],
+      [
+        {
+          transactionId: 'tx-old',
+          stationId: 'lab',
+          pumpId: 'pump-2',
+          nozzleId: null,
+          product: 'PMS',
+          volumeLiters: 8,
+          amount: 9400,
+          currency: 'NGN',
+          pricePerLiter: 1175,
+          status: 'COMPLETED',
+          sourceTopic: null,
+          receivedAt: '2026-09-07T11:00:00Z',
+        },
+      ],
+      [{ tankId: 'lab-tank', mqttPumpId: 'pump-2', isPrimary: true }],
+      [{ id: 'p2', mqttPumpId: 'pump-2' }],
+    )
+    expect(tanks[0].reportedLiters).toBe(25)
   })
 })
 
@@ -187,5 +443,8 @@ describe('role-based twin access', () => {
     expect(canAccessPath(normalizeRole('ADMIN'), '/admin/stations/abc/pumps')).toBe(true)
     expect(canAccessPath(normalizeRole('EXECUTIVE'), '/admin/stations')).toBe(false)
     expect(canAccessPath(normalizeRole('STATION_MANAGER'), '/admin/stations/abc/edit')).toBe(false)
+    expect(canAccessPath(normalizeRole('STATION_MANAGER'), '/station-manager/reconciliation')).toBe(false)
+    expect(canAccessPath(normalizeRole('STATION_MANAGER'), '/reconciliations')).toBe(false)
+    expect(canAccessPath(normalizeRole('ADMIN'), '/reconciliations')).toBe(true)
   })
 })

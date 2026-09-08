@@ -7,6 +7,9 @@ import {
   getAdminUsers,
   getStations,
 } from '../api/client'
+import { apiErrorMessage } from '../lib/apiError'
+
+const MIN_PASSWORD_LENGTH = 8
 
 export default function UsersPage() {
   const qc = useQueryClient()
@@ -17,6 +20,7 @@ export default function UsersPage() {
   const [role, setRole] = useState('STATION_MANAGER')
   const [assignUserId, setAssignUserId] = useState('')
   const [selectedStations, setSelectedStations] = useState<string[]>([])
+  const [formError, setFormError] = useState<string | null>(null)
 
   const createMut = useMutation({
     mutationFn: async () =>
@@ -24,9 +28,28 @@ export default function UsersPage() {
     onSuccess: () => {
       setEmail('')
       setPassword('')
+      setFormError(null)
       qc.invalidateQueries({ queryKey: ['admin', 'users'] })
     },
+    onError: (err) => {
+      setFormError(apiErrorMessage(err, 'Password must be at least 8 characters.'))
+    },
   })
+
+  const submitCreate = () => {
+    if (!email.trim()) {
+      setFormError('Email is required.')
+      return
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setFormError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`)
+      return
+    }
+    setFormError(null)
+    createMut.mutate()
+  }
+
+  const createError = formError
 
   const roleMut = useMutation({
     mutationFn: async ({ id, role }: { id: string; role: string }) =>
@@ -46,20 +69,45 @@ export default function UsersPage() {
 
       <div className="card space-y-3 max-w-xl">
         <h2 className="text-white text-sm font-semibold">Create user</h2>
-        <input className="input w-full" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
         <input
           className="input w-full"
-          type="password"
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Email"
+          value={email}
+          onChange={(e) => {
+            setEmail(e.target.value)
+            if (formError) setFormError(null)
+          }}
         />
+        <div>
+          <input
+            className="input w-full"
+            type="password"
+            placeholder="Password (min. 8 characters)"
+            value={password}
+            minLength={MIN_PASSWORD_LENGTH}
+            autoComplete="new-password"
+            aria-invalid={Boolean(createError)}
+            aria-describedby={createError ? 'create-user-error' : 'password-hint'}
+            onChange={(e) => {
+              setPassword(e.target.value)
+              if (formError) setFormError(null)
+            }}
+          />
+          <p id="password-hint" className="mt-1 text-xs text-slate-500">
+            Must be at least {MIN_PASSWORD_LENGTH} characters.
+          </p>
+        </div>
         <select className="input w-full" value={role} onChange={(e) => setRole(e.target.value)}>
           <option value="ADMIN">ADMIN</option>
           <option value="EXECUTIVE">EXECUTIVE</option>
           <option value="STATION_MANAGER">STATION_MANAGER</option>
         </select>
-        <button type="button" className="btn-primary" onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+        {createError ? (
+          <p id="create-user-error" className="text-sm text-red-400" role="alert">
+            {createError}
+          </p>
+        ) : null}
+        <button type="button" className="btn-primary" onClick={submitCreate} disabled={createMut.isPending}>
           Create
         </button>
       </div>

@@ -30,7 +30,7 @@ def serialize_sale(row: PumpTransaction) -> dict[str, Any]:
         "product": row.product,
         "volumeLiters": _as_float(row.volume_liters),
         "amount": _as_float(row.amount),
-        "currency": row.currency or "USD",
+        "currency": "NGN" if (not row.currency or str(row.currency).upper() == "USD") else str(row.currency),
         "pricePerLiter": _as_float(row.price_per_liter),
         "status": row.status,
         "sourceTopic": row.source_topic,

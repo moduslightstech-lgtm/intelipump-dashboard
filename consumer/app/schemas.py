@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Tuple, Union
 
 from app.models import NormalizedTransaction, ValidationError
-from app.phase9 import is_phase9_envelope, scaled_sale_fields
+from app.phase9 import FILLING_UPDATED, event_type_of, is_phase9_envelope, scaled_sale_fields
 
 
 def _first(payload: dict[str, Any], *keys: str) -> Any:
@@ -123,6 +123,8 @@ def normalize_transaction(
     nozzle_id = _first(payload, "nozzleId", "nozzle_id")
     product = _first(payload, "product")
     currency = str(_first(payload, "currency") or "NGN")
+    if currency.upper() == "USD":
+        currency = "NGN"
     raw_frame = _first(payload, "rawFrame", "raw_frame")
     status = str(_first(payload, "status") or "COMPLETED")
 
@@ -196,14 +198,21 @@ def _normalize_phase9_transaction(
     price = fields["price"]
     if price is None and volume > 0:
         price = (amount / volume).quantize(Decimal("0.01"))
+    event = event_type_of(payload)
+    in_progress = event == FILLING_UPDATED
     if price is None:
-        return None, ValidationError(
-            "INVALID_PRICE",
-            "payload.raw_unit_price is required when volume is zero",
-        )
+        if in_progress:
+            price = Decimal("0")
+        else:
+            return None, ValidationError(
+                "INVALID_PRICE",
+                "payload.raw_unit_price is required when volume is zero",
+            )
 
     started = _parse_timestamp(fields["started_at"])
-    completed = _parse_timestamp(fields["completed_at"] or fields["occurred_at"])
+    completed = None if in_progress else _parse_timestamp(
+        fields["completed_at"] or fields["occurred_at"]
+    )
     device_timestamp = _parse_timestamp(fields["occurred_at"]) or completed
 
     return (
@@ -219,7 +228,7 @@ def _normalize_phase9_transaction(
             currency=fields["currency"],
             price_per_liter=price,
             raw_frame=None,
-            status=fields["status"],
+            status="DISPENSING" if in_progress else fields["status"],
             device_timestamp=device_timestamp,
             transaction_started_at=started,
             transaction_completed_at=completed,

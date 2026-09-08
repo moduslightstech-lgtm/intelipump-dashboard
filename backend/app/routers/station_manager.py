@@ -8,18 +8,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import ReconciliationRun, User
+from app.models import User
 from app.services.rbac import (
     accessible_stations,
     assert_station_access,
-    is_admin,
     require_admin,
     require_station_manager_or_admin,
 )
+from app.services.stock_reconciliation import day_close_payload, upsert_till
 from app.services.tank_readings import (
     admin_correct_batch,
     batch_audit_history,
@@ -57,6 +56,17 @@ class SubmitRequest(BaseModel):
     business_date: Optional[date] = None
     confirm: bool = False
     backdate_reason: Optional[str] = None
+
+
+class TillRequest(BaseModel):
+    station_id: UUID
+    business_date: Optional[date] = None
+    cash: float = Field(0, ge=0)
+    pos: float = Field(0, ge=0)
+    transfer: float = Field(0, ge=0)
+    mobile_money: float = Field(0, ge=0)
+    fleet_or_credit: float = Field(0, ge=0)
+    other: float = Field(0, ge=0)
 
 
 class CorrectRequest(BaseModel):
@@ -125,11 +135,8 @@ def history(
 def reading_audit(
     batch_id: UUID,
     db: Session = Depends(get_db),
-    user: User = Depends(require_station_manager_or_admin),
+    user: User = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    if not is_admin(user):
-        # Managers may view audit for their stations (read-only)
-        pass
     return batch_audit_history(db, user, batch_id)
 
 
@@ -199,31 +206,34 @@ def my_reconciliation(
     station_id: UUID = Query(...),
     business_date: Optional[date] = None,
     db: Session = Depends(get_db),
-    user: User = Depends(require_station_manager_or_admin),
+    user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     station = assert_station_access(db, user, station_id)
     biz = business_date or station_business_date(station)
-    code = station.mqtt_station_id or station.station_code
-    run = db.scalar(
-        select(ReconciliationRun).where(
-            ReconciliationRun.business_date == biz,
-            ReconciliationRun.station_id.in_([station.station_code, code]),
+    return day_close_payload(db, station=station, business_date=biz)
+
+
+@router.put("/till")
+def save_till(
+    body: TillRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    station = assert_station_access(db, user, body.station_id)
+    biz = body.business_date or station_business_date(station)
+    try:
+        upsert_till(
+            db,
+            station=station,
+            business_date=biz,
+            cash=body.cash,
+            pos=body.pos,
+            transfer=body.transfer,
+            mobile_money=body.mobile_money,
+            fleet_or_credit=body.fleet_or_credit,
+            other=body.other,
+            actor=user,
         )
-    )
-    if run is None:
-        return {"businessDate": biz.isoformat(), "status": "NOT_STARTED", "run": None}
-    return {
-        "businessDate": biz.isoformat(),
-        "status": run.status,
-        "run": {
-            "id": str(run.id),
-            "transactionSalesVolume": float(run.transaction_sales_volume or 0),
-            "transactionSalesAmount": float(run.transaction_sales_amount or 0),
-            "openingStockVolume": float(run.opening_stock_volume or 0),
-            "deliveryVolume": float(run.delivery_volume or 0),
-            "expectedClosingVolume": float(run.expected_closing_volume or 0),
-            "actualClosingVolume": float(run.actual_closing_volume or 0),
-            "tankVarianceVolume": float(run.tank_variance_volume or 0),
-            "tankVariancePercentage": float(run.tank_variance_percentage or 0),
-        },
-    }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return day_close_payload(db, station=station, business_date=biz)

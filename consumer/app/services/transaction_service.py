@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from psycopg2.extras import Json
@@ -14,6 +14,8 @@ from app.models import NormalizedTransaction, ValidationError
 from app.services.identity import resolve_pump_uuid, resolve_station_uuid
 
 logger = logging.getLogger(__name__)
+
+_HANGUP_DUP_WINDOW = timedelta(seconds=120)
 
 
 class TransactionService:
@@ -125,7 +127,51 @@ class TransactionService:
         External MQTT station_id / pump_id are always stored exactly as received.
         station_uuid / pump_uuid are optional resolved catalog FKs.
         """
-        resolved_sql = """
+        upsert_live = """
+            ON CONFLICT (id) DO UPDATE SET
+                volume_liters = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.volume_liters
+                    ELSE EXCLUDED.volume_liters
+                END,
+                amount = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.amount
+                    ELSE EXCLUDED.amount
+                END,
+                currency = COALESCE(EXCLUDED.currency, pump_transactions.currency),
+                price_per_liter = COALESCE(
+                    EXCLUDED.price_per_liter, pump_transactions.price_per_liter
+                ),
+                status = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.status
+                    ELSE EXCLUDED.status
+                END,
+                device_timestamp = COALESCE(
+                    EXCLUDED.device_timestamp, pump_transactions.device_timestamp
+                ),
+                transaction_started_at = COALESCE(
+                    pump_transactions.transaction_started_at,
+                    EXCLUDED.transaction_started_at
+                ),
+                transaction_completed_at = COALESCE(
+                    EXCLUDED.transaction_completed_at,
+                    pump_transactions.transaction_completed_at
+                ),
+                raw_payload = EXCLUDED.raw_payload,
+                received_at = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                     AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.received_at
+                    ELSE EXCLUDED.received_at
+                END,
+                source_topic = COALESCE(
+                    EXCLUDED.source_topic, pump_transactions.source_topic
+                )
+            RETURNING id
+        """
+        resolved_sql = f"""
             INSERT INTO pump_transactions (
                 id, station_id, device_id, pump_id, nozzle_id, product,
                 volume_liters, amount, currency, price_per_liter, raw_frame,
@@ -137,10 +183,9 @@ class TransactionService:
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s
             )
-            ON CONFLICT (id) DO NOTHING
-            RETURNING id
+            {upsert_live}
         """
-        extended_sql = """
+        extended_sql = f"""
             INSERT INTO pump_transactions (
                 id, station_id, device_id, pump_id, nozzle_id, product,
                 volume_liters, amount, currency, price_per_liter, raw_frame,
@@ -151,8 +196,7 @@ class TransactionService:
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s
             )
-            ON CONFLICT (id) DO NOTHING
-            RETURNING id
+            {upsert_live}
         """
         legacy_sql = """
             INSERT INTO pump_transactions (
@@ -167,6 +211,8 @@ class TransactionService:
 
         with self._db.connection() as conn:
             with conn.cursor() as cur:
+                if self._absorb_hangup_duplicate(cur, tx, received_at):
+                    return False
                 station_uuid = resolve_station_uuid(cur, tx.station_id)
                 pump_uuid = (
                     resolve_pump_uuid(cur, station_uuid, tx.pump_id)
@@ -249,6 +295,89 @@ class TransactionService:
                         cur.execute(legacy_sql, legacy_params)
                 row = cur.fetchone()
                 return row is not None
+
+    def _absorb_hangup_duplicate(
+        self, cur, tx: NormalizedTransaction, received_at: datetime
+    ) -> bool:
+        """Fold holster twins into the live-fill row. Returns True if skipped."""
+        status = (tx.status or "").upper()
+        incoming_done = status in {"COMPLETED", "COMPLETE"}
+        incoming_live = status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+        if not incoming_done and not incoming_live:
+            return False
+        try:
+            cur.execute(
+                """
+                SELECT id, status FROM pump_transactions
+                WHERE station_id = %s AND pump_id = %s
+                  AND amount IS NOT DISTINCT FROM %s
+                  AND volume_liters IS NOT DISTINCT FROM %s
+                  AND id <> %s
+                  AND received_at >= %s
+                ORDER BY received_at DESC
+                LIMIT 1
+                """,
+                (
+                    tx.station_id,
+                    tx.pump_id,
+                    tx.amount,
+                    tx.volume_liters,
+                    tx.transaction_id,
+                    received_at - _HANGUP_DUP_WINDOW,
+                ),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return False
+            raise
+        row = cur.fetchone()
+        if not row:
+            return False
+        existing_id = str(row[0])
+        if existing_id == str(tx.transaction_id):
+            return False
+        existing_status = str(row[1] or "").upper()
+        existing_done = existing_status in {"COMPLETED", "COMPLETE"}
+        if existing_done or (incoming_live and not incoming_done):
+            logger.info(
+                "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
+                "incoming=%s existing=%s",
+                existing_id,
+                tx.transaction_id,
+                status,
+                existing_status,
+            )
+            return True
+        if not incoming_done:
+            return False
+        try:
+            cur.execute(
+                """
+                UPDATE pump_transactions SET
+                    status = %s,
+                    transaction_completed_at = COALESCE(%s, transaction_completed_at),
+                    raw_payload = %s,
+                    received_at = %s
+                WHERE id = %s
+                """,
+                (
+                    tx.status,
+                    tx.transaction_completed_at,
+                    Json(tx.raw_payload),
+                    received_at,
+                    existing_id,
+                ),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return False
+            raise
+        logger.info(
+            "merged_hangup_complete into_id=%s dropped_id=%s",
+            existing_id,
+            tx.transaction_id,
+        )
+        return True
 
     def _save_mqtt_message(
         self,

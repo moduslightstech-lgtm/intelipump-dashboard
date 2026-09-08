@@ -272,6 +272,64 @@ class StationStatusService:
                     )
                 return "processed"
 
+    def touch_from_device_heartbeat(
+        self,
+        *,
+        station_id: str,
+        device_id: str | None,
+        received_at: datetime | None = None,
+    ) -> str:
+        """Phase 9 device heartbeats also keep the station ONLINE.
+
+        Device topics only update ``edge_devices``. Without this, the timeout
+        loop treats ``stations.last_heartbeat_at`` as stale and paints every
+        pump OFFLINE while the Pi is still live.
+        """
+        when = received_at or datetime.now(timezone.utc)
+        with self._db.connection() as conn:
+            with conn.cursor() as cur:
+                station_uuid = resolve_station_uuid(cur, station_id)
+                if station_uuid is None:
+                    return "unmapped"
+                prev = self._load_current(cur, station_uuid)
+                decision = StatusDecision(
+                    operational_status=normalize_operational(
+                        prev.get("operational_status") or "OPEN"
+                    ),
+                    connectivity_status="ONLINE",
+                    source="REPORTED",
+                    reason="phase9_device_heartbeat",
+                    create_outage_alert=False,
+                    pump_state=None,
+                    sse_events=["station.online"],
+                )
+                self._apply(
+                    cur,
+                    station_uuid=station_uuid,
+                    prev=prev,
+                    decision=decision,
+                    device_id=str(device_id) if device_id else None,
+                    payload={"eventType": "HEARTBEAT", "stationId": station_id},
+                    reported_at=when,
+                    received_at=when,
+                    heartbeat=True,
+                    flags={"mqtt_connected": True},
+                )
+                cur.execute(
+                    """
+                    UPDATE pumps SET
+                        operational_state = 'IDLE',
+                        state_source = 'INFERRED',
+                        state_reason = 'phase9_device_heartbeat',
+                        last_state_at = %s,
+                        updated_at = NOW()
+                    WHERE station_id = %s
+                      AND operational_state = 'OFFLINE'
+                    """,
+                    (when, str(station_uuid)),
+                )
+        return "processed"
+
     def evaluate_timeouts(self) -> int:
         """Mark stations offline when heartbeat timed out. Returns updated count."""
         now = datetime.now(timezone.utc)
@@ -281,7 +339,8 @@ class StationStatusService:
                 cur.execute(
                     """
                     SELECT id, operational_status, connectivity_status, status_source,
-                           opens_at, closes_at, operating_days, timezone, last_heartbeat_at
+                           opens_at, closes_at, operating_days, timezone, last_heartbeat_at,
+                           mqtt_station_id, station_code
                     FROM stations
                     """
                 )
@@ -297,7 +356,16 @@ class StationStatusService:
                         operating_days,
                         tz,
                         last_hb,
+                        mqtt_station_id,
+                        station_code,
                     ) = row
+                    edge_hb = self._latest_edge_heartbeat(
+                        cur,
+                        mqtt_station_id=mqtt_station_id,
+                        station_code=station_code,
+                    )
+                    if last_hb is None or (edge_hb is not None and edge_hb > last_hb):
+                        last_hb = edge_hb
                     schedule = Schedule(
                         opens_at=opens_at,
                         closes_at=closes_at,
@@ -335,6 +403,23 @@ class StationStatusService:
                         self._create_outage_alert(cur, station_uuid, decision, now)
                     updated += 1
         return updated
+
+    def _latest_edge_heartbeat(
+        self, cur, *, mqtt_station_id: str | None, station_code: str | None
+    ) -> datetime | None:
+        keys = [k for k in (mqtt_station_id, station_code) if k]
+        if not keys:
+            return None
+        cur.execute(
+            """
+            SELECT MAX(last_heartbeat_at)
+            FROM edge_devices
+            WHERE station_id = ANY(%s)
+            """,
+            (keys,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
     def _load_schedule(self, cur, station_uuid) -> Schedule:
         cur.execute(

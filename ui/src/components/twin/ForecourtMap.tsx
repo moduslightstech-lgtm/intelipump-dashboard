@@ -111,7 +111,11 @@ function TankNode({
         fontSize={9}
         fontWeight="600"
       >
-        {live ? 'Automated' : 'Source: Manual'}
+        {live
+          ? 'Automated'
+          : Number(node.raw.drawnLiters) > 0
+            ? 'After sales'
+            : 'Source: Manual'}
       </text>
     </g>
   )

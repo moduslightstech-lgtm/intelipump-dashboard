@@ -21,6 +21,8 @@ export type TwinAnimTx = {
 
 export const PLAYBACK_MS = 3000
 const COMPLETED_HOLD_MS = 1000
+/** Last fill tick with no COMPLETED → treat holster as done. */
+export const HANGUP_IDLE_MS = 5000
 
 export function playbackProgress(elapsedMs: number, durationMs = PLAYBACK_MS): number {
   const t = Math.min(1, Math.max(0, elapsedMs / durationMs))
@@ -68,11 +70,13 @@ export function useDispensingPlayback(opts: {
   enabled?: boolean
 }) {
   const qc = useQueryClient()
-  const durationMs = opts.durationMs ?? PLAYBACK_MS
   const dedup = useMemo(() => createRecentTransactionDedup(), [])
   const [activeByPump, setActiveByPump] = useState<Record<string, ActiveDispensingState>>({})
   const [restoredPumpIds, setRestoredPumpIds] = useState<string[]>([])
   const timersRef = useRef<Map<string, number[]>>(new Map())
+  const completedLatch = useRef<Map<string, { amount: number; volume: number; at: number }>>(
+    new Map(),
+  )
   const rafRef = useRef<number | null>(null)
 
   const clearPumpTimers = (pumpKey: string) => {
@@ -126,83 +130,72 @@ export function useDispensingPlayback(opts: {
       if (!tx.pumpId) return
 
       const txId = tx.transactionId || `${tx.pumpId}:${tx.timestamp}:${tx.amount}`
-      if (dedup.has(txId)) return
-      dedup.remember(txId)
-
       const pumpKey = String(tx.pumpId)
-      clearPumpTimers(pumpKey)
+      const status = String(tx.status || '').toUpperCase()
+      const inProgress =
+        status === 'DISPENSING' || status === 'IN_PROGRESS' || status === 'ACTIVE'
+      const isComplete = status === 'COMPLETED' || status === 'COMPLETE'
 
       const finalVol = Number(tx.volumeLiters || 0)
       const finalAmt = Number(tx.amount || 0)
-      const startedAt = performance.now()
+      const latch = completedLatch.current.get(pumpKey)
+      const staleAfterComplete = Boolean(
+        inProgress &&
+          latch &&
+          Number(latch.amount) === finalAmt &&
+          Number(latch.volume) === finalVol &&
+          Date.now() - latch.at < 120_000,
+      )
+      if (staleAfterComplete) return
 
       let tankId = ''
       let connectionId = ''
-
       qc.setQueriesData({ queryKey: ['twin', 'live-state', opts.stationId] }, (old: any) => {
         if (!old) return old
         const conn = resolveConnection(tx, old)
         tankId = conn?.tankId ? String(conn.tankId) : ''
         connectionId = conn?.id ? String(conn.id) : ''
-
-        const pumps = (old.pumps || []).map((p: any) => {
-          if (!pumpMatchesId(p, tx.pumpId)) return p
-          return {
-            ...p,
-            inferredStatus: 'DISPENSING',
-            lastTransactionAmount: tx.amount ?? p.lastTransactionAmount,
-            lastTransactionVolume: tx.volumeLiters ?? p.lastTransactionVolume,
-            lastTransactionAt: tx.timestamp || new Date().toISOString(),
-            product: tx.product || p.product,
-          }
-        })
-        const latest = [
-          {
-            id: txId,
-            stationId: tx.stationId,
-            pumpId: tx.pumpId,
-            nozzleId: tx.nozzleId,
-            product: tx.product,
-            volumeLiters: tx.volumeLiters,
-            amount: tx.amount,
-            status: tx.status || 'COMPLETED',
-            receivedAt: tx.timestamp || new Date().toISOString(),
-          },
-          ...(old.latestTransactions || []).filter((t: any) => t.id !== txId),
-        ].slice(0, 20)
+        if (!inProgress) return old
         return {
           ...old,
-          pumps,
-          latestTransactions: latest,
-          salesToday: Number(old.salesToday || 0) + Number(tx.amount || 0),
-          volumeToday: Number(old.volumeToday || 0) + Number(tx.volumeLiters || 0),
-          transactionCountToday: Number(old.transactionCountToday || 0) + 1,
+          pumps: (old.pumps || []).map((p: any) =>
+            pumpMatchesId(p, tx.pumpId)
+              ? {
+                  ...p,
+                  inferredStatus: 'DISPENSING',
+                  lastTransactionAmount: tx.amount ?? p.lastTransactionAmount,
+                  lastTransactionVolume: tx.volumeLiters ?? p.lastTransactionVolume,
+                  lastTransactionAt: tx.timestamp || new Date().toISOString(),
+                  product: tx.product || p.product,
+                }
+              : p,
+          ),
           lastUpdatedAt: new Date().toISOString(),
         }
       })
 
-      setActiveByPump((prev) => ({
-        ...prev,
-        [pumpKey]: {
-          transactionId: txId,
-          pumpId: pumpKey,
-          tankId,
-          finalVolume: finalVol,
-          finalAmount: finalAmt,
-          currentVolume: 0,
-          currentAmount: 0,
-          phase: 'DISPENSING',
-          startedAt,
-          durationMs,
-          product: tx.product,
-          connectionId,
-        },
-      }))
-
-      const t1 = window.setTimeout(() => {
+      const finishPump = (markCompleted: boolean) => {
+        if (markCompleted) {
+          completedLatch.current.set(pumpKey, {
+            amount: finalAmt,
+            volume: finalVol,
+            at: Date.now(),
+          })
+          qc.setQueriesData({ queryKey: ['twin', 'live-state', opts.stationId] }, (old: any) => {
+            if (!old) return old
+            return {
+              ...old,
+              pumps: (old.pumps || []).map((p: any) =>
+                pumpMatchesId(p, tx.pumpId)
+                  ? { ...p, inferredStatus: 'COMPLETED' }
+                  : p,
+              ),
+            }
+          })
+        }
         setActiveByPump((prev) => {
           const cur = prev[pumpKey]
-          if (!cur || cur.transactionId !== txId) return prev
+          if (!cur) return prev
           return {
             ...prev,
             [pumpKey]: {
@@ -213,30 +206,59 @@ export function useDispensingPlayback(opts: {
             },
           }
         })
-        qc.setQueriesData({ queryKey: ['twin', 'live-state', opts.stationId] }, (old: any) => {
-          if (!old) return old
-          return {
-            ...old,
-            pumps: (old.pumps || []).map((p: any) =>
-              pumpMatchesId(p, tx.pumpId) ? { ...p, inferredStatus: 'COMPLETED' } : p,
-            ),
-          }
-        })
-
+        clearPumpTimers(pumpKey)
         const t2 = window.setTimeout(() => {
           setActiveByPump((prev) => {
             const next = { ...prev }
-            if (next[pumpKey]?.transactionId === txId) delete next[pumpKey]
+            delete next[pumpKey]
             return next
           })
-          qc.invalidateQueries({ queryKey: ['twin', 'live-state', opts.stationId] })
         }, COMPLETED_HOLD_MS)
         timersRef.current.set(pumpKey, [t2])
-      }, durationMs)
+      }
 
-      timersRef.current.set(pumpKey, [t1])
+      if (inProgress) {
+        clearPumpTimers(pumpKey)
+        setActiveByPump((prev) => {
+          const cur = prev[pumpKey]
+          if (
+            cur &&
+            cur.transactionId !== txId &&
+            Number(cur.finalAmount) === finalAmt &&
+            Number(cur.finalVolume) === finalVol
+          ) {
+            return prev
+          }
+          return {
+            ...prev,
+            [pumpKey]: {
+              transactionId: txId,
+              pumpId: pumpKey,
+              tankId: tankId || cur?.tankId || '',
+              finalVolume: finalVol,
+              finalAmount: finalAmt,
+              currentVolume: finalVol,
+              currentAmount: finalAmt,
+              phase: 'DISPENSING',
+              startedAt: performance.now(),
+              durationMs: 1,
+              product: tx.product,
+              connectionId: connectionId || cur?.connectionId,
+            },
+          }
+        })
+        const idle = window.setTimeout(() => finishPump(true), HANGUP_IDLE_MS)
+        timersRef.current.set(pumpKey, [idle])
+        return
+      }
+
+      if (isComplete) {
+        dedup.remember(txId)
+        finishPump(true)
+        return
+      }
     },
-    [dedup, durationMs, matchesStation, opts.stationId, qc],
+    [dedup, matchesStation, opts.stationId, qc],
   )
 
   useEffect(() => {

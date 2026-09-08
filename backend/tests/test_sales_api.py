@@ -91,7 +91,7 @@ def test_serialize_sale_matches_dashboard_contract():
     assert sale["volumeLiters"] == 12.5
     assert sale["amount"] == 146.88
     assert sale["pricePerLiter"] == 11.75
-    assert sale["currency"] == "USD"
+    assert sale["currency"] == "NGN"
     assert sale["receivedAt"].startswith("2026-09-06T03:10:00")
 
 

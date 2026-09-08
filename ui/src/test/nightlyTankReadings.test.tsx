@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 
@@ -19,7 +19,15 @@ vi.mock('../api/client', () => ({
       deadlineLocal: '22:30',
       uiStatus: 'NOT_STARTED',
       batch: { status: 'NOT_STARTED', id: null },
-      tanks: [],
+      tanks: [
+        {
+          tankId: 't1',
+          tankCode: 'T1',
+          name: 'PMS',
+          product: 'PMS',
+          capacityLiters: 30000,
+        },
+      ],
       station: { name: 'Boluwaji' },
     },
   })),
@@ -61,17 +69,28 @@ function wrap(ui: React.ReactNode) {
   )
 }
 
-describe('Nightly Tank Readings page', () => {
+describe('Tank Reading page', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('renders history-first layout and Add New Entry', async () => {
     render(wrap(<TankReadingsPage />))
-    expect(await screen.findByText('Nightly Tank Readings')).toBeInTheDocument()
-    expect(screen.getByText(/View previous submissions/i)).toBeInTheDocument()
+    expect(await screen.findByText('Tank Reading')).toBeInTheDocument()
+    expect(await screen.findByText('Previous submissions')).toBeInTheDocument()
     expect(await screen.findByRole('button', { name: /Add New Entry/i })).toBeInTheDocument()
     expect(await screen.findByText('2026-07-14')).toBeInTheDocument()
     expect(screen.getByText(/58,420 L/)).toBeInTheDocument()
+  })
+
+  it('shows only closing volume and optional notes', async () => {
+    render(wrap(<TankReadingsPage />))
+    await screen.findByText('2026-07-14')
+    fireEvent.click(screen.getByRole('button', { name: 'Add New Entry' }))
+    expect(await screen.findByText(/Closing volume \(L\)/)).toBeInTheDocument()
+    expect(screen.getByText('Notes')).toBeInTheDocument()
+    expect(screen.queryByText('Measured level (mm)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Water level (mm)')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Temperature/)).not.toBeInTheDocument()
   })
 })
