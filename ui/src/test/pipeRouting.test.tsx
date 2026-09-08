@@ -41,10 +41,10 @@ function pump(id: string, x: number, y: number, mqtt?: string): ForecourtNode {
 }
 
 describe('anchors', () => {
-  it('uses tank bottom-center and pump top-center', () => {
+  it('uses tank vessel outlet and pump top-center', () => {
     const t = box('t1', 100, 50, 120, 70)
     const p = pump('p1', 200, 280)
-    expect(getTankOutletAnchor(t)).toEqual({ x: 160, y: 120 })
+    expect(getTankOutletAnchor(t)).toEqual({ x: 160, y: 50 + Math.min(110, Math.max(8, 70 - 38)) })
     expect(getPumpInletAnchor(p)).toEqual({ x: 244, y: 280 })
   })
 })

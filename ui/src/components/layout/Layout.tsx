@@ -120,7 +120,7 @@ const Icons = {
 }
 
 const ADMIN_NAV: NavItem[] = [
-  { to: '/', label: 'Overview', end: true, icon: Icons.overview },
+  { to: '/', label: 'Executive Overview', end: true, icon: Icons.overview },
   { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
   { to: '/transactions', label: 'Transactions', icon: Icons.transactions },
   { to: '/reconciliations', label: 'Reconciliation', icon: Icons.recon },
@@ -145,7 +145,8 @@ const EXEC_NAV: NavItem[] = [
 ]
 
 const MANAGER_NAV: NavItem[] = [
-  { to: '/station-manager/tank-readings', label: 'Tank Reading', end: true, icon: Icons.tanks },
+  { to: '/', label: 'Overview', end: true, icon: Icons.overview },
+  { to: '/station-manager/tank-readings', label: 'Tank Reading', icon: Icons.tanks },
   { to: '/station-manager/history', label: 'Submission History', icon: Icons.transactions },
   { to: '/station-manager/profile', label: 'Profile', icon: Icons.profile },
 ]

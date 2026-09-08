@@ -27,6 +27,8 @@ class NormalizedTransaction:
     transaction_completed_at: Optional[datetime]
     raw_payload: dict[str, Any] = field(default_factory=dict)
     source_topic: str = ""
+    source_identifier: Optional[str] = None
+    side_id: Optional[str] = None
     # Phase 9 business idempotency key (tx-completed:...). Not invented.
     deduplication_key: Optional[str] = None
     # Resolved catalog UUIDs — optional; external station_id/pump_id stay unchanged

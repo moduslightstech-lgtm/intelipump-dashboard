@@ -214,7 +214,7 @@ describe('hang-up duplicate collapse', () => {
         },
         'IDLE',
       ),
-    ).toBe('COMPLETED')
+    ).toBe('IDLE')
   })
 
   it('clears DISPENSING after live ticks go idle', () => {
@@ -246,7 +246,7 @@ describe('hang-up duplicate collapse', () => {
         },
         'DISPENSING',
       ),
-    ).toBe('COMPLETED')
+    ).toBe('IDLE')
   })
 })
 

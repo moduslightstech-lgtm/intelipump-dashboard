@@ -41,6 +41,12 @@ class PumpTransaction(Base):
     pump_uuid: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("pumps.id"), nullable=True
     )
+    nozzle_uuid: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nozzles.id"), nullable=True
+    )
+    side_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    source_identifier: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mapping_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     product: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     volume_liters: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
@@ -337,6 +343,11 @@ class Tank(Base):
     capacity_liters: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
     status: Mapped[str] = mapped_column(String, default="UNKNOWN", nullable=False)
     current_measurement_source: Mapped[str] = mapped_column(String, default="MANUAL", nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    deactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -355,6 +366,9 @@ class TankPumpConnection(Base):
     )
     pump_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("pumps.id", ondelete="CASCADE"), nullable=False
+    )
+    nozzle_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nozzles.id", ondelete="SET NULL"), nullable=True
     )
     product: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     line_label: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -378,6 +392,10 @@ class Nozzle(Base):
     pump_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     nozzle_code: Mapped[str] = mapped_column(String, nullable=False)
     mqtt_nozzle_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    side_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    source_identifier: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    controller_address: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     nozzle_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     display_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

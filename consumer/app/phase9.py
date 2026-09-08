@@ -259,6 +259,14 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
             first_present(payload, "nozzleId", "nozzle_id")
             or first_present(inner, "nozzle_id", "nozzleId")
         ),
+        "source_identifier": _as_str(
+            first_present(payload, "sourceIdentifier", "source_identifier")
+            or first_present(inner, "sourceIdentifier", "source_identifier")
+        ),
+        "side_id": _as_str(
+            first_present(payload, "sideId", "side_id")
+            or first_present(inner, "sideId", "side_id")
+        ),
         "product": first_present(inner, "product") or first_present(payload, "product"),
         "raw_volume": first_present(inner, "raw_volume", "rawVolume"),
         "raw_amount": first_present(inner, "raw_amount", "rawAmount"),

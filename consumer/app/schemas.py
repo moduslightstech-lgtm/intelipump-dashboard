@@ -121,6 +121,8 @@ def normalize_transaction(
 
     device_id = _first(payload, "deviceId", "device_id")
     nozzle_id = _first(payload, "nozzleId", "nozzle_id")
+    source_identifier = _first(payload, "sourceIdentifier", "source_identifier", "source")
+    side_id = _first(payload, "sideId", "side_id")
     product = _first(payload, "product")
     currency = str(_first(payload, "currency") or "NGN")
     if currency.upper() == "USD":
@@ -143,6 +145,8 @@ def normalize_transaction(
             device_id=str(device_id).strip() if device_id is not None else None,
             pump_id=pump_id,
             nozzle_id=str(nozzle_id).strip() if nozzle_id is not None else None,
+            source_identifier=str(source_identifier).strip() if source_identifier is not None else None,
+            side_id=str(side_id).strip() if side_id else None,
             product=str(product) if product is not None else None,
             volume_liters=volume,
             amount=amount,
@@ -222,6 +226,8 @@ def _normalize_phase9_transaction(
             device_id=fields["device_id"],
             pump_id=pump_id,
             nozzle_id=fields["nozzle_id"],
+            source_identifier=fields.get("source_identifier"),
+            side_id=fields.get("side_id"),
             product=str(fields["product"]) if fields["product"] is not None else None,
             volume_liters=volume,
             amount=amount,

@@ -25,6 +25,7 @@ from app.models import (
     User,
 )
 from app.services.rbac import assert_station_access, is_admin
+from app.services.tank_lifecycle import operational_tank_clause
 
 ZERO = Decimal("0")
 
@@ -169,7 +170,7 @@ def get_or_create_batch(
         db.scalars(
             select(Tank).where(
                 Tank.station_id == station.id,
-                Tank.status != "INACTIVE",
+                operational_tank_clause(),
             )
         ).all()
     )
@@ -205,7 +206,7 @@ def current_workspace(
     )
     tanks = list(
         db.scalars(
-            select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE").order_by(Tank.tank_code)
+            select(Tank).where(Tank.station_id == station.id, operational_tank_clause()).order_by(Tank.tank_code)
         ).all()
     )
     readings = list(
@@ -528,7 +529,7 @@ def submit_batch(
         )
 
     tanks = list(
-        db.scalars(select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE")).all()
+        db.scalars(select(Tank).where(Tank.station_id == station.id, operational_tank_clause())).all()
     )
     readings = list(
         db.scalars(

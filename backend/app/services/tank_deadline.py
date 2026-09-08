@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models import Station, Tank, TankReadingBatch
 from app.services.alert_engine import upsert_alert
 from app.services.station_status import Schedule, is_within_operating_hours
+from app.services.tank_lifecycle import operational_tank_clause
 from app.services.tank_readings import deadline_local, station_business_date
 
 
@@ -22,7 +23,7 @@ def check_missing_submissions(db: Session) -> int:
     for station in stations:
         tanks = list(
             db.scalars(
-                select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE")
+                select(Tank).where(Tank.station_id == station.id, operational_tank_clause())
             ).all()
         )
         if not tanks:

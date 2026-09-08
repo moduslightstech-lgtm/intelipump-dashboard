@@ -1,5 +1,7 @@
 import { fmtLiters, fmtNaira, fmtTime } from '../../api/client'
 import { pumpMatchesId, pumpStatusColor } from '../../lib/pumpIdentity'
+import { displayPumpStatus, pumpStatusLabel } from './schematic/display'
+import { friendlyNozzleName } from './schematic/physicalPump'
 
 type Props = {
   pump: Record<string, any>
@@ -30,11 +32,12 @@ export default function PumpCard({
   activePumpId,
   recentCount,
 }: Props) {
-  const status = String(pump.inferredStatus || pump.status || 'UNKNOWN').toUpperCase()
+  const status = displayPumpStatus(pump.inferredStatus || pump.status)
   const color = pumpStatusColor(status)
   const { primary, secondary, mqttId } = pumpTitle(pump)
   const isActive = animating || (activePumpId != null && pumpMatchesId(pump, activePumpId))
   const dispensing = status === 'DISPENSING' || (isActive && phase === 'pulse')
+  const nozzles = Array.isArray(pump.nozzles) ? pump.nozzles : []
 
   return (
     <article
@@ -76,7 +79,7 @@ export default function PumpCard({
             />
           </span>
           <span className="text-[11px] font-semibold" style={{ color }}>
-            {status}
+            {pumpStatusLabel(status)}
           </span>
         </div>
       </div>
@@ -98,6 +101,8 @@ export default function PumpCard({
         <span className="text-slate-300 text-right">
           {typeof recentCount === 'number' ? recentCount : Number(pump.recentSaleCount || 0)} tx
         </span>
+        <span className="text-slate-500">Nozzles</span>
+        <span className="text-slate-300 text-right">{nozzles.length || pump.nozzleCount || 0}</span>
         <span className="text-slate-500">Device</span>
         <span className="text-slate-300 text-right truncate">
           {pump.deviceName || pump.deviceCode || '—'}
@@ -111,6 +116,34 @@ export default function PumpCard({
           {Number(pump.activeAlertCount || 0)}
         </span>
       </div>
+
+      {nozzles.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          {nozzles.map((n: Record<string, any>, i: number) => {
+            const ns = displayPumpStatus(n.inferredStatus || n.status)
+            return (
+              <div
+                key={String(n.id || i)}
+                className="rounded-md border border-slate-700 bg-slate-950/70 px-2 py-1.5"
+                data-testid={`pump-list-nozzle-${n.id || i}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-white">{friendlyNozzleName(n, i)}</span>
+                  <span className="text-[10px] font-semibold" style={{ color: pumpStatusColor(ns) }}>
+                    {pumpStatusLabel(ns)}
+                  </span>
+                </div>
+                <div className="mt-1 grid grid-cols-2 gap-x-2 text-[10px] text-slate-400">
+                  <span>{n.product || 'Product not mapped'}</span>
+                  <span className="text-right">{fmtNaira(n.lastTransactionAmount)}</span>
+                  <span>{fmtLiters(n.lastTransactionVolume)}</span>
+                  <span className="text-right">{fmtTime(n.lastTransactionAt)}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
 
       {dispensing && (
         <div className="mt-2 h-1 rounded-full overflow-hidden bg-slate-800" aria-hidden>

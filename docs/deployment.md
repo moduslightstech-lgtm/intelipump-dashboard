@@ -79,3 +79,7 @@ cd backend && uvicorn app.main:create_app --factory --reload --port 8000
 # UI (proxies /api → :8000)
 cd ui && npm install && npm run dev
 ```
+
+## Production HTTPS
+
+TLS belongs at Nginx or the load balancer, not in the React app. Local `npm run dev` and Compose on `:80` stay HTTP. See `docs/security-hardening.md` §9.

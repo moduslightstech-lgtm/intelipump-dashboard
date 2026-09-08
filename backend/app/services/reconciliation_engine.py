@@ -35,6 +35,7 @@ from app.models import (
     User,
 )
 from app.services.reconciliation import _tx_time_col, business_day_bounds
+from app.services.tank_lifecycle import operational_tank_clause
 from app.services.tank_readings import station_business_date, write_audit
 
 ZERO = Decimal("0")
@@ -599,7 +600,7 @@ def compute_reconciliation(
         integrity["status"] = "REVIEW"
 
     tanks = list(
-        db.scalars(select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE")).all()
+        db.scalars(select(Tank).where(Tank.station_id == station.id, operational_tank_clause())).all()
     )
     tank_results = []
     blockers: list[str] = []
@@ -1304,7 +1305,7 @@ def apply_previous_closing_as_opening(
     business_date: date,
     actor: User,
 ) -> dict[str, Any]:
-    tanks = list(db.scalars(select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE")).all())
+    tanks = list(db.scalars(select(Tank).where(Tank.station_id == station.id, operational_tank_clause())).all())
     applied = 0
     for tank in tanks:
         opening, source = _opening_for_tank(db, tank, business_date)

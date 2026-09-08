@@ -3,27 +3,27 @@ import { useQuery } from '@tanstack/react-query'
 import {
   exportTransactionsUrl,
   fmtLiters,
+  fmtNaira,
   fmtTime,
   getStations,
   getTransactions,
+  humanizeEnum,
+  stationLabel,
   type Transaction,
 } from '../api/client'
 import { useAuth } from '../context/AuthContext'
-import {
-  SALES_HISTORY_FETCH_LIMIT,
-  useStationLiveSales,
-} from '../hooks/useStationLiveSales'
-import {
-  lagosDayEndIso,
-  lagosDayStartIso,
-  lagosToday,
-  paginateItems,
-  saleInDateRange,
-} from '../lib/salesDateFilter'
-import { liveStationId } from '../config/stations'
-import { formatSaleAmount } from '../types/sales'
+import { stationDayEndIso, stationDayStartIso, stationToday } from '../lib/salesDateFilter'
 
-const PAGE_SIZE = 20
+const PAGE_SIZES = [10, 20, 50, 100]
+
+function statusBadge(status?: string | null) {
+  const s = (status || '').toUpperCase()
+  if (s === 'COMPLETED') return 'badge-ok'
+  if (s === 'DISPENSING' || s === 'IN_PROGRESS') return 'badge-open'
+  if (s === 'REJECTED' || s === 'FAILED') return 'badge-critical'
+  if (s === 'PENDING') return 'badge-warn'
+  return 'badge-info'
+}
 
 export default function TransactionsPage() {
   const { token } = useAuth()
@@ -32,10 +32,10 @@ export default function TransactionsPage() {
   const [product, setProduct] = useState('')
   const [status, setStatus] = useState('')
   const [q, setQ] = useState('')
-  const [dateFrom, setDateFrom] = useState('')
-  const [dateTo, setDateTo] = useState('')
-  const [livePage, setLivePage] = useState(1)
-  const [localPage, setLocalPage] = useState(1)
+  const [dateFrom, setDateFrom] = useState(() => stationToday())
+  const [dateTo, setDateTo] = useState(() => stationToday())
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
   const [selected, setSelected] = useState<Transaction | null>(null)
 
   const stationsQ = useQuery({
@@ -45,59 +45,50 @@ export default function TransactionsPage() {
 
   const catalogStations = stationsQ.data || []
   const selectedStation = useMemo(
-    () => catalogStations.find((s) => s.station_code === stationId) || catalogStations[0],
+    () => catalogStations.find((s) => s.station_code === stationId || s.id === stationId) || catalogStations[0],
     [catalogStations, stationId],
   )
-  const liveStationKey = liveStationId(selectedStation)
-  const stationFilterCode = stationId || selectedStation?.station_code || ''
+  const stationFilter = stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
+  const tz = selectedStation?.timezone || 'Africa/Lagos'
 
-  const live = useStationLiveSales({
-    stationId: liveStationKey,
-    enabled: Boolean(liveStationKey),
-    recentLimit: SALES_HISTORY_FETCH_LIMIT,
-  })
-
-  const localParams = useMemo(() => {
-    const start = dateFrom ? lagosDayStartIso(dateFrom) : undefined
-    const end = dateTo ? lagosDayEndIso(dateTo) : undefined
-    return {
-      page: localPage,
-      size: PAGE_SIZE,
+  const params = useMemo(
+    () => ({
+      page,
+      size: pageSize,
       sort: 'received_at,desc',
-      station_id: stationFilterCode || undefined,
+      station_id: stationFilter || undefined,
       pump_id: pumpId || undefined,
       product: product || undefined,
       status: status || undefined,
       q: q || undefined,
-      start,
-      end,
-    }
-  }, [localPage, stationFilterCode, pumpId, product, status, q, dateFrom, dateTo])
+      start: dateFrom ? stationDayStartIso(dateFrom, tz) : undefined,
+      end: dateTo ? stationDayEndIso(dateTo, tz) : undefined,
+    }),
+    [page, pageSize, stationFilter, pumpId, product, status, q, dateFrom, dateTo, tz],
+  )
 
   const txQ = useQuery({
-    queryKey: ['transactions', localParams],
-    queryFn: async () => (await getTransactions(localParams)).data,
+    queryKey: ['transactions', params],
+    queryFn: async () => (await getTransactions(params)).data,
   })
 
-  const localTotalPages = Math.max(1, Math.ceil((txQ.data?.total || 0) / PAGE_SIZE))
+  const total = txQ.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const items = txQ.data?.items || []
 
-  const resetPages = () => {
-    setLivePage(1)
-    setLocalPage(1)
-  }
+  const resetPage = () => setPage(1)
 
   const downloadCsv = () => {
     const url = exportTransactionsUrl({
-      station_id: stationFilterCode || undefined,
+      station_id: stationFilter || undefined,
       pump_id: pumpId || undefined,
       product: product || undefined,
       status: status || undefined,
       q: q || undefined,
-      start: dateFrom ? lagosDayStartIso(dateFrom) : undefined,
-      end: dateTo ? lagosDayEndIso(dateTo) : undefined,
+      start: dateFrom ? stationDayStartIso(dateFrom, tz) : undefined,
+      end: dateTo ? stationDayEndIso(dateTo, tz) : undefined,
     })
     const a = document.createElement('a')
-    a.href = url
     a.setAttribute('download', 'transactions.csv')
     fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => r.blob())
@@ -110,50 +101,18 @@ export default function TransactionsPage() {
       .catch(() => alert('Export failed'))
   }
 
-  const filteredLive = useMemo(() => {
-    let rows = live.sales
-    if (dateFrom || dateTo) {
-      rows = rows.filter((s) => saleInDateRange(s.receivedAt, dateFrom || null, dateTo || null))
-    }
-    if (pumpId.trim()) {
-      const p = pumpId.trim().toUpperCase()
-      rows = rows.filter((s) => s.pumpId.toUpperCase().includes(p))
-    }
-    if (product.trim()) {
-      const prod = product.trim().toUpperCase()
-      rows = rows.filter((s) => (s.product || '').toUpperCase().includes(prod))
-    }
-    if (status.trim()) {
-      const st = status.trim().toUpperCase()
-      rows = rows.filter((s) => (s.status || '').toUpperCase() === st)
-    }
-    if (q.trim()) {
-      const needle = q.trim().toLowerCase()
-      rows = rows.filter((s) => s.transactionId.toLowerCase().includes(needle))
-    }
-    return rows
-  }, [live.sales, pumpId, product, status, q, dateFrom, dateTo])
-
-  const liveTotalPages = Math.max(1, Math.ceil(filteredLive.length / PAGE_SIZE))
-  const safeLivePage = Math.min(livePage, liveTotalPages)
-  const pagedLive = useMemo(
-    () => paginateItems(filteredLive, safeLivePage, PAGE_SIZE),
-    [filteredLive, safeLivePage],
-  )
-
-  const viewingHistorical = Boolean(dateFrom || dateTo)
   const rangeLabel =
     dateFrom || dateTo
-      ? `${dateFrom || '…'} → ${dateTo || '…'} (Africa/Lagos)`
-      : `latest ${SALES_HISTORY_FETCH_LIMIT} (live feed)`
+      ? `${dateFrom || '…'} → ${dateTo || '…'} (${tz})`
+      : `All dates (${tz})`
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="p-4 md:p-6 space-y-4 max-w-[1600px]">
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h1 className="section-title">Transactions</h1>
           <p className="text-slate-400 text-sm mt-1">
-            Live and recent sales from the catalog station · filter by date, then page through results
+            Sales for the selected date range and station timezone. KPI cards use the same filters as the table.
           </p>
         </div>
         <button type="button" className="btn-secondary" onClick={downloadCsv}>
@@ -161,20 +120,20 @@ export default function TransactionsPage() {
         </button>
       </div>
 
-      <div className="card grid md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3">
+      <div className="card grid md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3 sticky top-0 z-10 bg-slate-800">
         <select
           className="input"
-          value={stationFilterCode}
+          value={selectedStation?.station_code || ''}
           onChange={(e) => {
             setStationId(e.target.value)
-            resetPages()
+            resetPage()
           }}
           aria-label="Station"
         >
           {catalogStations.length === 0 && <option value="">No stations yet</option>}
           {catalogStations.map((s) => (
             <option key={s.id} value={s.station_code}>
-              {s.name}
+              {stationLabel(s)}
             </option>
           ))}
         </select>
@@ -187,7 +146,7 @@ export default function TransactionsPage() {
             max={dateTo || undefined}
             onChange={(e) => {
               setDateFrom(e.target.value)
-              resetPages()
+              resetPage()
             }}
           />
         </label>
@@ -200,7 +159,7 @@ export default function TransactionsPage() {
             min={dateFrom || undefined}
             onChange={(e) => {
               setDateTo(e.target.value)
-              resetPages()
+              resetPage()
             }}
           />
         </label>
@@ -210,7 +169,7 @@ export default function TransactionsPage() {
           value={pumpId}
           onChange={(e) => {
             setPumpId(e.target.value)
-            resetPages()
+            resetPage()
           }}
         />
         <input
@@ -219,7 +178,7 @@ export default function TransactionsPage() {
           value={product}
           onChange={(e) => {
             setProduct(e.target.value)
-            resetPages()
+            resetPage()
           }}
         />
         <select
@@ -227,12 +186,14 @@ export default function TransactionsPage() {
           value={status}
           onChange={(e) => {
             setStatus(e.target.value)
-            resetPages()
+            resetPage()
           }}
         >
           <option value="">All statuses</option>
-          <option value="COMPLETED">COMPLETED</option>
-          <option value="PENDING">PENDING</option>
+          <option value="COMPLETED">Completed</option>
+          <option value="DISPENSING">Dispensing</option>
+          <option value="PENDING">Pending</option>
+          <option value="REJECTED">Rejected</option>
         </select>
         <input
           className="input"
@@ -240,247 +201,170 @@ export default function TransactionsPage() {
           value={q}
           onChange={(e) => {
             setQ(e.target.value)
-            resetPages()
+            resetPage()
           }}
         />
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          className="btn-secondary text-xs"
-          onClick={() => {
-            const today = lagosToday()
-            setDateFrom(today)
-            setDateTo(today)
-            resetPages()
-          }}
-        >
-          Today
-        </button>
-        <button
-          type="button"
-          className="btn-secondary text-xs"
-          onClick={() => {
-            setDateFrom('')
-            setDateTo('')
-            resetPages()
-          }}
-        >
-          Clear dates
-        </button>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <Kpi label={`Sales (${rangeLabel})`} value={fmtNaira(txQ.data?.total_amount)} />
+        <Kpi label="Volume" value={fmtLiters(txQ.data?.total_volume)} />
+        <Kpi label="Transactions" value={String(total)} />
+        <Kpi label="Average" value={fmtNaira(txQ.data?.average_amount)} />
       </div>
-
-      <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
-        <Kpi
-          label="Today’s sales"
-          value={formatSaleAmount(live.summary?.totalAmount ?? null)}
-        />
-        <Kpi label="Liters today" value={fmtLiters(live.summary?.totalVolumeLiters)} />
-        <Kpi label="Transactions" value={String(live.summary?.transactionCount ?? '—')} />
-        <Kpi
-          label="Average tx"
-          value={formatSaleAmount(live.summary?.averageTransactionAmount ?? null)}
-        />
-        <Kpi
-          label="Live stream"
-          value={live.streamStatus}
-          tone={live.streamStatus === 'LIVE' ? 'ok' : 'warn'}
-        />
-      </div>
-
-      {live.restError && (
-        <div className="card text-amber-300 text-sm" role="status">
-          {live.restError} — keeping last successful live data.
-        </div>
-      )}
 
       <div className="card overflow-x-auto">
         <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-          <div>
-            <h2 className="text-white font-semibold text-sm">
-              {viewingHistorical ? 'Sales search' : 'Recent live sales'} ·{' '}
-              {selectedStation?.name || liveStationKey || '—'}
-            </h2>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              Showing {filteredLive.length ? (safeLivePage - 1) * PAGE_SIZE + 1 : 0}–
-              {Math.min(safeLivePage * PAGE_SIZE, filteredLive.length)} of {filteredLive.length} ·{' '}
-              {rangeLabel}
-            </p>
-          </div>
-          <button type="button" className="btn-secondary text-xs" onClick={() => live.refresh()}>
-            Refresh
-          </button>
+          <h2 className="text-white font-semibold text-sm">
+            {stationLabel(selectedStation)} · {rangeLabel}
+          </h2>
+          <label className="text-xs text-slate-400">
+            Page size
+            <select
+              className="input ml-2 w-auto"
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value))
+                resetPage()
+              }}
+            >
+              {PAGE_SIZES.map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        {live.isLoading && !live.sales.length ? (
-          <div className="py-10 text-center text-slate-500 text-sm">Loading sales…</div>
-        ) : filteredLive.length === 0 ? (
+
+        {txQ.isLoading ? (
+          <div className="space-y-2" aria-busy="true">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="h-8 rounded bg-slate-800 animate-pulse" />
+            ))}
+          </div>
+        ) : txQ.isError ? (
+          <div className="py-10 text-center" role="alert">
+            <p className="text-red-300 text-sm mb-3">Could not load transactions.</p>
+            <button type="button" className="btn-secondary" onClick={() => txQ.refetch()}>
+              Retry
+            </button>
+          </div>
+        ) : items.length === 0 ? (
           <div className="py-10 text-center text-slate-500 text-sm">
-            {viewingHistorical
-              ? 'No sales match this date range or filters in the recent cloud feed (last ~500 transactions).'
-              : 'No sales have been received for this station yet.'}
+            No transactions match this station, date range, and filters.
           </div>
         ) : (
-          <>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-slate-400 border-b border-slate-700">
-                  <th className="pb-2">Time</th>
-                  <th className="pb-2">Station</th>
-                  <th className="pb-2">Pump</th>
-                  <th className="pb-2">Nozzle</th>
-                  <th className="pb-2">Product</th>
-                  <th className="pb-2 text-right">Liters</th>
-                  <th className="pb-2 text-right">Price/L</th>
-                  <th className="pb-2 text-right">Amount</th>
-                  <th className="pb-2">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pagedLive.map((s) => (
-                  <tr key={s.transactionId} className="border-b border-slate-800">
-                    <td className="py-2 text-slate-400 whitespace-nowrap">{fmtTime(s.receivedAt)}</td>
-                    <td className="py-2 font-mono text-xs">{s.stationId}</td>
-                    <td className="py-2 font-mono">
-                      {s.pumpId}
-                      {live.unmappedPumpIds.includes(s.pumpId) ? (
-                        <span className="ml-1 text-amber-400 text-[10px]">unmapped</span>
-                      ) : null}
-                    </td>
-                    <td className="py-2 font-mono text-xs">{s.nozzleId || '—'}</td>
-                    <td className="py-2">{s.product || '—'}</td>
-                    <td className="py-2 text-right font-mono">{fmtLiters(s.volumeLiters)}</td>
-                    <td className="py-2 text-right font-mono">
-                      {formatSaleAmount(s.pricePerLiter)}
-                    </td>
-                    <td className="py-2 text-right font-mono text-emerald-400">
-                      {formatSaleAmount(s.amount)}
-                    </td>
-                    <td className="py-2">{s.status || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="flex items-center justify-between mt-4 text-sm text-slate-400">
-              <span>
-                Page {safeLivePage} / {liveTotalPages}
-              </span>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={safeLivePage <= 1}
-                  onClick={() => setLivePage((p) => Math.max(1, p - 1))}
-                >
-                  Prev
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={safeLivePage >= liveTotalPages}
-                  onClick={() => setLivePage((p) => p + 1)}
-                >
-                  Next
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </div>
-
-      <details className="card">
-        <summary className="text-sm text-slate-400 cursor-pointer">
-          Local catalog transactions (paginated)
-        </summary>
-        <div className="mt-3 overflow-x-auto">
-          {txQ.isError && (
-            <div className="text-red-300 text-sm mb-2" role="alert">
-              Failed to load local transactions.
-            </div>
-          )}
-          <table className="w-full text-sm">
+          <table className="w-full text-sm table-fixed min-w-[960px]">
             <thead>
-              <tr className="text-left text-slate-400 border-b border-slate-700">
-                <th className="pb-2">ID</th>
-                <th className="pb-2">Station</th>
-                <th className="pb-2">Pump</th>
-                <th className="pb-2">Product</th>
-                <th className="pb-2 text-right">Volume</th>
-                <th className="pb-2 text-right">Amount</th>
-                <th className="pb-2">Received</th>
+              <tr className="text-slate-400 border-b border-slate-700">
+                <th className="py-2 pr-3 text-left w-[12%]">Time</th>
+                <th className="py-2 pr-3 text-left w-[14%]">Station</th>
+                <th className="py-2 pr-3 text-left w-[10%]">Pump</th>
+                <th className="py-2 pr-3 text-left w-[8%]">Product</th>
+                <th className="py-2 pr-3 text-right w-[9%]">Volume</th>
+                <th className="py-2 pr-3 text-right w-[9%]">Unit price</th>
+                <th className="py-2 pr-3 text-right w-[11%]">Amount</th>
+                <th className="py-2 pr-3 text-left w-[10%]">Status</th>
+                <th className="py-2 pr-3 text-left w-[10%]">Issues</th>
+                <th className="py-2 text-right w-[7%]">Details</th>
               </tr>
             </thead>
             <tbody>
-              {txQ.data?.items.map((t) => (
-                <tr
-                  key={t.id}
-                  className={`border-b border-slate-800 cursor-pointer hover:bg-slate-800/50 ${
-                    selected?.id === t.id ? 'bg-slate-800' : ''
-                  }`}
-                  onClick={() => setSelected(t)}
-                >
-                  <td className="py-2 font-mono text-xs text-emerald-300 max-w-[120px] truncate">
-                    {t.id}
-                  </td>
-                  <td className="py-2">{t.station_id}</td>
-                  <td className="py-2 font-mono">{t.pump_id}</td>
-                  <td className="py-2">{t.product || '—'}</td>
-                  <td className="py-2 text-right font-mono">{fmtLiters(t.volume_liters)}</td>
-                  <td className="py-2 text-right font-mono">{formatSaleAmount(t.amount)}</td>
-                  <td className="py-2 text-slate-400 whitespace-nowrap">{fmtTime(t.received_at)}</td>
-                </tr>
-              ))}
+              {items.map((t) => {
+                const mappedProduct = Boolean(t.product)
+                const mappedNozzle = Boolean(t.nozzle_id)
+                return (
+                  <tr key={t.id} className="border-b border-slate-800" data-testid="tx-row">
+                    <td className="py-2 pr-3 text-slate-400 whitespace-nowrap">{fmtTime(t.received_at, tz)}</td>
+                    <td className="py-2 pr-3 truncate" title={t.station_id}>
+                      {stationLabel(selectedStation)}
+                    </td>
+                    <td className="py-2 pr-3 font-mono">{t.pump_id}</td>
+                    <td className="py-2 pr-3">
+                      {mappedProduct ? (
+                        t.product
+                      ) : (
+                        <span className="text-amber-300" title="No product mapping for this nozzle or sale">
+                          Not mapped
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 pr-3 text-right font-mono tabular-nums">{fmtLiters(t.volume_liters)}</td>
+                    <td className="py-2 pr-3 text-right font-mono tabular-nums">{fmtNaira(t.price_per_liter)}</td>
+                    <td className="py-2 pr-3 text-right font-mono tabular-nums text-emerald-400" data-testid="tx-amount">
+                      {fmtNaira(t.amount)}
+                    </td>
+                    <td className="py-2 pr-3" data-testid="tx-status">
+                      <span className={statusBadge(t.status)}>{humanizeEnum(t.status)}</span>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {!mappedProduct || !mappedNozzle ? (
+                        <span className="badge-warn" title="Missing product or nozzle mapping">
+                          Not mapped
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-2 text-right">
+                      <button type="button" className="btn-secondary text-xs px-2 py-1" onClick={() => setSelected(t)}>
+                        Details
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
-          <div className="flex items-center justify-between mt-4 text-sm text-slate-400">
-            <span>{txQ.data?.total ?? 0} total</span>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={localPage <= 1}
-                onClick={() => setLocalPage((p) => p - 1)}
-              >
-                Prev
-              </button>
-              <span className="px-2 py-2">
-                Page {localPage} / {localTotalPages}
-              </span>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={localPage >= localTotalPages}
-                onClick={() => setLocalPage((p) => p + 1)}
-              >
-                Next
-              </button>
-            </div>
+        )}
+
+        <div className="flex items-center justify-between mt-4 text-sm text-slate-400">
+          <span>
+            {total ? (page - 1) * pageSize + 1 : 0}–{Math.min(page * pageSize, total)} of {total}
+          </span>
+          <div className="flex gap-2">
+            <button type="button" className="btn-secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+              Previous
+            </button>
+            <span className="px-2 py-2">
+              Page {page} / {totalPages}
+            </span>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Next
+            </button>
           </div>
         </div>
-      </details>
+      </div>
+
+      {selected && (
+        <div className="card text-sm space-y-1" role="region" aria-label="Transaction details">
+          <div className="flex justify-between">
+            <h3 className="text-white font-semibold">Transaction details</h3>
+            <button type="button" className="btn-secondary text-xs" onClick={() => setSelected(null)}>
+              Close
+            </button>
+          </div>
+          <p className="font-mono text-xs text-slate-400 break-all">ID {selected.id}</p>
+          <p>Nozzle: {selected.nozzle_id || 'Not mapped'}</p>
+          <p>Device: {selected.device_id || '—'}</p>
+          <p>MQTT station id: {selected.station_id}</p>
+        </div>
+      )}
     </div>
   )
 }
 
-function Kpi({
-  label,
-  value,
-  tone,
-}: {
-  label: string
-  value: string
-  tone?: 'ok' | 'warn'
-}) {
+function Kpi({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2">
       <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
-      <div
-        className={`text-sm font-semibold ${
-          tone === 'ok' ? 'text-emerald-400' : tone === 'warn' ? 'text-amber-300' : 'text-white'
-        }`}
-      >
-        {value}
-      </div>
+      <div className="text-sm font-semibold text-white">{value}</div>
     </div>
   )
 }

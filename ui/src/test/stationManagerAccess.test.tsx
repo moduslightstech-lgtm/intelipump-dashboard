@@ -107,6 +107,8 @@ describe('Station Manager authorization', () => {
   it('blocks reconciliation paths and lands on tank readings', () => {
     expect(canAccessPath('STATION_MANAGER', '/station-manager/reconciliation')).toBe(false)
     expect(canAccessPath('STATION_MANAGER', '/reconciliations')).toBe(false)
+    expect(canAccessPath('STATION_MANAGER', '/')).toBe(true)
+    expect(canAccessPath('STATION_MANAGER', '/executive')).toBe(true)
     expect(canAccessPath('STATION_MANAGER', '/station-manager/tank-readings')).toBe(true)
     expect(canAccessPath('STATION_MANAGER', '/station-manager/history')).toBe(true)
     expect(canAccessPath('STATION_MANAGER', '/station-manager/profile')).toBe(true)

@@ -30,6 +30,7 @@ def build_connection_payloads(
     *,
     tanks: list[dict[str, Any]],
     pumps: list[dict[str, Any]],
+    nozzles: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, str | None]:
     """
     Return (connections, mappingConfigured, mappingMessage).
@@ -40,6 +41,11 @@ def build_connection_payloads(
     rows = list_connections(db, station_id)
     tank_by_id = {str(t["id"]): t for t in tanks}
     pump_by_id = {str(p["id"]): p for p in pumps if not str(p.get("id", "")).startswith("ledger:")}
+    nozzle_by_id: dict[str, dict[str, Any]] = {str(n["id"]): n for n in (nozzles or [])}
+    for pump in pumps:
+        for n in pump.get("nozzles") or []:
+            if n.get("id"):
+                nozzle_by_id[str(n["id"])] = n
 
     if rows:
         payloads = []
@@ -48,6 +54,10 @@ def build_connection_payloads(
             pump = pump_by_id.get(str(r.pump_id))
             if tank is None or pump is None:
                 continue
+            nozzle = None
+            nid = getattr(r, "nozzle_id", None)
+            if nid:
+                nozzle = nozzle_by_id.get(str(nid))
             payloads.append(
                 _payload(
                     r.id,
@@ -57,6 +67,7 @@ def build_connection_payloads(
                     r.line_label,
                     source="CONFIGURED",
                     is_primary=bool(getattr(r, "is_primary", False)),
+                    nozzle=nozzle,
                 )
             )
         if payloads:
@@ -139,17 +150,28 @@ def _payload(
     *,
     source: str,
     is_primary: bool = False,
+    nozzle: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    pump_name = pump.get("name") or pump.get("pumpCode") or "Pump"
+    nozzle_name = (nozzle or {}).get("name") if nozzle else None
+    friendly = line_label
+    if not friendly:
+        friendly = f"{pump_name} · {nozzle_name}" if nozzle_name else str(pump_name)
     return {
         "id": str(conn_id),
         "tankId": str(tank["id"]),
         "tankCode": tank.get("tankCode"),
         "tankName": tank.get("name") or tank.get("tankCode"),
         "pumpId": str(pump["id"]),
+        "physicalPumpId": str(pump["id"]),
         "pumpCode": pump.get("pumpCode"),
+        "pumpName": pump_name,
         "mqttPumpId": pump.get("mqttPumpId"),
-        "product": product or tank.get("product") or pump.get("product"),
-        "lineLabel": line_label,
+        "nozzleId": str(nozzle["id"]) if nozzle and nozzle.get("id") else None,
+        "nozzleName": nozzle_name,
+        "nozzleCode": (nozzle or {}).get("nozzleCode") if nozzle else None,
+        "product": product or (nozzle or {}).get("product") or tank.get("product") or pump.get("product"),
+        "lineLabel": friendly,
         "source": source,
         "isPrimary": is_primary,
         "status": "ACTIVE",

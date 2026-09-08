@@ -11,6 +11,16 @@
     height: auto;
   }
 
+  button:focus-visible,
+  a:focus-visible,
+  select:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  summary:focus-visible {
+    outline: 2px solid #34d399;
+    outline-offset: 2px;
+  }
+
   body {
     font-family: 'Inter', system-ui, sans-serif;
     background-color: #0f172a;
@@ -98,5 +108,45 @@
 
   .ring-fill {
     transition: stroke-dashoffset 0.5s ease;
+  }
+}
+
+.react-flow {
+  background: #020617;
+}
+
+.react-flow__attribution {
+  background: transparent !important;
+  color: #64748b !important;
+  font-size: 9px !important;
+}
+
+.react-flow__controls {
+  box-shadow: none;
+}
+
+.react-flow__controls-button {
+  background: #1e293b !important;
+  border-bottom: 1px solid #334155 !important;
+  fill: #e2e8f0 !important;
+}
+
+.react-flow__minimap {
+  background: #0f172a !important;
+}
+
+@keyframes schematic-pipe-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.schematic-pipe-flow {
+  animation: schematic-pipe-flow 0.7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .schematic-pipe-flow {
+    animation: none;
   }
 }

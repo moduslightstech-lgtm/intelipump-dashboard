@@ -26,17 +26,20 @@ from app.models import (
     TankMeasurement,
 )
 from app.services.auto_layout import build_auto_layout
+from app.services.equipment_status import aggregate_physical_pump_status, friendly_nozzle_name, normalize_equipment_status
 from app.services.identity import (
     mqtt_external_ids_for_pump,
     mqtt_external_ids_for_station,
     resolve_station,
 )
 from app.services.tank_connections import build_connection_payloads
+from app.services.edge_device_status import DELAYED_SECONDS, ONLINE_SECONDS, calculate_device_status
+from app.services.tank_lifecycle import is_archived_tank, is_operational_tank, operational_tank_clause
 
 DISPENSING_WINDOW = timedelta(seconds=15)
 COMPLETED_WINDOW = timedelta(minutes=10)
-DEVICE_ONLINE_WINDOW = timedelta(minutes=5)
-DEVICE_DEGRADED_WINDOW = timedelta(minutes=15)
+DEVICE_ONLINE_WINDOW = timedelta(seconds=ONLINE_SECONDS)
+DEVICE_DEGRADED_WINDOW = timedelta(seconds=DELAYED_SECONDS)
 MANUAL_READING_STALE = timedelta(hours=36)
 OPEN_ALERT_STATUSES = ("OPEN", "ACKNOWLEDGED", "IN_PROGRESS")
 TANK_LOW_PCT = 0.20
@@ -86,19 +89,27 @@ def _ledger_station_match(station: Station):
 
 
 def station_has_live_edge(db: Session, station: Station, now: datetime) -> bool:
-    """True when a linked Raspberry Pi has sent a heartbeat recently."""
+    return station_edge_status(db, station, now) == "ONLINE"
+
+
+def station_edge_status(db: Session, station: Station, now: datetime) -> str:
+    """Heartbeat-derived gateway connectivity for this station."""
     keys = mqtt_external_ids_for_station(station)
     if not keys:
-        return False
+        return "NEVER_CONNECTED"
     rows = list(db.scalars(select(EdgeDevice).where(EdgeDevice.station_id.in_(keys))).all())
-    for row in rows:
-        last = _as_utc(row.last_heartbeat_at or row.last_seen_at)
-        if last is None or (now - last) > DEVICE_ONLINE_WINDOW:
-            continue
-        status = (row.calculated_status or row.reported_status or "ONLINE").upper()
-        if status not in {"OFFLINE", "NEVER_CONNECTED"}:
-            return True
-    return False
+    if not rows:
+        return "NEVER_CONNECTED"
+    from app.services.edge_device_status import aggregate_station_availability
+
+    statuses = [
+        calculate_device_status(
+            now=now,
+            last_seen=row.last_heartbeat_at or row.last_seen_at,
+        ).status
+        for row in rows
+    ]
+    return aggregate_station_availability(statuses)
 
 
 def infer_catalog_pump_status(
@@ -120,9 +131,11 @@ def infer_catalog_pump_status(
     last_status = (last_tx_status or "").upper()
     if op_state == "POWERED_OFF" or station_op == "CLOSED":
         return "POWERED_OFF"
-    if not edge_online and (station_conn == "OFFLINE" or op_state == "OFFLINE"):
+    if not edge_online and (station_conn in {"OFFLINE", "NEVER_CONNECTED"} or op_state == "OFFLINE"):
         return "OFFLINE"
-    if not edge_online and (station_conn == "DEGRADED" or op_state == "DEGRADED"):
+    if not edge_online and (
+        station_conn in {"DEGRADED", "DELAYED", "STALE"} or op_state in {"DEGRADED", "DELAYED"}
+    ):
         return "DEGRADED"
     if db_status in {"ERROR", "FAULT"} or op_state == "FAULT":
         return "FAULT"
@@ -131,7 +144,7 @@ def infer_catalog_pump_status(
     if (in_progress or op_state == "DISPENSING") and fresh:
         return "DISPENSING"
     if last_tx_at is not None and (now - last_tx_at) <= COMPLETED_WINDOW:
-        return "COMPLETED"
+        return "IDLE"
     if last_tx_at is None and db_status == "UNKNOWN" and not op_state:
         return "UNKNOWN"
     if op_state in {"IDLE", "DISPENSING"}:
@@ -139,13 +152,35 @@ def infer_catalog_pump_status(
     return "IDLE"
 
 
-def _ledger_pump_match(station: Station, pump: Pump):
+def _ledger_pump_match(station: Station, pump: Pump, db: Session | None = None):
     station_clause = _ledger_station_match(station)
     pump_clauses = [PumpTransaction.pump_uuid == pump.id]
-    externals = mqtt_external_ids_for_pump(pump)
+    externals = mqtt_external_ids_for_pump(pump, db)
     if externals:
         pump_clauses.append(PumpTransaction.pump_id.in_(externals))
     return and_(station_clause, or_(*pump_clauses))
+
+
+def _ledger_nozzle_match(station: Station, pump: Pump, nozzle: Nozzle):
+    station_clause = _ledger_station_match(station)
+    clauses = []
+    if getattr(nozzle, "id", None):
+        clauses.append(PumpTransaction.nozzle_uuid == nozzle.id)
+    source = (getattr(nozzle, "source_identifier", None) or "").strip()
+    if source:
+        clauses.append(PumpTransaction.pump_id == source)
+        clauses.append(PumpTransaction.source_identifier == source)
+    code = (nozzle.nozzle_code or "").strip()
+    if code and not code.endswith("-n1") and code not in {"1", "2"}:
+        clauses.append(
+            and_(
+                or_(PumpTransaction.pump_uuid == pump.id, PumpTransaction.pump_id == source or pump.mqtt_pump_id),
+                PumpTransaction.nozzle_id == code,
+            )
+        )
+    if not clauses:
+        return and_(station_clause, PumpTransaction.pump_uuid == pump.id)
+    return and_(station_clause, or_(*clauses))
 
 
 def _infer_tank_status(
@@ -204,7 +239,12 @@ def _custom_layout_payload(db: Session, layout: StationLayout) -> dict[str, Any]
     }
 
 
-def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[str, Any]:
+def get_station_live_state(
+    db: Session,
+    station_id_or_code: str | UUID,
+    *,
+    include_inactive: bool = False,
+) -> dict[str, Any]:
     station = resolve_station(db, station_id_or_code)
     if station is None:
         raise ValueError("Station not found")
@@ -221,7 +261,11 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
     )
 
     # --- Catalog assets ---
-    tanks = list(db.scalars(select(Tank).where(Tank.station_id == station.id)).all())
+    tank_q = select(Tank).where(Tank.station_id == station.id)
+    if include_inactive:
+        tanks = [t for t in db.scalars(tank_q).all() if not is_archived_tank(t)]
+    else:
+        tanks = list(db.scalars(tank_q.where(operational_tank_clause())).all())
     pumps = list(
         db.scalars(
             select(Pump)
@@ -256,7 +300,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
     ]
     catalog_mqtt_pumps = set()
     for p in pumps:
-        catalog_mqtt_pumps.update(mqtt_external_ids_for_pump(p))
+        catalog_mqtt_pumps.update(mqtt_external_ids_for_pump(p, db))
     unmapped_ledger_pumps = sorted(set(ledger_pump_ids) - catalog_mqtt_pumps)
 
     # Orphan devices that appear in ledger / devices table by code but lack station FK
@@ -281,6 +325,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         "mqttExternalIds": station_externals,
         "identityMismatch": identity_mismatch,
         "catalogPumpCount": len(pumps),
+        "catalogNozzleCount": len(nozzles_db),
         "catalogTankCount": len(tanks),
         "catalogDeviceCount": len(devices),
         "ledgerPumpIds": sorted(ledger_pump_ids),
@@ -351,7 +396,8 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
                 "product": tank.product,
                 "capacityLiters": capacity,
                 "status": tank.status,
-                "inferredStatus": inferred,
+                "inferredStatus": inferred if is_operational_tank(tank) else "INACTIVE",
+                "inactive": not is_operational_tank(tank),
                 "statusInferred": inferred != (tank.status or "").upper(),
                 "measurementSource": (
                     (latest.measurement_source or latest.source or tank.current_measurement_source or "MANUAL")
@@ -420,12 +466,20 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             pump_alert_counts[str(pump_key)] = int(cnt)
 
     device_by_id = {d.id: d for d in devices}
-    edge_online = station_has_live_edge(db, station, now)
+    edge_status = station_edge_status(db, station, now)
+    edge_online = edge_status == "ONLINE"
+
+    nozzles_by_pump: dict[str, list] = {}
+    for n in nozzles_db:
+        if n.pump_id:
+            nozzles_by_pump.setdefault(str(n.pump_id), []).append(n)
+    for members in nozzles_by_pump.values():
+        members.sort(key=lambda n: (n.display_order or 0, n.nozzle_number or 0, n.nozzle_code))
 
     pump_payloads: list[dict[str, Any]] = []
-    current_statuses: dict[str, Any] = {"pumps": {}, "devices": {}}
+    current_statuses: dict[str, Any] = {"pumps": {}, "devices": {}, "nozzles": {}}
     for pump in pumps:
-        pump_match = _ledger_pump_match(station, pump)
+        pump_match = _ledger_pump_match(station, pump, db)
         last_tx = db.scalars(
             select(PumpTransaction).where(pump_match).order_by(time_col.desc()).limit(1)
         ).first()
@@ -442,8 +496,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         db_status = (pump.status or "UNKNOWN").upper()
         op_state = (getattr(pump, "operational_state", None) or "").upper()
         station_op = (getattr(station, "operational_status", None) or "UNKNOWN").upper()
-        station_conn = (getattr(station, "connectivity_status", None) or "UNKNOWN").upper()
-        status_source = getattr(station, "status_source", None)
+        station_conn = edge_status
         inferred_status = infer_catalog_pump_status(
             now=now,
             last_tx_at=last_tx_at,
@@ -463,6 +516,78 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         else:
             alert_count = pump_alert_counts.get(display_code, 0)
 
+        status_source = (getattr(pump, "state_source", None) or "").upper() or None
+        if inferred_status != db_status:
+            status_source = status_source or "INFERRED"
+
+        nested_nozzles: list[dict[str, Any]] = []
+        for idx, n in enumerate(nozzles_by_pump.get(str(pump.id), [])):
+            n_match = _ledger_nozzle_match(station, pump, n)
+            n_tx = db.scalars(
+                select(PumpTransaction).where(n_match).order_by(time_col.desc()).limit(1)
+            ).first()
+            n_tx_at = (
+                _as_utc(
+                    n_tx.transaction_completed_at or n_tx.device_timestamp or n_tx.received_at
+                )
+                if n_tx is not None
+                else None
+            )
+            n_inferred = infer_catalog_pump_status(
+                now=now,
+                last_tx_at=n_tx_at,
+                last_tx_status=getattr(n_tx, "status", None) if n_tx is not None else None,
+                db_status=(n.status or "UNKNOWN").upper(),
+                op_state="",
+                station_op=station_op,
+                station_conn=station_conn,
+                edge_online=edge_online,
+            )
+            n_inferred = normalize_equipment_status(n_inferred)
+            nested_nozzles.append(
+                {
+                    "id": str(n.id),
+                    "name": getattr(n, "name", None) or friendly_nozzle_name(
+                        {
+                            "name": getattr(n, "name", None),
+                            "nozzleNumber": n.nozzle_number,
+                        },
+                        idx,
+                    ),
+                    "nozzleCode": n.nozzle_code,
+                    "mqttNozzleId": n.mqtt_nozzle_id,
+                    "sourceIdentifier": getattr(n, "source_identifier", None),
+                    "controllerAddress": getattr(n, "controller_address", None),
+                    "sideId": getattr(n, "side_id", None),
+                    "nozzleNumber": n.nozzle_number,
+                    "pumpId": str(pump.id),
+                    "pumpCode": pump.pump_code,
+                    "product": n.product or (n_tx.product if n_tx is not None else None),
+                    "status": n.status,
+                    "inferredStatus": n_inferred,
+                    "displayOrder": n.display_order or idx,
+                    "active": bool(n.active),
+                    "source": "CATALOG",
+                    "lastTransactionAt": n_tx_at.isoformat() if n_tx_at else None,
+                    "lastTransactionAmount": (
+                        float(n_tx.amount) if n_tx and n_tx.amount is not None else None
+                    ),
+                    "lastTransactionVolume": (
+                        float(n_tx.volume_liters) if n_tx and n_tx.volume_liters is not None else None
+                    ),
+                }
+            )
+            current_statuses["nozzles"][n.nozzle_code] = {
+                "status": n_inferred,
+                "inferred": True,
+                "lastTransactionAt": n_tx_at.isoformat() if n_tx_at else None,
+            }
+
+        if nested_nozzles:
+            inferred_status = aggregate_physical_pump_status(
+                [nz["inferredStatus"] for nz in nested_nozzles]
+            )
+
         pump_payloads.append(
             {
                 "id": str(pump.id),
@@ -473,15 +598,18 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
                 "islandNumber": getattr(pump, "island_number", None),
                 "displayOrder": getattr(pump, "display_order", 0) or 0,
                 "active": bool(getattr(pump, "active", True)),
-                "product": last_product,
+                "product": last_product or next((nz.get("product") for nz in nested_nozzles if nz.get("product")), None),
                 "deviceId": str(pump.device_id) if pump.device_id else None,
                 "deviceName": linked_device.name if linked_device else None,
                 "deviceCode": linked_device.device_code if linked_device else None,
                 "status": pump.status,
                 "inferredStatus": inferred_status,
-                "statusInferred": (status_source or "") in {"INFERRED", "SCHEDULED"},
-                "statusSource": status_source or getattr(pump, "state_source", None),
+                "statusInferred": inferred_status != db_status
+                or (status_source or "") in {"INFERRED", "SCHEDULED"},
+                "statusSource": status_source,
                 "source": "CATALOG",
+                "nozzleCount": len(nested_nozzles),
+                "nozzles": nested_nozzles,
                 "lastTransactionAt": last_tx_at.isoformat() if last_tx_at else None,
                 "lastTransactionAmount": float(last_tx.amount) if last_tx and last_tx.amount is not None else None,
                 "lastTransactionVolume": (
@@ -521,7 +649,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             db_status="UNKNOWN",
             op_state="",
             station_op=(getattr(station, "operational_status", None) or "UNKNOWN").upper(),
-            station_conn=(getattr(station, "connectivity_status", None) or "UNKNOWN").upper(),
+            station_conn=edge_status,
             edge_online=edge_online,
         )
         pump_payloads.append(
@@ -562,14 +690,8 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             return
         seen_device_codes.add(device.device_code)
         last_seen = _as_utc(device.last_seen_at)
-        if last_seen is not None and (now - last_seen) <= DEVICE_ONLINE_WINDOW:
-            inferred = "ONLINE"
-        elif last_seen is not None and (now - last_seen) <= DEVICE_DEGRADED_WINDOW:
-            inferred = "DEGRADED"
-        elif last_seen is None:
-            inferred = "UNKNOWN"
-        else:
-            inferred = "OFFLINE"
+        view = calculate_device_status(now=now, last_seen=last_seen)
+        inferred = view.status
         # Prefer pump assignment from catalog
         assigned = assigned_pump_id
         if assigned is None:
@@ -581,12 +703,16 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
                 "id": str(device.id),
                 "deviceCode": device.device_code,
                 "name": device.name,
-                "status": device.status,
+                "status": view.status,
                 "inferredStatus": inferred,
                 "statusInferred": True,
                 "source": source,
                 "assignedPumpId": assigned,
                 "lastSeenAt": last_seen.isoformat() if last_seen else None,
+                "lastHeartbeatAt": last_seen.isoformat() if last_seen else None,
+                "ageSeconds": view.seconds_since_last_heartbeat,
+                "timeoutSeconds": ONLINE_SECONDS,
+                "reason": view.status_reason,
                 "lastTransactionAt": (
                     device.last_transaction_at.isoformat()
                     if getattr(device, "last_transaction_at", None)
@@ -611,14 +737,25 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
     for device in orphan_devices:
         _append_device(device, source="UNLINKED")
 
-    # --- Nozzles ---
+    # --- Nozzles (nested on pumps is canonical; top-level kept for compatibility) ---
     nozzle_payloads: list[dict[str, Any]] = []
+    seen_noz: set[str] = set()
+    for p in pump_payloads:
+        for n in p.get("nozzles") or []:
+            nozzle_payloads.append(n)
+            seen_noz.add(str(n.get("id")))
     if nozzles_db:
         for n in nozzles_db:
+            if str(n.id) in seen_noz:
+                continue
             nozzle_payloads.append(
                 {
                     "id": str(n.id),
+                    "name": getattr(n, "name", None) or n.nozzle_code,
                     "nozzleCode": n.nozzle_code,
+                    "mqttNozzleId": n.mqtt_nozzle_id,
+                    "sourceIdentifier": getattr(n, "source_identifier", None),
+                    "sideId": getattr(n, "side_id", None),
                     "pumpId": str(n.pump_id) if n.pump_id else None,
                     "pumpCode": n.pump_code,
                     "product": n.product,
@@ -626,7 +763,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
                     "source": "CATALOG",
                 }
             )
-    else:
+    elif not nozzle_payloads:
         # Derive from recent MQTT nozzle ids (real edge data only)
         rows = db.execute(
             select(
@@ -673,6 +810,11 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             "stationId": tx.station_id,
             "pumpId": tx.pump_id,
             "nozzleId": tx.nozzle_id,
+            "physicalPumpId": str(tx.pump_uuid) if getattr(tx, "pump_uuid", None) else None,
+            "nozzleUuid": str(tx.nozzle_uuid) if getattr(tx, "nozzle_uuid", None) else None,
+            "sideId": getattr(tx, "side_id", None),
+            "sourceIdentifier": getattr(tx, "source_identifier", None) or tx.pump_id,
+            "mappingStatus": getattr(tx, "mapping_status", None) or "MAPPED",
             "deviceId": tx.device_id,
             "product": tx.product,
             "volumeLiters": float(tx.volume_liters) if tx.volume_liters is not None else None,
@@ -739,7 +881,17 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
     )
     if layout_row is not None:
         custom = _custom_layout_payload(db, layout_row)
-        layout_payload = custom if custom["items"] else build_auto_layout(**auto_kwargs)
+        live_tank_ids = {t["id"] for t in tank_payloads}
+        custom_tank_ids = {
+            str(i.get("assetId") or i.get("asset_id") or "")
+            for i in custom.get("items") or []
+            if str(i.get("assetType") or i.get("asset_type") or "").upper() == "TANK"
+        }
+        stale_tanks = custom_tank_ids - live_tank_ids
+        if stale_tanks or not custom.get("items"):
+            layout_payload = build_auto_layout(**auto_kwargs)
+        else:
+            layout_payload = custom
     else:
         layout_payload = build_auto_layout(**auto_kwargs)
 
@@ -750,7 +902,33 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         station.id,
         tanks=tank_payloads,
         pumps=pump_payloads,
+        nozzles=nozzle_payloads,
     )
+
+    pump_by_id = {str(p["id"]): p for p in pump_payloads}
+    nozzle_by_id = {str(n["id"]): n for n in nozzle_payloads}
+    for tank in tank_payloads:
+        linked = [c for c in connections if str(c.get("tankId")) == str(tank["id"])]
+        pump_ids = {str(c.get("physicalPumpId") or c.get("pumpId")) for c in linked}
+        nozzle_ids = {str(c.get("nozzleId")) for c in linked if c.get("nozzleId")}
+        tank["connectedPumpCount"] = len(pump_ids)
+        tank["connectedNozzleCount"] = len(nozzle_ids) if nozzle_ids else len(linked)
+        tank["connections"] = [
+            {
+                "pumpId": c.get("physicalPumpId") or c.get("pumpId"),
+                "nozzleId": c.get("nozzleId"),
+                "label": c.get("lineLabel")
+                or (
+                    f"{pump_by_id.get(str(c.get('physicalPumpId') or c.get('pumpId')), {}).get('name', 'Pump')}"
+                    + (
+                        f" · {nozzle_by_id.get(str(c.get('nozzleId')), {}).get('name', 'Nozzle')}"
+                        if c.get("nozzleId")
+                        else ""
+                    )
+                ),
+            }
+            for c in linked
+        ]
 
     day_start, day_end, business_date = _station_day_bounds(station)
     sales_amount = db.scalar(
@@ -814,7 +992,7 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
             "timezone": station.timezone,
             "status": station.status,
             "operationalStatus": getattr(station, "operational_status", None) or "UNKNOWN",
-            "connectivityStatus": getattr(station, "connectivity_status", None) or "UNKNOWN",
+            "connectivityStatus": edge_status,
             "opensAt": station.opens_at.strftime("%H:%M") if getattr(station, "opens_at", None) else None,
             "closesAt": station.closes_at.strftime("%H:%M") if getattr(station, "closes_at", None) else None,
             "operatingDays": getattr(station, "operating_days", None),
@@ -836,6 +1014,8 @@ def get_station_live_state(db: Session, station_id_or_code: str | UUID) -> dict[
         "tanks": tank_payloads,
         "pumps": pump_payloads,
         "nozzles": nozzle_payloads,
+        "pumpCount": len([p for p in pump_payloads if not str(p.get("id", "")).startswith("ledger:")]),
+        "nozzleCount": len(nozzle_payloads),
         "devices": device_payloads,
         "latestTransactions": tx_payloads,
         "activeAlerts": alert_payloads,

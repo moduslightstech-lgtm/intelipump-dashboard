@@ -30,6 +30,7 @@ export const DASH_COLORS = {
 } as const
 
 export type KpiAccent =
+  | 'neutral'
   | 'sales'
   | 'volume'
   | 'transactions'
@@ -47,6 +48,7 @@ export const KPI_ACCENT: Record<
   KpiAccent,
   { accent: string; glow: string; soft: string }
 > = {
+  neutral: { accent: '#64748b', glow: 'rgba(15,23,42,0.2)', soft: 'from-slate-800/40 to-transparent' },
   sales: { accent: DASH_COLORS.sales, glow: DASH_COLORS.salesGlow, soft: 'from-emerald-500/20 to-transparent' },
   volume: { accent: DASH_COLORS.volume, glow: DASH_COLORS.volumeGlow, soft: 'from-cyan-400/20 to-transparent' },
   transactions: {
@@ -71,6 +73,7 @@ export const KPI_ACCENT: Record<
 
 export function productColor(product?: string | null): string {
   const p = (product || '').toUpperCase()
+  if (p.includes('UNMAPPED') || p === 'UNKNOWN' || p === 'NOT MAPPED') return '#64748b'
   if (p.includes('AGO') || p.includes('DIESEL')) return '#f59e0b'
   if (p.includes('DPK') || p.includes('KEROSENE')) return '#8b5cf6'
   if (p.includes('LPG')) return '#14b8a6'

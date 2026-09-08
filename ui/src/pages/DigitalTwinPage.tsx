@@ -10,7 +10,13 @@ import {
 } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import StationSearchCombobox from '../components/StationSearchCombobox'
+import ConfirmDialog from '../components/ConfirmDialog'
 import OperationalTwinView from '../components/twin/OperationalTwinView'
+import {
+  FIXTURE_STATION_ID,
+  fourTankTwelvePumpState,
+} from '../components/twin/schematic/fourByTwelveFixture'
+import type { LayoutPersist } from '../components/twin/schematic/types'
 import {
   getTwinViewPreference,
   setTwinViewPreference,
@@ -46,7 +52,11 @@ export default function DigitalTwinPage() {
   const [viewMode, setViewMode] = useState<TwinViewMode>(() => getTwinViewPreference())
   const [forceDemo, setForceDemo] = useState(false)
   const [editLayout, setEditLayout] = useState(false)
+  const [includeInactive, setIncludeInactive] = useState(false)
   const [sceneDiag, setSceneDiag] = useState<Record<string, unknown> | null>(null)
+  const [layoutDraft, setLayoutDraft] = useState<LayoutPersist | null>(null)
+  const [layoutDirty, setLayoutDirty] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
 
   useEffect(() => {
     if (routeStationId) {
@@ -55,12 +65,27 @@ export default function DigitalTwinPage() {
     }
   }, [routeStationId])
 
+  const isFixture = stationId === FIXTURE_STATION_ID
+
   const twinQ = useQuery({
-    queryKey: ['twin', 'live-state', stationId],
-    queryFn: async () => (await getTwinLiveState(stationId, { touch: true })).data,
+    queryKey: ['twin', 'live-state', stationId, includeInactive],
+    queryFn: async () => {
+      if (isFixture) return fourTankTwelvePumpState()
+      return (await getTwinLiveState(stationId, { touch: true, includeInactive })).data
+    },
     enabled: !!stationId,
-    refetchInterval: viewMode === 'operational' ? 45_000 : 30_000,
+    refetchInterval: viewMode === 'operational' && !isFixture ? 45_000 : false,
   })
+
+  useEffect(() => {
+    const onLeave = (e: BeforeUnloadEvent) => {
+      if (!layoutDirty || !editLayout) return
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onLeave)
+    return () => window.removeEventListener('beforeunload', onLeave)
+  }, [layoutDirty, editLayout])
 
   const anim = useDispensingPlayback({
     stationId,
@@ -96,27 +121,16 @@ export default function DigitalTwinPage() {
 
   const saveLayout = useMutation({
     mutationFn: async () => {
-      if (!stationId || !twinQ.data?.layout) return
-      const items = (twinQ.data.layout.items || []).map((i: any, idx: number) => ({
-        asset_type: String(i.assetType || i.asset_type || 'OTHER'),
-        asset_id: i.assetId ?? i.asset_id ?? null,
-        label: i.label ?? null,
-        x_position: Number(i.x ?? i.x_position ?? 0),
-        y_position: Number(i.y ?? i.y_position ?? 0),
-        width: Number(i.width ?? 40),
-        height: Number(i.height ?? 40),
-        rotation: Number(i.rotation ?? 0),
-        z_index: Number(i.zIndex ?? i.z_index ?? idx),
-        configuration_json: i.configuration ?? i.configuration_json ?? null,
-      }))
-      await putTwinLayout(stationId, {
-        name: 'Custom',
-        canvas_width: Number(twinQ.data.layout.canvasWidth || 1200),
-        canvas_height: Number(twinQ.data.layout.canvasHeight || 700),
-        items,
-      })
+      if (!stationId || isFixture) return
+      const draft = layoutDraft
+      if (!draft?.items?.length) return
+      await putTwinLayout(stationId, draft)
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['twin'] }),
+    onSuccess: () => {
+      setLayoutDirty(false)
+      setEditLayout(false)
+      qc.invalidateQueries({ queryKey: ['twin'] })
+    },
   })
 
   const resetLayout = useMutation({
@@ -124,8 +138,17 @@ export default function DigitalTwinPage() {
       if (!stationId) return
       await resetTwinLayout(stationId)
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['twin'] }),
+    onSuccess: () => {
+      setLayoutDirty(false)
+      setEditLayout(false)
+      qc.invalidateQueries({ queryKey: ['twin'] })
+    },
   })
+
+  const onDraftChange = useCallback((draft: LayoutPersist, dirty: boolean) => {
+    setLayoutDraft(draft)
+    if (dirty) setLayoutDirty(true)
+  }, [])
 
   const onMoveLayoutItem = useCallback(
     (id: string, x: number, y: number) => {
@@ -219,6 +242,16 @@ export default function DigitalTwinPage() {
           selectedLabel={selectedLabel}
           onChange={onStationChange}
         />
+        {canEdit && (
+          <label className="flex items-center gap-2 text-xs text-slate-300 mb-1">
+            <input
+              type="checkbox"
+              checked={includeInactive}
+              onChange={(e) => setIncludeInactive(e.target.checked)}
+            />
+            Include inactive equipment
+          </label>
+        )}
         {viewMode === '3d' && (
           <button
             type="button"
@@ -228,28 +261,43 @@ export default function DigitalTwinPage() {
             {forceDemo ? 'Use GLB model' : 'Show demo scene'}
           </button>
         )}
+        {IS_DEV && (
+          <button
+            type="button"
+            className="btn-secondary text-xs mb-1"
+            data-testid="open-4x12-fixture"
+            onClick={() => onStationChange(FIXTURE_STATION_ID)}
+          >
+            Open 4×12 fixture
+          </button>
+        )}
         {canEdit && stationId && hasCatalogAssets && viewMode === 'operational' && (
           <div className="flex flex-wrap gap-2 ml-auto pb-1">
             <button
               type="button"
               className="btn-secondary text-xs"
-              onClick={() => setEditLayout((v) => !v)}
+              onClick={() => {
+                if (editLayout && layoutDirty && !window.confirm('Discard unsaved layout changes?')) return
+                setEditLayout((v) => !v)
+              }}
             >
               {editLayout ? 'Done editing' : 'Edit layout'}
             </button>
             <button
               type="button"
               className="btn-secondary text-xs"
-              onClick={() => resetLayout.mutate()}
-              disabled={resetLayout.isPending}
+              data-testid="reset-layout"
+              onClick={() => setConfirmReset(true)}
+              disabled={resetLayout.isPending || isFixture}
             >
               Reset layout
             </button>
             <button
               type="button"
               className="btn-primary text-xs"
+              data-testid="save-layout"
               onClick={() => saveLayout.mutate()}
-              disabled={saveLayout.isPending}
+              disabled={saveLayout.isPending || isFixture}
             >
               Save layout
             </button>
@@ -295,6 +343,9 @@ export default function DigitalTwinPage() {
             liveAmount={anim.liveAmount}
             restoredPumpIds={anim.restoredPumpIds}
             editMode={editLayout}
+            canEdit={canEdit}
+            includeInactive={includeInactive}
+            onDraftChange={onDraftChange}
             onMoveLayoutItem={onMoveLayoutItem}
           />
         </div>
@@ -337,6 +388,34 @@ export default function DigitalTwinPage() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={confirmReset}
+        title="Reset layout?"
+        description="This restores the automatic schematic and discards the saved custom layout. Zoom and pan are not affected."
+        onClose={() => setConfirmReset(false)}
+        footer={
+          <>
+            <button type="button" className="btn-secondary text-xs" onClick={() => setConfirmReset(false)}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              data-testid="confirm-reset-layout"
+              onClick={() => {
+                setConfirmReset(false)
+                resetLayout.mutate()
+              }}
+            >
+              Reset layout
+            </button>
+          </>
+        }
+      >
+        <p className="text-sm text-slate-300">
+          Reset view only changes zoom and pan. Reset layout recalculates equipment positions.
+        </p>
+      </ConfirmDialog>
     </div>
   )
 }

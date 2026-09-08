@@ -21,6 +21,7 @@ from app.models import (
     User,
 )
 from app.services.alert_engine import raise_sales_variance_alert, upsert_alert
+from app.services.tank_lifecycle import operational_tank_clause
 from app.services.reconciliation import (
     DEFAULT_CRITICAL_PCT,
     DEFAULT_WARN_PCT,
@@ -665,7 +666,7 @@ def calculate_from_tank_submission(
     till_captured = bool(till["captured"])
 
     tanks = list(
-        db.scalars(select(Tank).where(Tank.station_id == station.id, Tank.status != "INACTIVE")).all()
+        db.scalars(select(Tank).where(Tank.station_id == station.id, operational_tank_clause())).all()
     )
     opening_total = ZERO
     delivery_total = ZERO

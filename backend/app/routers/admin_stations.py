@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     Device,
+    MqttIdentityMap,
     Nozzle,
     Pump,
     PumpTransaction,
@@ -35,6 +36,8 @@ from app.schemas import (
     StationUpdate,
 )
 from app.services.rbac import require_admin
+from app.services.tank_deletion import delete_tank, inspect_tank_dependencies
+from app.services.tank_lifecycle import operational_tank_clause
 
 stations_admin_router = APIRouter(prefix="/admin/stations", tags=["admin-stations"])
 pumps_admin_router = APIRouter(prefix="/admin/pumps", tags=["admin-pumps"])
@@ -67,22 +70,30 @@ class AdminPumpOut(PumpOut):
 
 class NozzleCreate(BaseModel):
     nozzle_code: str
+    name: Optional[str] = None
     mqtt_nozzle_id: Optional[str] = None
     mqtt_nozzle_identifier: Optional[str] = None
     nozzle_number: Optional[int] = None
     product: Optional[str] = None
     display_order: Optional[int] = None
+    side_id: Optional[str] = None
+    source_identifier: Optional[str] = None
+    controller_address: Optional[str] = None
     status: str = "ACTIVE"
     active: bool = True
 
 
 class NozzleUpdate(BaseModel):
     nozzle_code: Optional[str] = None
+    name: Optional[str] = None
     mqtt_nozzle_id: Optional[str] = None
     mqtt_nozzle_identifier: Optional[str] = None
     nozzle_number: Optional[int] = None
     product: Optional[str] = None
     display_order: Optional[int] = None
+    side_id: Optional[str] = None
+    source_identifier: Optional[str] = None
+    controller_address: Optional[str] = None
     status: Optional[str] = None
     active: Optional[bool] = None
 
@@ -96,6 +107,10 @@ class NozzleOut(BaseModel):
     pump_code: Optional[str] = None
     nozzle_code: str
     mqtt_nozzle_id: Optional[str] = None
+    name: Optional[str] = None
+    side_id: Optional[str] = None
+    source_identifier: Optional[str] = None
+    controller_address: Optional[str] = None
     nozzle_number: Optional[int] = None
     product: Optional[str] = None
     display_order: int = 0
@@ -109,6 +124,7 @@ class NozzleOut(BaseModel):
 class TankConnectionCreate(BaseModel):
     tank_id: UUID
     pump_id: UUID
+    nozzle_id: Optional[UUID] = None
     product: Optional[str] = None
     is_primary: bool = False
     display_order: Optional[int] = None
@@ -125,6 +141,7 @@ class TankConnectionCreate(BaseModel):
 class TankConnectionUpdate(BaseModel):
     tank_id: Optional[UUID] = None
     pump_id: Optional[UUID] = None
+    nozzle_id: Optional[UUID] = None
     product: Optional[str] = None
     is_primary: Optional[bool] = None
     display_order: Optional[int] = None
@@ -139,6 +156,7 @@ class TankConnectionOut(BaseModel):
     station_id: UUID
     tank_id: UUID
     pump_id: UUID
+    nozzle_id: Optional[UUID] = None
     product: Optional[str] = None
     line_label: Optional[str] = None
     active: bool
@@ -150,6 +168,8 @@ class TankConnectionOut(BaseModel):
     tank_name: Optional[str] = None
     pump_code: Optional[str] = None
     pump_name: Optional[str] = None
+    nozzle_code: Optional[str] = None
+    nozzle_name: Optional[str] = None
 
 
 class AdminPumpCreate(PumpCreate):
@@ -249,7 +269,14 @@ def _station_detail(db: Session, station: Station) -> AdminStationDetail:
     device_count = (
         db.scalar(select(func.count()).select_from(Device).where(Device.station_id == station.id)) or 0
     )
-    tank_count = db.scalar(select(func.count()).select_from(Tank).where(Tank.station_id == station.id)) or 0
+    tank_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(Tank)
+            .where(Tank.station_id == station.id, operational_tank_clause())
+        )
+        or 0
+    )
     connection_count = (
         db.scalar(
             select(func.count())
@@ -295,11 +322,13 @@ def _admin_pump_out(db: Session, pump: Pump) -> AdminPumpOut:
 def _connection_out(db: Session, conn: TankPumpConnection) -> TankConnectionOut:
     tank = db.get(Tank, conn.tank_id)
     pump = db.get(Pump, conn.pump_id)
+    nozzle = db.get(Nozzle, conn.nozzle_id) if getattr(conn, "nozzle_id", None) else None
     base = {
         "id": conn.id,
         "station_id": conn.station_id,
         "tank_id": conn.tank_id,
         "pump_id": conn.pump_id,
+        "nozzle_id": getattr(conn, "nozzle_id", None),
         "product": conn.product,
         "line_label": conn.line_label,
         "active": conn.active,
@@ -311,6 +340,8 @@ def _connection_out(db: Session, conn: TankPumpConnection) -> TankConnectionOut:
         "tank_name": tank.name if tank else None,
         "pump_code": pump.pump_code if pump else None,
         "pump_name": (pump.name or pump.pump_code) if pump else None,
+        "nozzle_code": nozzle.nozzle_code if nozzle else None,
+        "nozzle_name": (getattr(nozzle, "name", None) or nozzle.nozzle_code) if nozzle else None,
     }
     return TankConnectionOut(**base)
 
@@ -392,6 +423,43 @@ def _sync_mqtt_identity(db: Session, pump: Pump) -> None:
         )
 
 
+def _sync_nozzle_identity(db: Session, nozzle: Nozzle) -> None:
+    """Map canonical nozzle code and optional source/controller channel to this nozzle."""
+    externals: list[tuple[str, bool]] = []
+    code = (nozzle.nozzle_code or "").strip()
+    if code:
+        externals.append((code, True))
+    mqtt_id = (nozzle.mqtt_nozzle_id or "").strip()
+    if mqtt_id and mqtt_id != code:
+        externals.append((mqtt_id, False))
+    source = (getattr(nozzle, "source_identifier", None) or "").strip()
+    if source and source not in {code, mqtt_id}:
+        externals.append((source, False))
+    for external_id, primary in externals:
+        clash = db.scalar(
+            select(MqttIdentityMap).where(
+                MqttIdentityMap.entity_type == "nozzle",
+                MqttIdentityMap.mqtt_external_id == external_id,
+            )
+        )
+        if clash:
+            clash.internal_id = nozzle.id
+            clash.is_primary = primary or clash.is_primary
+            clash.notes = clash.notes or "Admin nozzle mapping"
+            db.add(clash)
+        else:
+            db.add(
+                MqttIdentityMap(
+                    id=uuid4(),
+                    entity_type="nozzle",
+                    internal_id=nozzle.id,
+                    mqtt_external_id=external_id,
+                    is_primary=primary,
+                    notes="Admin nozzle mapping",
+                )
+            )
+
+
 # ---------------------------------------------------------------------------
 # Stations
 # ---------------------------------------------------------------------------
@@ -413,6 +481,42 @@ def admin_get_station(
     _user: User = Depends(require_admin),
 ) -> AdminStationDetail:
     return _station_detail(db, _get_station(db, station_id))
+
+
+@stations_admin_router.get("/{station_id}/tanks/{tank_id}/deletion-preview")
+def admin_tank_deletion_preview(
+    station_id: UUID,
+    tank_id: UUID,
+    db: Session = Depends(get_db),
+    _user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    _get_station(db, station_id)
+    tank = db.get(Tank, tank_id)
+    if tank is None or tank.station_id != station_id:
+        raise HTTPException(status_code=404, detail="Tank not found")
+    return inspect_tank_dependencies(db, tank).as_dict()
+
+
+@stations_admin_router.delete("/{station_id}/tanks/{tank_id}")
+def admin_delete_tank(
+    station_id: UUID,
+    tank_id: UUID,
+    confirm_disconnect: bool = Query(False),
+    confirm_code: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    _get_station(db, station_id)
+    tank = db.get(Tank, tank_id)
+    if tank is None or tank.station_id != station_id:
+        raise HTTPException(status_code=404, detail="Tank not found")
+    return delete_tank(
+        db,
+        tank=tank,
+        actor=user,
+        confirm_disconnect=confirm_disconnect,
+        confirm_code=confirm_code,
+    )
 
 
 @stations_admin_router.put("/{station_id}", response_model=AdminStationDetail)
@@ -553,6 +657,7 @@ def admin_create_station_pump(
                 NozzleCreate(
                     nozzle_code=code,
                     mqtt_nozzle_id=code,
+                    name=f"Nozzle {i}",
                     nozzle_number=i,
                     product=body.product,
                     display_order=i,
@@ -583,6 +688,10 @@ def admin_create_station_pump(
                 pump_code=pump.pump_code,
                 nozzle_code=nozzle_code,
                 mqtt_nozzle_id=mqtt_noz,
+                name=spec.name or f"Nozzle {spec.nozzle_number or idx + 1}",
+                side_id=spec.side_id,
+                source_identifier=spec.source_identifier,
+                controller_address=spec.controller_address,
                 nozzle_number=spec.nozzle_number if spec.nozzle_number is not None else idx + 1,
                 product=spec.product or body.product,
                 display_order=spec.display_order if spec.display_order is not None else idx + 1,
@@ -808,6 +917,10 @@ def admin_create_nozzle(
         pump_code=pump.pump_code,
         nozzle_code=body.nozzle_code.strip(),
         mqtt_nozzle_id=mqtt_noz,
+        name=body.name or (f"Nozzle {body.nozzle_number}" if body.nozzle_number else None),
+        side_id=body.side_id,
+        source_identifier=body.source_identifier,
+        controller_address=body.controller_address,
         nozzle_number=body.nozzle_number,
         product=body.product,
         display_order=display_order,
@@ -815,6 +928,7 @@ def admin_create_nozzle(
         active=body.active if body.active is not None else True,
     )
     db.add(nozzle)
+    _sync_nozzle_identity(db, nozzle)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -845,6 +959,7 @@ def admin_update_nozzle(
         setattr(nozzle, key, value)
     nozzle.updated_at = _now()
     db.add(nozzle)
+    _sync_nozzle_identity(db, nozzle)
     try:
         db.commit()
     except IntegrityError as exc:
@@ -929,6 +1044,7 @@ def admin_create_tank_connection(
         station_id=station_id,
         tank_id=body.tank_id,
         pump_id=body.pump_id,
+        nozzle_id=body.nozzle_id,
         product=product,
         line_label=body.line_label,
         active=body.active,

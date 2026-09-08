@@ -23,12 +23,12 @@ export function livePumpInferredStatus(
   if (live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status)) {
     return 'DISPENSING'
   }
-  if (completedSaleStatus(live?.latestSale?.status)) return 'COMPLETED'
+  if (completedSaleStatus(live?.latestSale?.status)) return 'IDLE'
   if (inProgressSaleStatus(live?.latestSale?.status) && !live?.isRecentlyActive) {
-    return 'COMPLETED'
+    return 'IDLE'
   }
   if (['DISPENSING', 'IN_PROGRESS', 'ACTIVE'].includes(current.toUpperCase())) {
-    return 'COMPLETED'
+    return 'IDLE'
   }
   return current
 }

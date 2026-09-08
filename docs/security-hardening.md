@@ -70,12 +70,46 @@ device_code / station_code → mosquitto username → ACL topic prefix
 
 Store `mqtt_client_id` on the `devices` row for audit.
 
-## 9. HTTPS configuration
+## 9. HTTPS configuration (production)
 
-- Terminate TLS at Nginx (or a DO load balancer) on 443.
-- Redirect HTTP → HTTPS.
-- Proxy `/`, `/api/`, `/events/` to internal services only.
-- Set secure cookie / JWT transport over HTTPS only in production.
+Do **not** force HTTPS inside the React app or FastAPI. Local development stays on HTTP (`localhost`).
+
+Terminate TLS at the reverse proxy (Nginx) or a load balancer:
+
+1. Obtain a certificate (Let’s Encrypt or your CA).
+2. Listen on **443** with TLS; redirect **80 → 443** only in production.
+3. Proxy `/`, `/api/`, `/events/` to the Docker network services (`dashboard`, `api`).
+4. Set production cookies/JWT transport:
+   - `Secure` cookies once the site is HTTPS
+   - `SameSite=Lax` (or `Strict` if that matches your auth flow)
+   - Do not set `Secure` in local HTTP development
+5. HSTS only after HTTPS is verified (`max-age` with includeSubDomains as appropriate).
+
+Example Nginx server (production host, not baked into the dashboard image):
+
+```nginx
+server {
+  listen 80;
+  server_name dashboard.example.com;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name dashboard.example.com;
+  ssl_certificate     /etc/letsencrypt/live/dashboard.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/dashboard.example.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:80;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+}
+```
+
+If the browser shows “Not Secure”, the public hostname is still served over HTTP. Fix the proxy/certificate — do not add an app-level HTTPS redirect.
 
 ## 10. Database backup
 

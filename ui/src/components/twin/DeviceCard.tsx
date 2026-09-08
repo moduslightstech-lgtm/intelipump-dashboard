@@ -5,7 +5,7 @@ type Props = { device: Record<string, any> }
 function statusTone(status: string) {
   const s = status.toUpperCase()
   if (s === 'ONLINE') return 'text-emerald-400 border-emerald-800'
-  if (s === 'DEGRADED') return 'text-amber-300 border-amber-800'
+  if (s === 'DELAYED' || s === 'DEGRADED') return 'text-amber-300 border-amber-800'
   if (s === 'OFFLINE') return 'text-red-400 border-red-900'
   return 'text-slate-400 border-slate-700'
 }
@@ -21,7 +21,7 @@ export default function DeviceCard({ device }: Props) {
         <div className="text-sm font-semibold text-white">
           {device.name || device.deviceCode}
         </div>
-        <span className="text-[11px] font-semibold">{status}</span>
+          <span className="text-[11px] font-semibold">{status.replace(/_/g, ' ')}</span>
       </div>
       <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] text-slate-400">
         <span>Code</span>

@@ -28,12 +28,13 @@ def _require_admin(user: User) -> None:
 @router.get("/stations/{station_id}")
 def get_twin_station(
     station_id: str,
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Full Digital Twin aggregate (same payload as /live-state)."""
     try:
-        payload = get_station_live_state(db, station_id)
+        payload = get_station_live_state(db, station_id, include_inactive=include_inactive)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     station = resolve_station(db, station_id)
@@ -46,11 +47,12 @@ def get_twin_station(
 def live_state(
     station_id: str,
     touch: bool = False,
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     try:
-        payload = get_station_live_state(db, station_id)
+        payload = get_station_live_state(db, station_id, include_inactive=include_inactive)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if touch:

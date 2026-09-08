@@ -13,7 +13,7 @@ export default function TankCard({ tank }: Props) {
 
   return (
     <article
-      className="rounded-lg border border-slate-800 bg-slate-900/80 p-3"
+      className={`rounded-lg border border-slate-800 bg-slate-900/80 p-3 ${tank.inactive ? 'opacity-60' : ''}`}
       data-tank-id={tank.id}
       data-source={src}
     >
@@ -21,6 +21,7 @@ export default function TankCard({ tank }: Props) {
         <div>
           <div className="text-sm font-semibold text-white">
             {tank.name || tank.tankCode}
+            {tank.inactive ? <span className="ml-2 text-[10px] uppercase text-slate-400">Inactive</span> : null}
           </div>
           <div className="text-[11px] text-slate-500 font-mono">{tank.tankCode}</div>
         </div>
@@ -73,6 +74,20 @@ export default function TankCard({ tank }: Props) {
           Manual tank reading — not live probe telemetry.
         </p>
       )}
+      {Array.isArray(tank.connections) && tank.connections.length > 0 ? (
+        <div className="mt-2 text-[11px]">
+          <div className="text-slate-500">
+            Connected {tank.connectedPumpCount ?? new Set(tank.connections.map((c: any) => c.pumpId)).size} pump
+            {(tank.connectedPumpCount ?? 1) === 1 ? '' : 's'} · {tank.connectedNozzleCount ?? tank.connections.length} nozzle
+            {(tank.connectedNozzleCount ?? tank.connections.length) === 1 ? '' : 's'}
+          </div>
+          <ul className="mt-1 space-y-0.5 text-slate-300">
+            {tank.connections.map((c: any, i: number) => (
+              <li key={String(c.nozzleId || c.pumpId || i)}>{c.label}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </article>
   )
 }

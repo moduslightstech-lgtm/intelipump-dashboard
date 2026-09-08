@@ -12,6 +12,10 @@ export function normalizeRole(role?: string | null): AppRole {
   return 'EXECUTIVE'
 }
 
+export function isAdmin(role?: string | null): boolean {
+  return normalizeRole(role) === 'ADMIN'
+}
+
 export function landingPath(role?: string | null): string {
   const r = normalizeRole(role)
   if (r === 'STATION_MANAGER') return '/station-manager/tank-readings'
@@ -28,11 +32,13 @@ export function canAccessPath(role: AppRole, path: string): boolean {
     if (path.startsWith('/station-manager')) return false
     return true
   }
-  // Station manager: tank readings, history, and profile only.
+  // Station manager: assigned-station summary, tank readings, history, and profile.
   if (path === '/login') return true
   if (path.startsWith('/station-manager/reconciliation')) return false
   if (path.startsWith('/reconciliations')) return false
   return (
+    path === '/' ||
+    path.startsWith('/executive') ||
     path.startsWith('/station-manager/tank-readings') ||
     path.startsWith('/station-manager/history') ||
     path.startsWith('/station-manager/profile') ||

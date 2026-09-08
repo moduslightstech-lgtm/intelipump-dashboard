@@ -11,7 +11,7 @@ from psycopg2.extras import Json
 
 from app.database import Database
 from app.models import NormalizedTransaction, ValidationError
-from app.services.identity import resolve_pump_uuid, resolve_station_uuid
+from app.services.identity import resolve_nozzle_uuid, resolve_pump_uuid, resolve_station_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +171,72 @@ class TransactionService:
                 )
             RETURNING id
         """
+        upsert_hierarchy = """
+            ON CONFLICT (id) DO UPDATE SET
+                volume_liters = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.volume_liters
+                    ELSE EXCLUDED.volume_liters
+                END,
+                amount = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.amount
+                    ELSE EXCLUDED.amount
+                END,
+                currency = COALESCE(EXCLUDED.currency, pump_transactions.currency),
+                price_per_liter = COALESCE(
+                    EXCLUDED.price_per_liter, pump_transactions.price_per_liter
+                ),
+                status = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.status
+                    ELSE EXCLUDED.status
+                END,
+                device_timestamp = COALESCE(
+                    EXCLUDED.device_timestamp, pump_transactions.device_timestamp
+                ),
+                transaction_started_at = COALESCE(
+                    pump_transactions.transaction_started_at,
+                    EXCLUDED.transaction_started_at
+                ),
+                transaction_completed_at = COALESCE(
+                    EXCLUDED.transaction_completed_at,
+                    pump_transactions.transaction_completed_at
+                ),
+                raw_payload = EXCLUDED.raw_payload,
+                received_at = CASE
+                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                     AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
+                    THEN pump_transactions.received_at
+                    ELSE EXCLUDED.received_at
+                END,
+                source_topic = COALESCE(
+                    EXCLUDED.source_topic, pump_transactions.source_topic
+                ),
+                pump_uuid = COALESCE(EXCLUDED.pump_uuid, pump_transactions.pump_uuid),
+                nozzle_uuid = COALESCE(EXCLUDED.nozzle_uuid, pump_transactions.nozzle_uuid),
+                source_identifier = COALESCE(
+                    EXCLUDED.source_identifier, pump_transactions.source_identifier
+                ),
+                mapping_status = COALESCE(
+                    EXCLUDED.mapping_status, pump_transactions.mapping_status
+                )
+            RETURNING id
+        """
+        hierarchy_sql = f"""
+            INSERT INTO pump_transactions (
+                id, station_id, device_id, pump_id, nozzle_id, product,
+                volume_liters, amount, currency, price_per_liter, raw_frame,
+                status, source_topic, device_timestamp, transaction_started_at,
+                transaction_completed_at, raw_payload, received_at, created_at,
+                station_uuid, pump_uuid, nozzle_uuid, source_identifier, mapping_status
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            {upsert_hierarchy}
+        """
         resolved_sql = f"""
             INSERT INTO pump_transactions (
                 id, station_id, device_id, pump_id, nozzle_id, product,
@@ -219,21 +285,40 @@ class TransactionService:
                     if station_uuid is not None
                     else None
                 )
+                nozzle_uuid = None
+                if station_uuid is not None:
+                    nozzle_uuid = resolve_nozzle_uuid(
+                        cur,
+                        station_uuid,
+                        pump_uuid=pump_uuid,
+                        mqtt_pump_id=getattr(tx, "source_identifier", None) or tx.pump_id,
+                        mqtt_nozzle_id=tx.nozzle_id or getattr(tx, "source_identifier", None),
+                    )
+                mapping_status = "MAPPED" if pump_uuid and nozzle_uuid else "REQUIRES_MAPPING"
                 if station_uuid is None:
                     logger.warning(
                         "No catalog mapping for MQTT stationId=%s "
                         "(external id preserved on transaction)",
                         tx.station_id,
                     )
+                    mapping_status = "REQUIRES_MAPPING"
                 elif pump_uuid is None:
                     logger.warning(
                         "No catalog mapping for MQTT pumpId=%s at station=%s "
-                        "(external id preserved on transaction)",
+                        "(external id preserved on transaction; sale retained)",
                         tx.pump_id,
                         tx.station_id,
                     )
+                elif nozzle_uuid is None:
+                    logger.warning(
+                        "No nozzle mapping for pumpId=%s nozzleId=%s at station=%s "
+                        "(sale retained with REQUIRES_MAPPING)",
+                        tx.pump_id,
+                        tx.nozzle_id,
+                        tx.station_id,
+                    )
 
-                resolved_params = (
+                hierarchy_params = (
                     tx.transaction_id,
                     tx.station_id,
                     tx.device_id,
@@ -255,8 +340,12 @@ class TransactionService:
                     received_at,
                     str(station_uuid) if station_uuid else None,
                     str(pump_uuid) if pump_uuid else None,
+                    str(nozzle_uuid) if nozzle_uuid else None,
+                    getattr(tx, "source_identifier", None) or tx.pump_id,
+                    mapping_status,
                 )
-                extended_params = resolved_params[:-2]
+                resolved_params = hierarchy_params[:21]
+                extended_params = hierarchy_params[:19]
                 legacy_params = (
                     tx.transaction_id,
                     tx.station_id,
@@ -273,26 +362,36 @@ class TransactionService:
                 )
 
                 try:
-                    cur.execute(resolved_sql, resolved_params)
+                    cur.execute(hierarchy_sql, hierarchy_params)
                 except Exception as exc:
                     if getattr(exc, "pgcode", None) != "42703":
                         raise
                     conn.rollback()
                     logger.warning(
-                        "station_uuid/pump_uuid columns missing; "
-                        "falling back without resolved FKs"
+                        "nozzle_uuid/mapping_status columns missing; "
+                        "falling back to station_uuid/pump_uuid insert"
                     )
                     try:
-                        cur.execute(extended_sql, extended_params)
+                        cur.execute(resolved_sql, resolved_params)
                     except Exception as exc2:
                         if getattr(exc2, "pgcode", None) != "42703":
                             raise
                         conn.rollback()
                         logger.warning(
-                            "Extended pump_transactions columns missing; "
-                            "using legacy insert until Alembic migration is applied"
+                            "station_uuid/pump_uuid columns missing; "
+                            "falling back without resolved FKs"
                         )
-                        cur.execute(legacy_sql, legacy_params)
+                        try:
+                            cur.execute(extended_sql, extended_params)
+                        except Exception as exc3:
+                            if getattr(exc3, "pgcode", None) != "42703":
+                                raise
+                            conn.rollback()
+                            logger.warning(
+                                "Extended pump_transactions columns missing; "
+                                "using legacy insert until Alembic migration is applied"
+                            )
+                            cur.execute(legacy_sql, legacy_params)
                 row = cur.fetchone()
                 return row is not None
 

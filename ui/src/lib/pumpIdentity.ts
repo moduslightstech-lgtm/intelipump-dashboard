@@ -38,6 +38,7 @@ export function pumpStatusColor(status: string): string {
   if (s === 'COMPLETED') return '#4ade80'
   if (s === 'POWERED_OFF' || s === 'CLOSED') return '#64748b'
   if (s === 'OFFLINE' || s === 'ERROR' || s === 'FAULT') return '#ef4444'
+  if (s === 'INACTIVE') return '#475569'
   if (s === 'IDLE' || s === 'ONLINE') return '#3b82f6'
   if (s === 'WARNING' || s === 'MAINTENANCE' || s === 'DEGRADED') return '#f59e0b'
   return '#94a3b8'

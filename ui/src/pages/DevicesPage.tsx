@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { fmtTime, getDevices, getStations } from '../api/client'
+import { fmtTime, getDevices, getStations, humanizeEnum } from '../api/client'
 
 export default function DevicesPage() {
   const devicesQ = useQuery({ queryKey: ['devices'], queryFn: async () => (await getDevices()).data })
@@ -46,7 +46,9 @@ export default function DevicesPage() {
                   </td>
                   <td className="py-3">{stationName(d.station_id)}</td>
                   <td className="py-3">
-                    <span className={d.status === 'ONLINE' ? 'badge-ok' : 'badge-warn'}>{d.status}</span>
+                    <span className={d.status === 'ONLINE' ? 'badge-ok' : d.status === 'DELAYED' ? 'badge-warn' : 'badge-critical'} title={d.status_reason || undefined}>
+                      {humanizeEnum(d.status)}
+                    </span>
                   </td>
                   <td className="py-3 text-slate-400">{fmtTime(d.last_seen_at)}</td>
                   <td className="py-3 text-slate-400">{fmtTime(d.last_transaction_at)}</td>

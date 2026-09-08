@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 class TokenResponse(BaseModel):
@@ -45,6 +45,7 @@ class DashboardSummary(BaseModel):
     active_stations: int
     online_devices: int
     offline_devices: int
+    delayed_devices: int = 0
     last_transaction_time: Optional[datetime] = None
     rejected_mqtt_messages_today: int
     timezone: str
@@ -101,6 +102,9 @@ class PaginatedTransactions(BaseModel):
     total: int
     page: int
     size: int
+    total_amount: Optional[Decimal] = None
+    total_volume: Optional[Decimal] = None
+    average_amount: Optional[Decimal] = None
 
 
 class StationCreate(BaseModel):
@@ -211,9 +215,25 @@ class DeviceOut(BaseModel):
     active: bool = True
     deactivated_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
+    last_heartbeat_at: Optional[datetime] = None
     last_transaction_at: Optional[datetime] = None
+    age_seconds: Optional[int] = None
+    timeout_seconds: int = 90
+    status_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def apply_heartbeat_status(self):
+        from app.services.edge_device_status import ONLINE_SECONDS, calculate_device_status
+
+        view = calculate_device_status(last_seen=self.last_seen_at)
+        self.status = view.status
+        self.last_heartbeat_at = self.last_seen_at
+        self.age_seconds = view.seconds_since_last_heartbeat
+        self.timeout_seconds = ONLINE_SECONDS
+        self.status_reason = view.status_reason
+        return self
 
 
 class PumpCreate(BaseModel):

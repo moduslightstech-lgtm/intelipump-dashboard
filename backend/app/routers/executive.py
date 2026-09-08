@@ -263,7 +263,11 @@ def tank_inventory_summary(
     stations = accessible_stations(db, user)
     out = []
     for s in stations:
-        tanks = list(db.scalars(select(Tank).where(Tank.station_id == s.id)).all())
+        from app.services.tank_lifecycle import operational_tank_clause
+
+        tanks = list(
+            db.scalars(select(Tank).where(Tank.station_id == s.id, operational_tank_clause())).all()
+        )
         for t in tanks:
             latest = db.scalar(
                 select(TankMeasurement)

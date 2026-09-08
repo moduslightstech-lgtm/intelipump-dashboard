@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,11 +17,13 @@ from app.database import get_db
 from app.models import PumpTransaction, User
 from app.schemas import PaginatedTransactions, TransactionOut
 from app.security import get_current_user
+from app.services.identity import ledger_station_clause
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 
 def _base_query(
+    db: Session,
     *,
     station_id: Optional[str],
     pump_id: Optional[str],
@@ -32,7 +35,7 @@ def _base_query(
 ):
     stmt = select(PumpTransaction)
     if station_id:
-        stmt = stmt.where(PumpTransaction.station_id == station_id)
+        stmt = stmt.where(ledger_station_clause(db, station_id))
     if pump_id:
         stmt = stmt.where(PumpTransaction.pump_id == pump_id)
     if product:
@@ -53,6 +56,15 @@ def _base_query(
     return stmt
 
 
+def _aggregates(db: Session, stmt) -> tuple[Decimal, Decimal, Decimal]:
+    sub = stmt.subquery()
+    amount = db.scalar(select(func.coalesce(func.sum(sub.c.amount), 0))) or Decimal("0")
+    volume = db.scalar(select(func.coalesce(func.sum(sub.c.volume_liters), 0))) or Decimal("0")
+    count = db.scalar(select(func.count()).select_from(sub)) or 0
+    avg = (amount / count) if count else Decimal("0")
+    return Decimal(amount), Decimal(volume), Decimal(avg).quantize(Decimal("0.01"))
+
+
 @router.get("", response_model=PaginatedTransactions)
 def list_transactions(
     station_id: Optional[str] = None,
@@ -69,6 +81,7 @@ def list_transactions(
     _user: User = Depends(get_current_user),
 ) -> PaginatedTransactions:
     stmt = _base_query(
+        db,
         station_id=station_id,
         pump_id=pump_id,
         product=product,
@@ -78,6 +91,7 @@ def list_transactions(
         end=end,
     )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    total_amount, total_volume, average_amount = _aggregates(db, stmt)
 
     sort_field, _, direction = sort.partition(",")
     col = getattr(PumpTransaction, sort_field, PumpTransaction.received_at)
@@ -88,6 +102,9 @@ def list_transactions(
         total=int(total),
         page=page,
         size=size,
+        total_amount=total_amount,
+        total_volume=total_volume,
+        average_amount=average_amount,
     )
 
 
@@ -104,6 +121,7 @@ def export_transactions(
     _user: User = Depends(get_current_user),
 ):
     stmt = _base_query(
+        db,
         station_id=station_id,
         pump_id=pump_id,
         product=product,
@@ -111,7 +129,7 @@ def export_transactions(
         q=q,
         start=start,
         end=end,
-    ).order_by(PumpTransaction.received_at.desc()).limit(10000)
+    ).order_by(PumpTransaction.received_at.desc())
     rows = db.scalars(stmt).all()
 
     buf = io.StringIO()

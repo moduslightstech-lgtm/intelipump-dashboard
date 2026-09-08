@@ -56,7 +56,7 @@ def test_in_progress_sale_is_dispensing():
     )
 
 
-def test_stale_in_progress_becomes_completed():
+def test_stale_in_progress_becomes_idle():
     assert (
         infer_catalog_pump_status(
             now=NOW,
@@ -68,7 +68,7 @@ def test_stale_in_progress_becomes_completed():
             station_conn="ONLINE",
             edge_online=True,
         )
-        == "COMPLETED"
+        == "IDLE"
     )
 
 
@@ -84,7 +84,7 @@ def test_recent_completed_sale_is_not_dispensing():
             station_conn="ONLINE",
             edge_online=True,
         )
-        == "COMPLETED"
+        == "IDLE"
     )
 
 

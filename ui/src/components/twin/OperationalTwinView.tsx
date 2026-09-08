@@ -9,7 +9,6 @@ import { applyLiveStationStatus } from '../../lib/twinLiveStatus'
 import { useStationEdgeDevices } from '../../hooks/useDeviceStatus'
 import { useStationLiveSales } from '../../hooks/useStationLiveSales'
 import { canonicalPumpId, getConfiguredPumpId } from '../../utils/pumpMatching'
-import { formatSaleAmount } from '../../types/sales'
 import {
   liveDispensingFromPumpState,
   livePumpInferredStatus,
@@ -21,7 +20,7 @@ import { getConnections } from './forecourtLayout'
 import ForecourtMap, { type ForecourtSelection } from './ForecourtMap'
 import PumpCard from './PumpCard'
 import TankCard from './TankCard'
-import DeviceCard from './DeviceCard'
+import { aggregatePhysicalPumpStatus } from './schematic/physicalPump'
 
 type Props = {
   state?: TwinLiveState
@@ -41,6 +40,12 @@ type Props = {
   liveAmount?: number
   restoredPumpIds?: string[]
   editMode?: boolean
+  canEdit?: boolean
+  includeInactive?: boolean
+  onDraftChange?: (
+    draft: import('./schematic/types').LayoutPersist,
+    dirty: boolean,
+  ) => void
   onMoveLayoutItem?: (id: string, x: number, y: number) => void
 }
 
@@ -108,6 +113,10 @@ export default function OperationalTwinView({
   liveAmount,
   activeByPump,
   restoredPumpIds = [],
+  editMode = false,
+  canEdit = false,
+  includeInactive = false,
+  onDraftChange,
 }: Props) {
   const [selection, setSelection] = useState<ForecourtSelection>(null)
   const now = useMinuteTick()
@@ -117,13 +126,19 @@ export default function OperationalTwinView({
     station?.mqttStationId || station?.stationCode || station?.name || null
   const edgeQ = useStationEdgeDevices(stationKey)
 
-  const configuredPumpIds = useMemo(
-    () =>
-      (state?.pumps || [])
-        .map((p) => getConfiguredPumpId(p))
-        .filter(Boolean),
-    [state?.pumps],
-  )
+  const configuredPumpIds = useMemo(() => {
+    const ids: string[] = []
+    for (const p of state?.pumps || []) {
+      const id = getConfiguredPumpId(p)
+      if (id) ids.push(id)
+      for (const n of p.nozzles || []) {
+        for (const k of [n.sourceIdentifier, n.mqttNozzleId, n.mqttPumpId, n.nozzleCode]) {
+          if (k) ids.push(String(k))
+        }
+      }
+    }
+    return ids.filter(Boolean)
+  }, [state?.pumps])
 
   const liveSales = useStationLiveSales({
     stationId: station?.mqttStationId || null,
@@ -176,22 +191,40 @@ export default function OperationalTwinView({
         catalogPumps,
       ),
       pumps: (base.pumps || []).map((p) => {
+        const nozzles = (p.nozzles || []).map((n: Record<string, any>) => {
+          const keys = [n.sourceIdentifier, n.mqttNozzleId, n.mqttPumpId, n.nozzleCode]
+          const live = keys.map((k) => liveSales.pumpLiveState[canonicalPumpId(String(k || ''))]).find(Boolean)
+          if (!live?.latestSale) return n
+          return {
+            ...n,
+            lastTransactionAmount: live.latestSale.amount,
+            lastTransactionVolume: live.latestSale.volumeLiters,
+            lastTransactionAt: live.lastSaleAt,
+            product: live.latestSale.product || n.product,
+            inferredStatus: livePumpInferredStatus(liveOperational, live, n.inferredStatus),
+          }
+        })
         const key = canonicalPumpId(getConfiguredPumpId(p))
         const live = liveSales.pumpLiveState[key]
-        if (!live?.latestSale) return p
+        const inferred = nozzles.length
+          ? undefined
+          : live?.latestSale
+            ? livePumpInferredStatus(liveOperational, live, p.inferredStatus)
+            : p.inferredStatus
         return {
           ...p,
-          lastTransactionAmount: live.latestSale.amount,
-          lastTransactionVolume: live.latestSale.volumeLiters,
-          lastTransactionAt: live.lastSaleAt,
-          product: live.latestSale.product || p.product,
-          recentSaleCount: live.todayTransactionCount,
-          isRecentlyActive: live.isRecentlyActive,
-          inferredStatus: livePumpInferredStatus(
-            liveOperational,
-            live,
-            p.inferredStatus,
-          ),
+          id: p.id,
+          nozzles,
+          lastTransactionAmount: live?.latestSale?.amount ?? p.lastTransactionAmount,
+          lastTransactionVolume: live?.latestSale?.volumeLiters ?? p.lastTransactionVolume,
+          lastTransactionAt: live?.lastSaleAt ?? p.lastTransactionAt,
+          product: live?.latestSale?.product || p.product,
+          recentSaleCount: live?.todayTransactionCount,
+          isRecentlyActive: live?.isRecentlyActive,
+          inferredStatus:
+            nozzles.length > 0
+              ? aggregatePhysicalPumpStatus(nozzles.map((n: Record<string, any>) => n.inferredStatus))
+              : inferred || p.inferredStatus,
         }
       }),
     }
@@ -228,23 +261,6 @@ export default function OperationalTwinView({
   const displayStation = displayState?.station
   const tanks = displayState?.tanks || []
   const pumps = displayState?.pumps || []
-  const devices = displayState?.devices || []
-  const alerts = displayState?.activeAlerts || []
-  const txs =
-    liveSales.sales.length > 0
-      ? liveSales.sales.map((s) => ({
-          id: s.transactionId,
-          stationId: s.stationId,
-          pumpId: s.pumpId,
-          nozzleId: s.nozzleId,
-          product: s.product,
-          volumeLiters: s.volumeLiters,
-          amount: s.amount,
-          status: s.status,
-          receivedAt: s.receivedAt,
-          unmapped: liveSales.unmappedPumpIds.includes(s.pumpId),
-        }))
-      : displayState?.latestTransactions || []
   const reconStatus = String(displayState?.reconciliationStatus || 'NONE')
 
   const salesToday = liveSales.summary?.totalAmount ?? displayState?.salesToday
@@ -350,128 +366,67 @@ export default function OperationalTwinView({
         selection={selection}
         onSelect={setSelection}
         restoredPumpIds={restoredPumpIds}
+        editMode={editMode}
+        canEdit={canEdit}
+        includeInactive={includeInactive}
+        viewportWidth={typeof window === 'undefined' ? 1440 : window.innerWidth}
+        onDraftChange={onDraftChange}
       />
 
-      <div className="grid lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 space-y-4">
-          <details className="card">
-            <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
-              Tank list ({tanks.length})
-            </summary>
-            <div className="mt-3 grid sm:grid-cols-2 gap-3">
-              {tanks.map((t) => (
-                <TankCard key={String(t.id)} tank={t} />
-              ))}
-            </div>
-          </details>
-
-          <details className="card" open={pumps.length <= 8}>
-            <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
-              Pump cards ({pumps.length})
-            </summary>
-            <div className={`mt-3 grid gap-3 ${pumpGridClass(pumps.length)}`}>
-              {pumps.map((p) => {
-                const active = activePumpId != null && pumpMatchesId(p, activePumpId)
-                const key = canonicalPumpId(getConfiguredPumpId(p))
-                const live = liveSales.pumpLiveState[key]
-                const liveDispensing = Boolean(
-                  live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status),
-                )
-                const playbackPulse = active && phase === 'pulse'
-                return (
-                  <PumpCard
-                    key={String(p.id)}
-                    pump={p}
-                    animating={liveDispensing || playbackPulse}
-                    phase={
-                      liveDispensing || playbackPulse
-                        ? 'pulse'
-                        : active && phase === 'completed'
-                          ? 'completed'
-                          : 'idle'
-                    }
-                    flashAmount={active ? flashTx?.amount : live?.latestSale?.amount}
-                    flashVolume={active ? flashTx?.volumeLiters : live?.latestSale?.volumeLiters}
-                    activePumpId={activePumpId}
-                    recentCount={live?.todayTransactionCount}
-                  />
-                )
-              })}
-            </div>
-          </details>
-
-          <div>
-            <h3 className="text-sm font-semibold text-slate-300 mb-2">
-              Edge devices ({devices.length})
-            </h3>
-            {devices.length === 0 ? (
-              <div className="card text-sm text-slate-500">No devices</div>
-            ) : (
-              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {devices.map((d) => (
-                  <DeviceCard key={String(d.id)} device={d} />
-                ))}
-              </div>
-            )}
+      <div className="space-y-4">
+        <details className="card">
+          <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
+            Tank list ({tanks.length})
+          </summary>
+          <div className="mt-3 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {tanks.map((t) => (
+              <TankCard key={String(t.id)} tank={t} />
+            ))}
           </div>
-        </div>
+        </details>
 
-        <div className="space-y-4">
-          <div className="card space-y-2">
-            <h3 className="text-white font-semibold text-sm">Active alerts</h3>
-            {alerts.length === 0 ? (
-              <p className="text-slate-500 text-sm">None</p>
-            ) : (
-              <ul className="space-y-2 max-h-64 overflow-auto">
-                {alerts.slice(0, 12).map((a: any) => (
-                  <li key={a.id} className="text-xs border-b border-slate-800 pb-2">
-                    <div className="text-amber-300 font-medium">{a.title}</div>
-                    <div className="text-slate-500">
-                      {a.severity}
-                      {a.pumpId ? ` · ${a.pumpId}` : ''} · {fmtTime(a.detectedAt)}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
+        <details className="card" open={pumps.length <= 8} data-testid="pump-list">
+          <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
+            Pump list ({pumps.length})
+          </summary>
+          <div className={`mt-3 grid gap-3 ${pumpGridClass(pumps.length)}`}>
+            {pumps.map((p) => {
+              const nozzles = p.nozzles || []
+              const nozzleLive = nozzles.some((n: Record<string, any>) => {
+                const keys = [n.sourceIdentifier, n.mqttNozzleId, n.mqttPumpId]
+                return keys.some((k) => {
+                  const live = liveSales.pumpLiveState[canonicalPumpId(String(k || ''))]
+                  return live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status)
+                })
+              })
+              const key = canonicalPumpId(getConfiguredPumpId(p))
+              const live = liveSales.pumpLiveState[key]
+              const liveDispensing =
+                nozzleLive ||
+                Boolean(live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status))
+              const active = activePumpId != null && pumpMatchesId(p, activePumpId)
+              const playbackPulse = active && phase === 'pulse'
+              return (
+                <PumpCard
+                  key={String(p.id)}
+                  pump={p}
+                  animating={liveDispensing || playbackPulse}
+                  phase={
+                    liveDispensing || playbackPulse
+                      ? 'pulse'
+                      : active && phase === 'completed'
+                        ? 'completed'
+                        : 'idle'
+                  }
+                  flashAmount={active ? flashTx?.amount : live?.latestSale?.amount}
+                  flashVolume={active ? flashTx?.volumeLiters : live?.latestSale?.volumeLiters}
+                  activePumpId={activePumpId}
+                  recentCount={live?.todayTransactionCount}
+                />
+              )
+            })}
           </div>
-
-          <div className="card space-y-2">
-            <h3 className="text-white font-semibold text-sm">Latest transactions</h3>
-            {txs.length === 0 ? (
-              <p className="text-slate-500 text-sm">No sales have been received for this station yet.</p>
-            ) : (
-              <ul className="space-y-2 max-h-80 overflow-auto">
-                {txs.slice(0, 15).map((tx: any) => (
-                  <li
-                    key={tx.id}
-                    className={`text-xs border-b border-slate-800 pb-2 ${
-                      activePumpId && pumpMatchesId({ mqttPumpId: tx.pumpId }, activePumpId)
-                        ? 'bg-sky-950/40 -mx-2 px-2 rounded'
-                        : ''
-                    }`}
-                  >
-                    <div className="flex justify-between gap-2">
-                      <span className="text-slate-200 font-mono break-all">
-                        {tx.pumpId}
-                        {tx.unmapped ? (
-                          <span className="ml-1 text-amber-400">(unmapped)</span>
-                        ) : null}
-                      </span>
-                      <span className="text-emerald-400 shrink-0">
-                        {formatSaleAmount(tx.amount, 'NGN')}
-                      </span>
-                    </div>
-                    <div className="text-slate-500">
-                      {tx.product || '—'} · {fmtLiters(tx.volumeLiters)} ·{' '}
-                      {fmtTime(tx.receivedAt || tx.deviceTimestamp || tx.transactionCompletedAt)}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </div>
+        </details>
       </div>
     </div>
   )

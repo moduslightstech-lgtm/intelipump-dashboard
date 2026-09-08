@@ -1,7 +1,10 @@
 import { FormEvent, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useOutletContext } from 'react-router-dom'
-import { createTank, getTanks, type Station, updateTank } from '../../api/client'
+import { createTank, fmtLiters, getTanks, humanizeEnum, type Station, updateTank } from '../../api/client'
+import { useAuth } from '../../context/AuthContext'
+import { isAdmin } from '../../lib/roles'
+import DeleteTankModal from '../../components/admin/DeleteTankModal'
 
 type Ctx = { stationId: string; station?: Station; refreshStation: () => void }
 
@@ -40,7 +43,9 @@ function normalizeTank(t: TankRow) {
 }
 
 export default function AdminStationTanksPage() {
-  const { stationId, refreshStation } = useOutletContext<Ctx>()
+  const { stationId, station, refreshStation } = useOutletContext<Ctx>()
+  const { user } = useAuth()
+  const admin = isAdmin(user?.normalizedRole || user?.role)
   const qc = useQueryClient()
   const tanksQ = useQuery({
     queryKey: ['admin-station-tanks', stationId],
@@ -50,6 +55,7 @@ export default function AdminStationTanksPage() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState(emptyForm)
   const [msg, setMsg] = useState('')
+  const [deleteTank, setDeleteTank] = useState<ReturnType<typeof normalizeTank> | null>(null)
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['admin-station-tanks', stationId] })
@@ -246,11 +252,13 @@ export default function AdminStationTanksPage() {
                 <td className="py-2 pr-3">{t.name || '—'}</td>
                 <td className="py-2 pr-3">{t.product || '—'}</td>
                 <td className="py-2 pr-3">
-                  {t.capacityLiters != null ? Number(t.capacityLiters).toLocaleString() : '—'}
+                  {t.capacityLiters != null ? fmtLiters(t.capacityLiters) : '—'}
                 </td>
-                <td className="py-2 pr-3 text-xs">{t.measurementSource}</td>
+                <td className="py-2 pr-3 text-xs">{humanizeEnum(t.measurementSource)}</td>
                 <td className="py-2 pr-3">
-                  <span className={t.status === 'ACTIVE' ? 'badge-ok' : 'badge-warn'}>{t.status}</span>
+                  <span className={t.status === 'ACTIVE' ? 'badge-ok' : 'badge-warn'}>
+                    {humanizeEnum(t.status)}
+                  </span>
                 </td>
                 <td className="py-2">
                   <div className="flex flex-wrap gap-1">
@@ -277,6 +285,15 @@ export default function AdminStationTanksPage() {
                     >
                       {t.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
                     </button>
+                    {admin && (
+                      <button
+                        type="button"
+                        className="btn-secondary text-xs px-2 py-1 text-rose-300"
+                        onClick={() => setDeleteTank(t)}
+                      >
+                        Delete
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
@@ -291,6 +308,23 @@ export default function AdminStationTanksPage() {
           </tbody>
         </table>
       </div>
+
+      <DeleteTankModal
+        open={Boolean(deleteTank)}
+        stationId={stationId}
+        stationName={station?.name}
+        tank={deleteTank}
+        onClose={() => setDeleteTank(null)}
+        onDeleted={(result) => {
+          setDeleteTank(null)
+          setMsg(
+            result.archived
+              ? `Tank ${result.tankCode} archived. Historical records were kept.`
+              : `Tank ${result.tankCode} deleted.`,
+          )
+          invalidate()
+        }}
+      />
     </div>
   )
 }

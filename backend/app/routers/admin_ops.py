@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Tank, TankReadingBatch, User, UserStationAssignment
 from app.security import hash_password
-from app.services.rbac import normalize_role, require_admin
+from app.services.rbac import accessible_stations, normalize_role, require_admin
+from app.services.tank_lifecycle import is_archived_tank
 from app.services.tank_readings import (
     admin_accept_batch,
     admin_reject_batch,
@@ -336,11 +337,11 @@ def reopen_batch(
 @tanks_router.get("")
 def list_tanks(
     station_id: Optional[UUID] = None,
+    include_inactive: bool = Query(True),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    from app.services.rbac import accessible_stations
-
     q = select(Tank).order_by(Tank.tank_code)
     if station_id:
         q = q.where(Tank.station_id == station_id)
@@ -349,19 +350,28 @@ def list_tanks(
         if allowed:
             q = q.where(Tank.station_id.in_(allowed))
     rows = list(db.scalars(q).all())
-    return [
-        {
-            "id": str(t.id),
-            "stationId": str(t.station_id) if t.station_id else None,
-            "tankCode": t.tank_code,
-            "name": t.name,
-            "product": t.product,
-            "capacityLiters": float(t.capacity_liters) if t.capacity_liters is not None else None,
-            "status": t.status,
-            "currentMeasurementSource": t.current_measurement_source,
-        }
-        for t in rows
-    ]
+    out = []
+    for t in rows:
+        archived = is_archived_tank(t)
+        if archived and not include_archived:
+            continue
+        if not include_inactive and (t.status or "").upper() == "INACTIVE":
+            continue
+        out.append(
+            {
+                "id": str(t.id),
+                "stationId": str(t.station_id) if t.station_id else None,
+                "tankCode": t.tank_code,
+                "name": t.name,
+                "product": t.product,
+                "capacityLiters": float(t.capacity_liters) if t.capacity_liters is not None else None,
+                "status": "ARCHIVED" if archived else t.status,
+                "currentMeasurementSource": t.current_measurement_source,
+                "active": bool(getattr(t, "active", True)),
+                "archived": archived,
+            }
+        )
+    return out
 
 
 @tanks_router.post("", status_code=201)

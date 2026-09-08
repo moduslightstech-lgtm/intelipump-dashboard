@@ -4,6 +4,7 @@ import { useOutletContext, useSearchParams } from 'react-router-dom'
 import {
   createAdminTankConnection,
   deleteAdminTankConnection,
+  getAdminPumpNozzles,
   getAdminStationPumps,
   getAdminTankConnections,
   getTanks,
@@ -21,6 +22,7 @@ export default function AdminStationConnectionsPage() {
   const [form, setForm] = useState({
     tank_id: '',
     pump_id: '',
+    nozzle_id: '',
     product: '',
     is_primary: true,
     active: true,
@@ -32,12 +34,17 @@ export default function AdminStationConnectionsPage() {
     queryFn: async () => (await getAdminTankConnections(stationId)).data,
   })
   const tanksQ = useQuery({
-    queryKey: ['admin-station-tanks', stationId],
-    queryFn: async () => (await getTanks(stationId)).data,
+    queryKey: ['admin-station-tanks-active', stationId],
+    queryFn: async () => (await getTanks(stationId, { includeInactive: false })).data,
   })
   const pumpsQ = useQuery({
     queryKey: ['admin-station-pumps', stationId],
     queryFn: async () => (await getAdminStationPumps(stationId, true)).data,
+  })
+  const nozzlesQ = useQuery({
+    queryKey: ['admin-nozzles', form.pump_id],
+    queryFn: async () => (await getAdminPumpNozzles(form.pump_id, true)).data,
+    enabled: Boolean(form.pump_id),
   })
 
   useEffect(() => {
@@ -69,6 +76,7 @@ export default function AdminStationConnectionsPage() {
         await createAdminTankConnection(stationId, {
           tank_id: form.tank_id,
           pump_id: form.pump_id,
+          nozzle_id: form.nozzle_id || null,
           product: form.product || selectedTank?.product || null,
           is_primary: form.is_primary,
           active: form.active,
@@ -81,6 +89,7 @@ export default function AdminStationConnectionsPage() {
       setForm({
         tank_id: '',
         pump_id: '',
+        nozzle_id: '',
         product: '',
         is_primary: true,
         active: true,
@@ -107,7 +116,7 @@ export default function AdminStationConnectionsPage() {
       <form className="card grid sm:grid-cols-2 gap-3 max-w-3xl" onSubmit={onSubmit}>
         <h2 className="sm:col-span-2 text-white font-semibold">Tank connections</h2>
         <p className="sm:col-span-2 text-slate-400 text-sm">
-          Maps source tanks to pumps. The Operational Twin uses these routes for pipe drawing.
+          Maps source tanks to physical pumps and nozzles. The Operational Twin uses these routes for pipe drawing.
         </p>
         <label className="space-y-1">
           <span className="label-text">Source tank</span>
@@ -126,11 +135,11 @@ export default function AdminStationConnectionsPage() {
           </select>
         </label>
         <label className="space-y-1">
-          <span className="label-text">Destination pump</span>
+          <span className="label-text">Destination physical pump</span>
           <select
             className="input"
             value={form.pump_id}
-            onChange={(e) => setForm({ ...form, pump_id: e.target.value })}
+            onChange={(e) => setForm({ ...form, pump_id: e.target.value, nozzle_id: '' })}
             required={form.active}
           >
             <option value="">Select pump…</option>
@@ -139,6 +148,23 @@ export default function AdminStationConnectionsPage() {
               .map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name || p.pump_code} · {p.mqtt_pump_id || p.pump_code}
+                </option>
+              ))}
+          </select>
+        </label>
+        <label className="space-y-1">
+          <span className="label-text">Nozzle</span>
+          <select
+            className="input"
+            value={form.nozzle_id}
+            onChange={(e) => setForm({ ...form, nozzle_id: e.target.value })}
+          >
+            <option value="">Whole pump (all nozzles)</option>
+            {(nozzlesQ.data || [])
+              .filter((n) => n.active !== false)
+              .map((n) => (
+                <option key={n.id} value={n.id}>
+                  {n.name || n.nozzle_code} · {n.product || 'unmapped'}
                 </option>
               ))}
           </select>
@@ -188,6 +214,7 @@ export default function AdminStationConnectionsPage() {
             <tr className="text-slate-400 border-b border-slate-700 text-left">
               <th className="py-2 pr-3">Tank</th>
               <th className="py-2 pr-3">Pump</th>
+              <th className="py-2 pr-3">Nozzle</th>
               <th className="py-2 pr-3">Product</th>
               <th className="py-2 pr-3">Primary</th>
               <th className="py-2 pr-3">Active</th>
@@ -200,6 +227,7 @@ export default function AdminStationConnectionsPage() {
               <tr key={c.id} className="border-b border-slate-800">
                 <td className="py-2 pr-3">{c.tank_code || c.tank_id}</td>
                 <td className="py-2 pr-3">{c.pump_name || c.pump_code || c.pump_id}</td>
+                <td className="py-2 pr-3">{c.nozzle_name || c.nozzle_code || 'All nozzles'}</td>
                 <td className="py-2 pr-3">{c.product || '—'}</td>
                 <td className="py-2 pr-3">{c.is_primary ? 'Yes' : '—'}</td>
                 <td className="py-2 pr-3">{c.active ? 'Yes' : 'No'}</td>
@@ -245,8 +273,8 @@ export default function AdminStationConnectionsPage() {
             ))}
             {!connectionsQ.isLoading && !(connectionsQ.data || []).length && (
               <tr>
-                <td colSpan={7} className="py-6 text-center text-slate-500">
-                  No connections yet. Map each pump to a source tank.
+                <td colSpan={8} className="py-6 text-center text-slate-500">
+                  No connections yet. Map each nozzle to a source tank.
                 </td>
               </tr>
             )}

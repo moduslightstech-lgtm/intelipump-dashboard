@@ -1,12 +1,17 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { fmtTime, getMqttMessages, getRejectedMessages } from '../api/client'
+import { fmtTime, getDevices, getMqttMessages, getRejectedMessages, humanizeEnum } from '../api/client'
 
 export default function MqttPage() {
   const messagesQ = useQuery({
     queryKey: ['mqtt', 'messages'],
     queryFn: async () => (await getMqttMessages()).data,
     refetchInterval: 10_000,
+  })
+  const devicesQ = useQuery({
+    queryKey: ['devices'],
+    queryFn: async () => (await getDevices()).data,
+    refetchInterval: 15_000,
   })
   const rejectedQ = useQuery({
     queryKey: ['mqtt', 'rejected'],
@@ -29,6 +34,24 @@ export default function MqttPage() {
       <div>
         <h1 className="section-title">MQTT monitor</h1>
         <p className="text-slate-400 text-sm mt-1">Consumer processing audit — browser never connects to Mosquitto</p>
+      </div>
+
+      <div className="card overflow-x-auto">
+        <h2 className="text-white font-semibold text-sm mb-3">Edge device connectivity (heartbeat)</h2>
+        {(devicesQ.data?.length ?? 0) === 0 ? (
+          <p className="text-slate-500 text-sm">No catalog devices yet.</p>
+        ) : (
+          <ul className="flex flex-wrap gap-2 text-sm">
+            {devicesQ.data?.map((d) => (
+              <li key={d.id} className="rounded-lg border border-slate-700 px-3 py-2" title={d.status_reason || undefined}>
+                <span className="font-mono text-xs text-slate-300">{d.device_code}</span>{' '}
+                <span className={d.status === 'ONLINE' ? 'text-emerald-300' : 'text-amber-300'}>
+                  {humanizeEnum(d.status)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

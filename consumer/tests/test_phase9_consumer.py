@@ -121,7 +121,14 @@ PHASE9_ONLINE = {
 def _mock_db(fetchone_side_effect=None):
     cur = MagicMock()
     if fetchone_side_effect is not None:
-        cur.fetchone.side_effect = fetchone_side_effect
+        remaining = list(fetchone_side_effect)
+
+        def _fetchone(*_a, **_k):
+            if remaining:
+                return remaining.pop(0)
+            return None
+
+        cur.fetchone.side_effect = _fetchone
     else:
         cur.fetchone.return_value = None
     conn = MagicMock()

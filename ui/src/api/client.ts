@@ -55,6 +55,7 @@ export type DashboardSummary = {
   active_stations: number
   online_devices: number
   offline_devices: number
+  delayed_devices?: number
   last_transaction_time: string | null
   rejected_mqtt_messages_today: number
   timezone: string
@@ -80,6 +81,150 @@ export type StationPerformanceItem = {
   amount: number
   volume: number
   count: number
+}
+
+export type MoneyDelta = {
+  current: number | string
+  previous: number | string | null
+  delta: number | string | null
+  delta_pct: number | string | null
+}
+
+export type CountDelta = {
+  current: number
+  previous: number | null
+  delta: number | null
+  delta_pct: number | string | null
+}
+
+export type ExecutiveOverview = {
+  period: {
+    key: string
+    label: string
+    start: string
+    end: string
+    timezone: string
+    timezone_note: string
+    granularity: 'hour' | 'day' | 'week' | 'month'
+    partial: boolean
+    station_id: string | null
+    station_name: string | null
+    product: string | null
+    comparison_key: string
+    comparison_label: string | null
+    comparison_start: string | null
+    comparison_end: string | null
+  }
+  kpis: {
+    revenue: MoneyDelta
+    volume: MoneyDelta
+    transactions: CountDelta
+    average_sale: MoneyDelta
+    performance_label: string
+    performance_pct: number | string | null
+    variance: {
+      available: boolean
+      status: 'BALANCED' | 'SHORT' | 'OVER' | 'AWAITING'
+      label: string
+      reported: number | string | null
+      pump_sales: number | string | null
+      amount: number | string | null
+      pct: number | string | null
+      stations_reporting: number
+      stations_total: number
+    }
+    stations_reporting: CountDelta
+  }
+  series: Array<{
+    bucket: string
+    label: string
+    current_amount: number | string
+    current_volume: number | string
+    current_count: number
+    previous_amount: number | string | null
+    previous_volume: number | string | null
+    previous_count: number | null
+  }>
+  annotations: {
+    peak_label: string | null
+    peak_amount: number | string | null
+    lowest_active_label: string | null
+    change_label: string | null
+    best_day_label: string | null
+  }
+  insights: string[]
+  products: Array<{
+    product: string
+    mapped: boolean
+    amount: number | string
+    volume: number | string
+    count: number
+    share_amount: number | string
+    share_volume: number | string
+    avg_price_per_litre: number | string | null
+  }>
+  unmapped: {
+    amount: number | string
+    volume: number | string
+    count: number
+    review_href: string
+  } | null
+  stations: Array<{
+    rank: number
+    station_id: string
+    station_name: string
+    amount: number | string
+    volume: number | string
+    count: number
+    average_sale: number | string
+    delta_pct: number | string | null
+    variance_amount: number | string | null
+    variance_status: string | null
+    last_sale_at: string | null
+    business_status: string
+  }>
+  exceptions: Array<{
+    id: string
+    severity: 'critical' | 'attention' | 'monitor'
+    title: string
+    station_id: string | null
+    station_name: string | null
+    impact: string | null
+    occurred_at: string | null
+    action: string
+    href: string
+  }>
+  activity: {
+    last_sale_at: string | null
+    historical_last_sale_at: string | null
+    sales_last_hour_amount: number | string
+    stations_recording_sales: number
+    largest_sale_amount: number | string | null
+    largest_sale_station: string | null
+    empty_period: boolean
+    empty_title: string
+    empty_detail: string | null
+  }
+  reconciliation: {
+    available: boolean
+    status: string
+    label: string
+    reported: number | string | null
+    pump_sales: number | string | null
+    variance: number | string | null
+    variance_pct: number | string | null
+    awaiting_count: number
+    shortage_count: number
+    overage_count: number
+    href: string
+  } | null
+  filters: {
+    stations: Array<{ id: string; name: string }>
+    products: Array<{ id: string; name: string }>
+    has_region_groups: boolean
+  }
+  generated_at: string
+  inclusion_policy: string
 }
 
 export type Transaction = {
@@ -146,6 +291,10 @@ export type Device = {
   active?: boolean
   deactivated_at?: string | null
   last_seen_at: string | null
+  last_heartbeat_at?: string | null
+  age_seconds?: number | null
+  timeout_seconds?: number
+  status_reason?: string | null
   last_transaction_at: string | null
   created_at: string
   updated_at: string
@@ -296,6 +445,10 @@ export type Nozzle = {
   pump_code: string | null
   nozzle_code: string
   mqtt_nozzle_id?: string | null
+  name?: string | null
+  side_id?: string | null
+  source_identifier?: string | null
+  controller_address?: string | null
   nozzle_number?: number | null
   product: string | null
   display_order?: number
@@ -311,6 +464,7 @@ export type TankConnection = {
   station_id: string
   tank_id: string
   pump_id: string
+  nozzle_id?: string | null
   product: string | null
   line_label?: string | null
   active: boolean
@@ -322,6 +476,8 @@ export type TankConnection = {
   tank_name?: string | null
   pump_code?: string | null
   pump_name?: string | null
+  nozzle_code?: string | null
+  nozzle_name?: string | null
 }
 
 export type Alert = {
@@ -520,19 +676,99 @@ export const updateAdminTankConnection = (connectionId: string, body: Record<str
 export const deleteAdminTankConnection = (connectionId: string) =>
   api.delete<{ deleted: boolean; id: string }>(`/api/v1/admin/tank-connections/${connectionId}`)
 
-export const getTanks = (stationId?: string) =>
-  api.get<any[]>('/api/v1/tanks', { params: stationId ? { station_id: stationId } : {} })
+export const getTanks = (stationId?: string, opts?: { includeInactive?: boolean; includeArchived?: boolean }) =>
+  api.get<any[]>('/api/v1/tanks', {
+    params: {
+      ...(stationId ? { station_id: stationId } : {}),
+      include_inactive: opts?.includeInactive ?? true,
+      include_archived: opts?.includeArchived ?? false,
+    },
+  })
 export const createTank = (body: Record<string, unknown>) => api.post<any>('/api/v1/tanks', body)
 export const updateTank = (tankId: string, body: Record<string, unknown>) =>
   api.put<any>(`/api/v1/tanks/${tankId}`, body)
 
+export type TankDeletionPreview = {
+  tankId: string
+  tankCode: string
+  name: string | null
+  product: string | null
+  capacityLiters: number | null
+  status: string
+  stationId: string | null
+  stationName: string | null
+  mode: 'HARD_DELETE' | 'DISCONNECT_AND_DELETE' | 'ARCHIVE'
+  alreadyDeleted: boolean
+  requiresDisconnect: boolean
+  requiresCodeConfirm: boolean
+  explanation: string
+  connections: Array<{
+    id: string
+    pumpId: string
+    pumpCode: string
+    pumpName: string | null
+    active: boolean
+    product: string | null
+  }>
+  history: {
+    readings: number
+    measurements: number
+    deliveries: number
+    reconciliationItems: number
+    alerts: number
+    layoutItems: number
+    expectedState: number
+    total: number
+  }
+}
+
+export const getTankDeletionPreview = (stationId: string, tankId: string) =>
+  api.get<TankDeletionPreview>(`/api/v1/admin/stations/${stationId}/tanks/${tankId}/deletion-preview`)
+
+export const deleteAdminTank = (
+  stationId: string,
+  tankId: string,
+  opts?: { confirmDisconnect?: boolean; confirmCode?: string },
+) =>
+  api.delete<{
+    deleted: boolean
+    archived: boolean
+    alreadyDeleted: boolean
+    mode: string
+    id: string
+    tankCode: string
+    removedConnections: string[]
+  }>(`/api/v1/admin/stations/${stationId}/tanks/${tankId}`, {
+    params: {
+      confirm_disconnect: opts?.confirmDisconnect ?? false,
+      confirm_code: opts?.confirmCode || undefined,
+    },
+  })
+
+export const getExecutiveOverview = (params: Record<string, string | undefined> = {}) =>
+  api.get<ExecutiveOverview>('/api/v1/dashboard/executive-overview', { params })
+
 export const getDashboardSummary = () => api.get<DashboardSummary>('/api/v1/dashboard/summary')
-export const getHourlySales = () => api.get<HourlySalesPoint[]>('/api/v1/dashboard/hourly-sales')
-export const getProductBreakdown = () => api.get<ProductBreakdownItem[]>('/api/v1/dashboard/product-breakdown')
+export const getHourlySales = (stationId?: string) =>
+  api.get<HourlySalesPoint[]>('/api/v1/dashboard/hourly-sales', {
+    params: stationId ? { station_id: stationId } : {},
+  })
+export const getProductBreakdown = (stationId?: string) =>
+  api.get<ProductBreakdownItem[]>('/api/v1/dashboard/product-breakdown', {
+    params: stationId ? { station_id: stationId } : {},
+  })
 export const getStationPerformance = () => api.get<StationPerformanceItem[]>('/api/v1/dashboard/station-performance')
 
 export const getTransactions = (params: Record<string, unknown>) =>
-  api.get<{ items: Transaction[]; total: number; page: number; size: number }>('/api/v1/transactions', { params })
+  api.get<{
+    items: Transaction[]
+    total: number
+    page: number
+    size: number
+    total_amount?: number | null
+    total_volume?: number | null
+    average_amount?: number | null
+  }>('/api/v1/transactions', { params })
 
 export const getTransaction = (id: string) => api.get<Transaction>(`/api/v1/transactions/${id}`)
 
@@ -843,9 +1079,12 @@ export const reopenReconciliation = (id: string, comment?: string) =>
 export const getReconciliationItems = (id: string) =>
   api.get<ReconciliationItem[]>(`/api/v1/reconciliations/${id}/items`)
 
-export const getTwinLiveState = (stationId: string, opts?: { touch?: boolean }) =>
+export const getTwinLiveState = (stationId: string, opts?: { touch?: boolean; includeInactive?: boolean }) =>
   api.get<TwinLiveState>(`/api/v1/digital-twin/stations/${stationId}/live-state`, {
-    params: opts?.touch ? { touch: true } : undefined,
+    params: {
+      touch: opts?.touch || undefined,
+      include_inactive: opts?.includeInactive || undefined,
+    },
   })
 
 export const putTwinLayout = (
@@ -926,11 +1165,33 @@ export function fmtLiters(n: number | null | undefined) {
   return `${Number(n).toFixed(2)} L`
 }
 
-export function fmtTime(iso: string | null | undefined) {
+export function fmtTime(iso: string | null | undefined, timeZone = 'Africa/Lagos') {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleString('en-NG', { timeZone: 'Africa/Lagos' })
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    return d.toLocaleString('en-US', {
+      timeZone,
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    })
   } catch {
     return iso
   }
+}
+
+export function humanizeEnum(value?: string | null) {
+  if (!value) return '—'
+  return value
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+export function stationLabel(station?: { name?: string | null; station_code?: string; mqtt_station_id?: string | null } | null) {
+  return station?.name || station?.station_code || 'Station'
 }

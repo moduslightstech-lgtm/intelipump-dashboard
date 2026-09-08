@@ -174,7 +174,7 @@ export default function AdminStationPumpsPage() {
       )}
 
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-white font-semibold">Pumps</h2>
+        <h2 className="text-white font-semibold">Physical pumps</h2>
         <button type="button" className="btn-primary text-sm" onClick={openCreate}>
           Add pump
         </button>
@@ -197,7 +197,7 @@ export default function AdminStationPumpsPage() {
             />
           </label>
           <label className="space-y-1 sm:col-span-2">
-            <span className="label-text">Telemetry Pump ID (matches sale.pumpId)</span>
+            <span className="label-text">Physical pump MQTT ID (matches sale.pumpId)</span>
             <input
               className="input font-mono"
               value={form.mqtt_pump_id}
@@ -205,8 +205,8 @@ export default function AdminStationPumpsPage() {
               placeholder="PUMP-05-06 or PUMP-05/06"
             />
             <span className="text-[11px] text-slate-500">
-              Must match backend <code className="text-slate-400">transaction.pumpId</code> exactly
-              (slash/hyphen variants are accepted when matching).
+              Must match backend <code className="text-slate-400">transaction.pumpId</code> for the
+              complete dispenser. Nozzle/channel IDs belong on nested nozzles, not this field.
             </span>
           </label>
           <label className="space-y-1">
@@ -472,7 +472,10 @@ function NozzleEditor({ pumpId, stationId }: { pumpId: string; stationId: string
   })
   const [form, setForm] = useState({
     nozzle_code: '',
+    name: '',
     mqtt_nozzle_id: '',
+    source_identifier: '',
+    side_id: '',
     nozzle_number: '',
     product: 'PMS',
     display_order: '',
@@ -487,14 +490,26 @@ function NozzleEditor({ pumpId, stationId }: { pumpId: string; stationId: string
           e.preventDefault()
           await createAdminNozzle(pumpId, {
             nozzle_code: form.nozzle_code,
+            name: form.name || undefined,
             mqtt_nozzle_id: form.mqtt_nozzle_id || form.nozzle_code,
+            source_identifier: form.source_identifier || undefined,
+            side_id: form.side_id || undefined,
             nozzle_number: form.nozzle_number ? Number(form.nozzle_number) : null,
             product: form.product,
             display_order: form.display_order ? Number(form.display_order) : undefined,
             status: 'ACTIVE',
             active: true,
           })
-          setForm({ nozzle_code: '', mqtt_nozzle_id: '', nozzle_number: '', product: 'PMS', display_order: '' })
+          setForm({
+            nozzle_code: '',
+            name: '',
+            mqtt_nozzle_id: '',
+            source_identifier: '',
+            side_id: '',
+            nozzle_number: '',
+            product: 'PMS',
+            display_order: '',
+          })
           qc.invalidateQueries({ queryKey: ['admin-nozzles', pumpId] })
           qc.invalidateQueries({ queryKey: ['admin-station-pumps', stationId] })
           qc.invalidateQueries({ queryKey: ['twin'] })
@@ -506,6 +521,18 @@ function NozzleEditor({ pumpId, stationId }: { pumpId: string; stationId: string
           value={form.nozzle_code}
           onChange={(e) => setForm({ ...form, nozzle_code: e.target.value })}
           required
+        />
+        <input
+          className="input text-xs"
+          placeholder="Nozzle 1"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        <input
+          className="input font-mono text-xs"
+          placeholder="Source channel (e.g. pump-2)"
+          value={form.source_identifier}
+          onChange={(e) => setForm({ ...form, source_identifier: e.target.value })}
         />
         <input
           className="input font-mono text-xs"

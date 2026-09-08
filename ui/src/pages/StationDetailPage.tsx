@@ -20,8 +20,11 @@ import {
   getPumps,
   getStations,
   getTransactions,
+  humanizeEnum,
+  stationLabel,
 } from '../api/client'
 import { EdgeDeviceStatusDetailCard } from '../components/edge/EdgeConnectivity'
+import ChartEmptyState from '../components/dashboard/ChartEmptyState'
 
 export default function StationDetailPage() {
   const { stationId = '' } = useParams()
@@ -29,31 +32,41 @@ export default function StationDetailPage() {
   const station = stationsQ.data?.find((s) => s.id === stationId || s.station_code === stationId)
   const code = station?.station_code || decodeURIComponent(stationId)
   const mqttStationId = station?.mqtt_station_id || code
+  const lookupKey = station?.mqtt_station_id || station?.id || code
+  const tz = station?.timezone || 'Africa/Lagos'
 
   const txQ = useQuery({
-    queryKey: ['transactions', 'station', code],
+    queryKey: ['transactions', 'station', lookupKey],
     queryFn: async () =>
-      (await getTransactions({ page: 1, size: 20, station_id: code, sort: 'received_at,desc' })).data,
-    enabled: !!code,
+      (await getTransactions({ page: 1, size: 20, station_id: lookupKey, sort: 'received_at,desc' })).data,
+    enabled: !!lookupKey,
   })
-  const hourlyQ = useQuery({ queryKey: ['dashboard', 'hourly'], queryFn: async () => (await getHourlySales()).data })
-  const productQ = useQuery({ queryKey: ['dashboard', 'products'], queryFn: async () => (await getProductBreakdown()).data })
+  const hourlyQ = useQuery({
+    queryKey: ['dashboard', 'hourly', lookupKey],
+    queryFn: async () => (await getHourlySales(lookupKey)).data,
+    enabled: !!lookupKey,
+  })
+  const productQ = useQuery({
+    queryKey: ['dashboard', 'products', lookupKey],
+    queryFn: async () => (await getProductBreakdown(lookupKey)).data,
+  })
   const devicesQ = useQuery({ queryKey: ['devices'], queryFn: async () => (await getDevices()).data })
   const pumpsQ = useQuery({ queryKey: ['pumps'], queryFn: async () => (await getPumps()).data })
   const alertsQ = useQuery({ queryKey: ['alerts', 'open'], queryFn: async () => (await getAlerts('OPEN')).data })
 
   const devices = devicesQ.data?.filter((d) => d.station_id === station?.id || d.device_code.includes(code)) || []
   const pumps = pumpsQ.data?.filter((p) => p.station_id === station?.id) || []
+  const hourly = (hourlyQ.data || []).filter((row) => Number(row.count || 0) > 0)
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="p-6 space-y-4 max-w-7xl">
       <div>
         <Link to="/stations" className="text-xs text-emerald-400 hover:underline">
           ← Stations
         </Link>
-        <h1 className="section-title mt-2">{station?.name || code}</h1>
+        <h1 className="section-title mt-2">{stationLabel(station) || code}</h1>
         <p className="text-slate-400 text-sm mt-1">
-          {station?.city || station?.address || 'Station detail'} · {station?.timezone || 'Africa/Lagos'}
+          {station?.city || station?.address || 'Station detail'} · {tz}
         </p>
       </div>
 
@@ -62,8 +75,10 @@ export default function StationDetailPage() {
       <div className="grid lg:grid-cols-2 gap-4">
         <div className="card">
           <h2 className="text-white font-semibold mb-3">Recent transactions</h2>
-          {(txQ.data?.items.length ?? 0) === 0 ? (
-            <p className="text-slate-500 text-sm py-8 text-center">No transactions</p>
+          {txQ.isLoading ? (
+            <p className="text-slate-500 text-sm py-8 text-center">Loading…</p>
+          ) : (txQ.data?.items.length ?? 0) === 0 ? (
+            <p className="text-slate-500 text-sm py-8 text-center">No transactions for this station yet.</p>
           ) : (
             <table className="w-full text-sm">
               <thead>
@@ -76,7 +91,7 @@ export default function StationDetailPage() {
               <tbody>
                 {txQ.data?.items.map((t) => (
                   <tr key={t.id} className="border-b border-slate-800">
-                    <td className="py-2 text-slate-400">{fmtTime(t.received_at)}</td>
+                    <td className="py-2 text-slate-400">{fmtTime(t.received_at, tz)}</td>
                     <td className="py-2 font-mono">{t.pump_id}</td>
                     <td className="py-2 text-right font-mono">{fmtNaira(t.amount)}</td>
                   </tr>
@@ -87,31 +102,43 @@ export default function StationDetailPage() {
         </div>
 
         <div className="card">
-          <h2 className="text-white font-semibold mb-3">Hourly sales (network)</h2>
+          <h2 className="text-white font-semibold mb-3">Hourly sales today ({tz})</h2>
           <div className="h-56">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={hourlyQ.data || []}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="hour" hide />
-                <YAxis stroke="#94a3b8" fontSize={11} />
-                <Tooltip
-                  contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}
-                  formatter={(v: number) => fmtNaira(v)}
-                />
-                <Bar dataKey="amount" fill="#3b82f6" />
-              </BarChart>
-            </ResponsiveContainer>
+            {hourly.length === 0 ? (
+              <ChartEmptyState title="No sales yet today" description="Hourly revenue appears after transactions arrive." />
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={hourly}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis
+                    dataKey="hour"
+                    stroke="#94a3b8"
+                    fontSize={11}
+                    tickFormatter={(v) =>
+                      new Date(v).toLocaleTimeString('en-US', { hour: 'numeric', timeZone: tz })
+                    }
+                  />
+                  <YAxis stroke="#94a3b8" fontSize={11} tickFormatter={(v) => fmtNaira(v)} width={72} />
+                  <Tooltip
+                    contentStyle={{ background: '#1e293b', border: '1px solid #334155' }}
+                    formatter={(v: number) => fmtNaira(v)}
+                    labelFormatter={(v) => fmtTime(String(v), tz)}
+                  />
+                  <Bar dataKey="amount" fill="#3b82f6" name="Amount (NGN)" />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-4">
         <div className="card">
-          <h2 className="text-white font-semibold mb-3">Product breakdown</h2>
+          <h2 className="text-white font-semibold mb-3">Product breakdown (today)</h2>
           <ul className="space-y-2 text-sm">
             {(productQ.data || []).map((p) => (
               <li key={p.product} className="flex justify-between">
-                <span>{p.product}</span>
+                <span>{p.product === 'UNKNOWN' ? 'Not mapped' : p.product}</span>
                 <span className="font-mono text-slate-300">
                   {fmtLiters(p.volume)} · {fmtNaira(p.amount)}
                 </span>
@@ -126,7 +153,9 @@ export default function StationDetailPage() {
             {devices.map((d) => (
               <li key={d.id} className="flex justify-between gap-2">
                 <span className="font-mono text-emerald-300">{d.device_code}</span>
-                <span className="text-slate-400">{d.status}</span>
+                <span className="text-slate-400" title={d.status_reason || undefined}>
+                  {humanizeEnum(d.status)}
+                </span>
               </li>
             ))}
             {devices.length === 0 && <li className="text-slate-500">No devices registered</li>}

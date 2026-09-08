@@ -329,3 +329,48 @@ def test_reconnect_delay_configured_on_mqtt_client():
         MqttClient(settings, lambda *a: None)
         instance.reconnect_delay_set.assert_called_once_with(min_delay=1, max_delay=60)
         instance.username_pw_set.assert_called_once_with("u", "p")
+
+
+def test_legacy_payload_without_nozzle_id_is_accepted():
+    payload = {
+        "transactionId": "tx-legacy-channel",
+        "stationId": "InteliPump-US-Lab",
+        "deviceId": "InteliPump-Lab-pi-001",
+        "pumpId": "pump-2",
+        "volumeLiters": 0.25,
+        "amount": 300.00,
+        "pricePerLiter": 1200.00,
+        "status": "COMPLETED",
+        "timestamp": "2026-09-08T12:00:00Z",
+    }
+    tx, err = normalize_transaction(payload)
+    assert err is None
+    assert tx is not None
+    assert tx.pump_id == "pump-2"
+    assert tx.nozzle_id is None
+    assert tx.amount == Decimal("300.00")
+    assert tx.volume_liters == Decimal("0.25")
+
+
+def test_new_payload_with_pump_and_nozzle_ids():
+    payload = {
+        "transactionId": "tx-canonical",
+        "stationId": "InteliPump-US-Lab",
+        "deviceId": "InteliPump-Lab-pi-001",
+        "pumpId": "pump-1",
+        "nozzleId": "nozzle-2",
+        "sourceIdentifier": "pump-2",
+        "product": "PMS",
+        "volumeLiters": 0.25,
+        "amount": 300.00,
+        "pricePerLiter": 1200.00,
+        "status": "COMPLETED",
+        "timestamp": "2026-09-08T12:00:00Z",
+    }
+    tx, err = normalize_transaction(payload)
+    assert err is None
+    assert tx is not None
+    assert tx.pump_id == "pump-1"
+    assert tx.nozzle_id == "nozzle-2"
+    assert tx.source_identifier == "pump-2"
+    assert tx.transaction_id == "tx-canonical"
