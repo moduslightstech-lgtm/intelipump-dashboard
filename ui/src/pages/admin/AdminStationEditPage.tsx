@@ -242,7 +242,7 @@ export default function AdminStationEditPage() {
                 {liveOperational}
               </span>
               <span className="text-[11px] text-slate-500">
-                From opening / closing time ({form.timezone || 'Africa/Lagos'})
+                From opening / closing hours (Nigeria time)
               </span>
             </div>
           </div>

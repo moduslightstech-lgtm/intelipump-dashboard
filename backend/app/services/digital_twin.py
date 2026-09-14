@@ -36,7 +36,7 @@ from app.services.tank_connections import build_connection_payloads
 from app.services.edge_device_status import DELAYED_SECONDS, ONLINE_SECONDS, calculate_device_status
 from app.services.tank_lifecycle import is_archived_tank, is_operational_tank, operational_tank_clause
 
-DISPENSING_WINDOW = timedelta(seconds=15)
+DISPENSING_WINDOW = timedelta(seconds=120)
 COMPLETED_WINDOW = timedelta(minutes=10)
 DEVICE_ONLINE_WINDOW = timedelta(seconds=ONLINE_SECONDS)
 DEVICE_DEGRADED_WINDOW = timedelta(seconds=DELAYED_SECONDS)
@@ -70,6 +70,43 @@ def _as_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _nozzle_sessions_from_txs(txs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Latest live or completed session per station/pump/nozzle for Digital Twin bootstrap."""
+    latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for tx in txs:
+        station = str(tx.get("stationId") or "")
+        pump = str(tx.get("pumpId") or "")
+        nozzle = str(tx.get("nozzleId") or "unknown")
+        key = (station, pump, nozzle)
+        prev = latest.get(key)
+        stamp = str(tx.get("receivedAt") or tx.get("deviceTimestamp") or "")
+        prev_stamp = str(prev.get("lastUpdateAt") or "") if prev else ""
+        if prev and prev_stamp >= stamp:
+            continue
+        status = str(tx.get("status") or "").upper()
+        latest[key] = {
+            "stationId": station,
+            "pumpId": pump,
+            "nozzleId": nozzle if nozzle != "unknown" else None,
+            "state": (
+                "DISPENSING"
+                if status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+                else "COMPLETED"
+                if status in {"COMPLETED", "COMPLETE"}
+                else status or "IDLE"
+            ),
+            "transactionId": tx.get("id"),
+            "amount": tx.get("amount"),
+            "volumeLiters": tx.get("volumeLiters"),
+            "product": tx.get("product"),
+            "startedAt": tx.get("transactionStartedAt"),
+            "completedAt": tx.get("transactionCompletedAt"),
+            "lastUpdateAt": stamp or None,
+            "mappingStatus": tx.get("mappingStatus"),
+        }
+    return list(latest.values())
 
 
 def resolve_station(db: Session, station_id_or_code: str | UUID) -> Station | None:
@@ -141,7 +178,9 @@ def infer_catalog_pump_status(
         return "FAULT"
     in_progress = last_status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
     fresh = last_tx_at is not None and (now - last_tx_at) <= DISPENSING_WINDOW
-    if (in_progress or op_state == "DISPENSING") and fresh:
+    if in_progress:
+        return "DISPENSING" if fresh else "INTERRUPTED"
+    if op_state == "DISPENSING" and fresh:
         return "DISPENSING"
     if last_tx_at is not None and (now - last_tx_at) <= COMPLETED_WINDOW:
         return "IDLE"
@@ -163,19 +202,46 @@ def _ledger_pump_match(station: Station, pump: Pump, db: Session | None = None):
 
 def _ledger_nozzle_match(station: Station, pump: Pump, nozzle: Nozzle):
     station_clause = _ledger_station_match(station)
+    source = (getattr(nozzle, "source_identifier", None) or "").strip()
+    ids: list[str] = []
+    for value in (
+        getattr(nozzle, "nozzle_code", None),
+        getattr(nozzle, "mqtt_nozzle_id", None),
+        source,
+        str(getattr(nozzle, "id", "") or ""),
+    ):
+        text = str(value or "").strip()
+        if text and text not in ids:
+            ids.append(text)
+    number = getattr(nozzle, "nozzle_number", None)
+    if number is not None:
+        token = f"nozzle-{number}"
+        if token not in ids:
+            ids.append(token)
     clauses = []
     if getattr(nozzle, "id", None):
         clauses.append(PumpTransaction.nozzle_uuid == nozzle.id)
-    source = (getattr(nozzle, "source_identifier", None) or "").strip()
     if source:
-        clauses.append(PumpTransaction.pump_id == source)
         clauses.append(PumpTransaction.source_identifier == source)
-    code = (nozzle.nozzle_code or "").strip()
-    if code and not code.endswith("-n1") and code not in {"1", "2"}:
+        generic = ["1", "01", "unknown", source, ""]
         clauses.append(
             and_(
-                or_(PumpTransaction.pump_uuid == pump.id, PumpTransaction.pump_id == source or pump.mqtt_pump_id),
-                PumpTransaction.nozzle_id == code,
+                PumpTransaction.pump_id == source,
+                or_(
+                    PumpTransaction.nozzle_id.is_(None),
+                    PumpTransaction.nozzle_id.in_(generic + ids),
+                ),
+            )
+        )
+    if ids:
+        pump_match = [PumpTransaction.pump_uuid == pump.id]
+        for extra in (pump.mqtt_pump_id, pump.pump_code, source):
+            if extra:
+                pump_match.append(PumpTransaction.pump_id == extra)
+        clauses.append(
+            and_(
+                or_(*pump_match),
+                PumpTransaction.nozzle_id.in_(ids),
             )
         )
     if not clauses:
@@ -377,6 +443,21 @@ def get_station_live_state(
             if latest is not None and latest.reported_liters is not None
             else None
         )
+        expected_liters = (
+            float(expected.expected_liters) if expected and expected.expected_liters is not None else None
+        )
+        delivery_newer = bool(
+            expected
+            and expected.last_delivery_at
+            and (
+                latest is None
+                or latest.measured_at is None
+                or (_as_utc(expected.last_delivery_at) or now) > (_as_utc(latest.measured_at) or now)
+            )
+        )
+        # Prefer expected inventory after a delivery without inventing a probe reading.
+        display_liters = expected_liters if delivery_newer and expected_liters is not None else reported
+        quantity_label = "Calculated" if delivery_newer and expected_liters is not None else None
         water = (
             float(latest.water_liters)
             if latest is not None and latest.water_liters is not None
@@ -384,7 +465,7 @@ def get_station_live_state(
         )
         inferred = _infer_tank_status(
             capacity=capacity,
-            reported=reported,
+            reported=display_liters,
             water=water,
             base_status=tank.status or "UNKNOWN",
         )
@@ -404,6 +485,7 @@ def get_station_live_state(
                     if latest is not None
                     else (tank.current_measurement_source or "MANUAL")
                 ),
+                "quantityLabel": quantity_label,
                 "isLiveTelemetry": bool(
                     latest is not None
                     and (latest.measurement_source or latest.source or "").upper() == "AUTOMATED"
@@ -413,14 +495,13 @@ def get_station_live_state(
                     (latest.raw_payload or {}).get("submittedBy") if latest and latest.raw_payload else None
                 ),
                 "fillPercent": (
-                    round((reported / capacity) * 100, 1)
-                    if reported is not None and capacity
+                    round((display_liters / capacity) * 100, 1)
+                    if display_liters is not None and capacity
                     else None
                 ),
-                "reportedLiters": reported,
-                "expectedLiters": (
-                    float(expected.expected_liters) if expected and expected.expected_liters is not None else None
-                ),
+                "reportedLiters": display_liters,
+                "probeReportedLiters": reported,
+                "expectedLiters": expected_liters,
                 "isStale": (
                     True
                     if latest is None or latest.measured_at is None
@@ -523,8 +604,19 @@ def get_station_live_state(
         nested_nozzles: list[dict[str, Any]] = []
         for idx, n in enumerate(nozzles_by_pump.get(str(pump.id), [])):
             n_match = _ledger_nozzle_match(station, pump, n)
-            n_tx = db.scalars(
+            n_tx_latest = db.scalars(
                 select(PumpTransaction).where(n_match).order_by(time_col.desc()).limit(1)
+            ).first()
+            # Last sale display must come from a real COMPLETED row — never invent
+            # placeholders and never use an in-progress DISPENSING tick as last sale.
+            n_tx = db.scalars(
+                select(PumpTransaction)
+                .where(
+                    n_match,
+                    func.upper(PumpTransaction.status).in_(("COMPLETED", "COMPLETE")),
+                )
+                .order_by(time_col.desc())
+                .limit(1)
             ).first()
             n_tx_at = (
                 _as_utc(
@@ -535,8 +627,14 @@ def get_station_live_state(
             )
             n_inferred = infer_catalog_pump_status(
                 now=now,
-                last_tx_at=n_tx_at,
-                last_tx_status=getattr(n_tx, "status", None) if n_tx is not None else None,
+                last_tx_at=_as_utc(
+                    (n_tx_latest.transaction_completed_at
+                     or n_tx_latest.device_timestamp
+                     or n_tx_latest.received_at)
+                    if n_tx_latest is not None
+                    else None
+                ),
+                last_tx_status=getattr(n_tx_latest, "status", None) if n_tx_latest is not None else None,
                 db_status=(n.status or "UNKNOWN").upper(),
                 op_state="",
                 station_op=station_op,
@@ -547,7 +645,7 @@ def get_station_live_state(
             nested_nozzles.append(
                 {
                     "id": str(n.id),
-                    "name": getattr(n, "name", None) or friendly_nozzle_name(
+                    "name": friendly_nozzle_name(
                         {
                             "name": getattr(n, "name", None),
                             "nozzleNumber": n.nozzle_number,
@@ -573,6 +671,12 @@ def get_station_live_state(
                         float(n_tx.amount) if n_tx and n_tx.amount is not None else None
                     ),
                     "lastTransactionVolume": (
+                        float(n_tx.volume_liters) if n_tx and n_tx.volume_liters is not None else None
+                    ),
+                    "lastCompletedAmount": (
+                        float(n_tx.amount) if n_tx and n_tx.amount is not None else None
+                    ),
+                    "lastCompletedVolume": (
                         float(n_tx.volume_liters) if n_tx and n_tx.volume_liters is not None else None
                     ),
                 }
@@ -821,6 +925,9 @@ def get_station_live_state(
             "amount": float(tx.amount) if tx.amount is not None else None,
             "status": tx.status,
             "deviceTimestamp": tx.device_timestamp.isoformat() if tx.device_timestamp else None,
+            "transactionStartedAt": (
+                tx.transaction_started_at.isoformat() if getattr(tx, "transaction_started_at", None) else None
+            ),
             "transactionCompletedAt": (
                 tx.transaction_completed_at.isoformat() if tx.transaction_completed_at else None
             ),
@@ -1029,9 +1136,10 @@ def get_station_live_state(
         "connectionMappingMessage": mapping_message,
         "activeTransactions": [
             tx
-            for tx in tx_payloads[:5]
+            for tx in tx_payloads[:20]
             if (tx.get("status") or "").upper() in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
         ],
+        "nozzleSessions": _nozzle_sessions_from_txs(tx_payloads),
         "salesToday": float(sales_amount or 0),
         "volumeToday": float(sales_volume or 0),
         "transactionCountToday": int(sales_count or 0),

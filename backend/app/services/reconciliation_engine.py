@@ -364,6 +364,12 @@ def inventory_tank_result(
             "varianceLiters": None,
             "variancePercent": None,
             "status": "INCOMPLETE",
+            "breakdown": {
+                "openingStock": None,
+                "fuelDelivered": q_liters(deliveries) or ZERO,
+                "fuelSold": q_liters(dispensed) or ZERO,
+                "expectedClosingStock": None,
+            },
             "blocker": "Opening stock reading is missing.",
         }
     expected = opening + deliveries - dispensed
@@ -387,6 +393,12 @@ def inventory_tank_result(
         "varianceLiters": q_liters(variance),
         "variancePercent": float(pct.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) if pct is not None else None,
         "status": status,
+        "breakdown": {
+            "openingStock": q_liters(opening),
+            "fuelDelivered": q_liters(deliveries) or ZERO,
+            "fuelSold": q_liters(dispensed) or ZERO,
+            "expectedClosingStock": q_liters(expected),
+        },
         "blocker": None if opening is not None and actual_closing is not None else (
             "Opening stock reading is missing." if opening is None else "Closing stock reading is missing."
         ),
@@ -988,7 +1000,7 @@ def _deliveries_for_tank(db: Session, station: Station, tank: Tank, business_dat
             FuelDelivery.station_id == station.id,
             FuelDelivery.tank_id == tank.id,
             FuelDelivery.business_date == business_date,
-            FuelDelivery.status.in_(("CONFIRMED", "ACCEPTED", "POSTED")),
+            FuelDelivery.status.in_(("COMPLETED", "CONFIRMED", "ACCEPTED", "POSTED")),
         )
     )
     return dec0(value)

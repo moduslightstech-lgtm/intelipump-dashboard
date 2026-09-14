@@ -2,8 +2,18 @@ import { READING_STALE_MS } from './constants'
 
 export function displayPumpStatus(status?: string | null): string {
   const s = (status || 'UNKNOWN').toUpperCase()
-  if (s === 'COMPLETED' || s === 'HANG_UP' || s === 'HANGUP') return 'IDLE'
-  if (s === 'ACTIVE' || s === 'IN_PROGRESS') return 'DISPENSING'
+  if (s === 'SALE_COMPLETED') return 'SALE_COMPLETED'
+  if (s === 'LAST_SALE') return 'IDLE'
+  if (s === 'HANG_UP' || s === 'HANGUP') return 'IDLE'
+  if (s === 'COMPLETED') return 'IDLE'
+  if (s === 'CANCELLED_NO_SALE' || s === 'CANCELLED' || s === 'CANCELED') return 'IDLE'
+  if (s === 'AUTHORIZED' || s === 'NOZZLE_LIFTED' || s === 'READY' || s === 'FILLING_NO_FLOW') {
+    return 'READY'
+  }
+  if (s === 'POSSIBLE_UNINTENDED_FLOW') return 'FAULT'
+  if (s === 'ACTIVE' || s === 'IN_PROGRESS' || s === 'VERIFIED_DISPENSING' || s === 'PROGRESS') {
+    return 'DISPENSING'
+  }
   if (s === 'ERROR') return 'FAULT'
   if (s === 'CLOSED') return 'POWERED_OFF'
   return s
@@ -13,11 +23,13 @@ export function pumpStatusLabel(status?: string | null): string {
   const s = displayPumpStatus(status)
   if (s === 'POWERED_OFF') return 'Powered off'
   if (s === 'DISPENSING') return 'Dispensing'
+  if (s === 'SALE_COMPLETED') return 'Sale completed'
+  if (s === 'READY') return 'Ready'
   if (s === 'IDLE') return 'Idle'
   if (s === 'FAULT') return 'Fault'
   if (s === 'OFFLINE') return 'Offline'
   if (s === 'INACTIVE') return 'Inactive'
-  if (s === 'UNKNOWN') return 'Unknown'
+  if (s === 'UNKNOWN') return 'Status unavailable'
   return s.replace(/_/g, ' ').toLowerCase().replace(/^\w/, (c) => c.toUpperCase())
 }
 

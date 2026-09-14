@@ -1,5 +1,5 @@
+import { inProgressSaleStatus, tankIdForPump } from './liveDispensing'
 import type { PumpSale } from '../types/sales'
-import { tankIdForPump } from './liveDispensing'
 
 function saleTimeMs(sale: PumpSale): number {
   const t = Date.parse(sale.receivedAt)
@@ -26,6 +26,7 @@ export function applyLiveTankDrawdown(
   for (const sale of sales) {
     const vol = Number(sale.volumeLiters || 0)
     if (!(vol > 0)) continue
+    if (inProgressSaleStatus(sale.status)) continue
     const tankId = tankIdForPump(sale.pumpId, connections, pumps)
     if (!tankId) continue
     const tank = tanks.find(

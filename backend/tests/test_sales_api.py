@@ -93,6 +93,10 @@ def test_serialize_sale_matches_dashboard_contract():
     assert sale["pricePerLiter"] == 11.75
     assert sale["currency"] == "NGN"
     assert sale["receivedAt"].startswith("2026-09-06T03:10:00")
+    assert sale["status"] == "COMPLETED"
+    assert "sequence" in sale
+    assert "startedAt" in sale
+    assert "completedAt" in sale
 
 
 def test_recent_sales_requires_station_id(monkeypatch):

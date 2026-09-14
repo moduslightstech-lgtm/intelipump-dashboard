@@ -18,6 +18,7 @@ from app.config import Settings, get_settings
 from app.database import SessionLocal, get_db
 from app.models import PumpTransaction, Station, StationStatusHistory, User
 from app.services import sales as sales_service
+from app.services.nozzle_identity import live_debug_enabled, nozzle_catalog_for_station
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -107,6 +108,40 @@ async def _sales_event_generator(
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     )
+    import logging
+
+    _log = logging.getLogger(__name__)
+    _log.info(
+        "sse_connection_opened station_id=%s pump_id=%s",
+        station_id,
+        pump_id,
+    )
+    db = SessionLocal()
+    try:
+        snapshot_rows = sales_service.live_sales_snapshot(
+            db, station_id=station_id, pump_id=pump_id
+        )
+        catalog = nozzle_catalog_for_station(db, station_id)
+        snapshot_sales = [sales_service.serialize_sale(row, catalog=catalog) for row in snapshot_rows]
+        if live_debug_enabled():
+            _log.info(
+                "sse_nozzle_snapshot station_id=%s count=%s identities=%s",
+                station_id,
+                len(snapshot_sales),
+                [(s.get("pumpId"), s.get("nozzleId"), s.get("status")) for s in snapshot_sales],
+            )
+        yield _sse(
+            "nozzle.snapshot",
+            {
+                "type": "nozzle.snapshot",
+                "stationId": station_id,
+                "sales": snapshot_sales,
+                "events": [sales_service.nozzle_state_event(sale) for sale in snapshot_sales],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    finally:
+        db.close()
     last_heartbeat = datetime.now(timezone.utc)
     while True:
         if await request.is_disconnected():
@@ -120,8 +155,22 @@ async def _sales_event_generator(
                 cursor_received_at=cursor_at,
                 cursor_id=cursor_id,
             )
+            catalog = nozzle_catalog_for_station(db, station_id)
             for row in rows:
-                sale = sales_service.serialize_sale(row)
+                sale = sales_service.serialize_sale(row, catalog=catalog)
+                _log.info(
+                    "live_event_forwarded_to_sse station_id=%s pump_id=%s nozzle_id=%s "
+                    "transaction_id=%s state=%s sequence=%s amount=%s volume=%s event_id=%s",
+                    sale.get("stationId"),
+                    sale.get("pumpId"),
+                    sale.get("nozzleId"),
+                    sale.get("transactionId"),
+                    sale.get("status"),
+                    sale.get("sequence"),
+                    sale.get("amount"),
+                    sale.get("volumeLiters"),
+                    row.id,
+                )
                 yield _sse(
                     "sale.created",
                     {
@@ -131,6 +180,7 @@ async def _sales_event_generator(
                     },
                     event_id=row.id,
                 )
+                yield _sse("nozzle_state_changed", sales_service.nozzle_state_event(sale), event_id=row.id)
                 if row.received_at is not None:
                     cursor_at = row.received_at
                 cursor_id = row.id

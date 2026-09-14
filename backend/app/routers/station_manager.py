@@ -49,6 +49,7 @@ class DraftRequest(BaseModel):
     readings: list[DraftReadingItem]
     notes: Optional[str] = None
     backdate_reason: Optional[str] = None
+    late_reason: Optional[str] = None
 
 
 class SubmitRequest(BaseModel):
@@ -56,6 +57,7 @@ class SubmitRequest(BaseModel):
     business_date: Optional[date] = None
     confirm: bool = False
     backdate_reason: Optional[str] = None
+    late_reason: Optional[str] = None
 
 
 class TillRequest(BaseModel):
@@ -114,6 +116,7 @@ def history(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     status: Optional[str] = Query(None),
+    lateness: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -126,6 +129,7 @@ def history(
         date_from=date_from,
         date_to=date_to,
         status=status,
+        lateness=lateness,
         page=page,
         page_size=page_size,
     )
@@ -164,6 +168,7 @@ def draft(
         readings=[r.model_dump() for r in body.readings],
         notes=body.notes,
         backdate_reason=body.backdate_reason,
+        late_reason=body.late_reason,
     )
 
 
@@ -180,6 +185,7 @@ def submit(
         business_date=body.business_date,
         confirm=body.confirm,
         backdate_reason=body.backdate_reason,
+        late_reason=body.late_reason,
     )
 
 

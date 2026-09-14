@@ -20,16 +20,10 @@ export function livePumpInferredStatus(
   const op = String(operational || '').toUpperCase()
   const current = String(fallback || 'IDLE')
   if (op !== 'OPEN') return current
-  if (live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status)) {
-    return 'DISPENSING'
-  }
-  if (completedSaleStatus(live?.latestSale?.status)) return 'IDLE'
-  if (inProgressSaleStatus(live?.latestSale?.status) && !live?.isRecentlyActive) {
-    return 'IDLE'
-  }
-  if (['DISPENSING', 'IN_PROGRESS', 'ACTIVE'].includes(current.toUpperCase())) {
-    return 'IDLE'
-  }
+  if (inProgressSaleStatus(live?.latestSale?.status)) return 'DISPENSING'
+  if (String(live?.latestSale?.status || '').toUpperCase() === 'SALE_COMPLETED') return 'SALE_COMPLETED'
+  if (completedSaleStatus(live?.latestSale?.status) && live?.isRecentlyActive) return 'SALE_COMPLETED'
+  if (completedSaleStatus(live?.latestSale?.status)) return current === 'DISPENSING' ? 'IDLE' : current
   return current
 }
 
@@ -37,21 +31,27 @@ export function connectionForPump(
   pumpId: string,
   connections: Record<string, unknown>[],
   pumps: Record<string, unknown>[],
+  nozzleId?: string | null,
 ) {
   const pump = pumps.find((p) => pumpMatchesId(p, pumpId))
   const matches = connections.filter((c) => {
-    const mqtt = String(c.mqttPumpId || c.pumpCode || '')
-    return (
-      (pump && String(c.pumpId || '') === String(pump.id)) ||
+    const mqtt = String(c.mqttPumpId || c.pumpCode || c.sourceIdentifier || '')
+    const nozzleMatch = nozzleId
+      ? String(c.nozzleId || c.mqttNozzleId || c.nozzleCode || '') === String(nozzleId)
+      : true
+    const pumpMatch =
+      (pump && String(c.pumpId || c.physicalPumpId || '') === String(pump.id)) ||
       pumpMatchesId({ mqttPumpId: mqtt, pumpCode: String(c.pumpCode || '') }, pumpId)
-    )
+    return pumpMatch && (nozzleMatch || !nozzleId)
   })
-  if (!matches.length) return null
+  const nozzleExact = nozzleId
+    ? matches.filter((c) => String(c.nozzleId || c.mqttNozzleId || c.nozzleCode || '') === String(nozzleId))
+    : matches
+  const pool = nozzleExact.length ? nozzleExact : matches
+  if (!pool.length) return null
   return (
-    matches.find((c) => c.isPrimary) ||
-    [...matches].sort((a, b) =>
-      String(a.tankId || '').localeCompare(String(b.tankId || '')),
-    )[0]
+    pool.find((c) => c.isPrimary) ||
+    [...pool].sort((a, b) => String(a.tankId || '').localeCompare(String(b.tankId || '')))[0]
   )
 }
 
@@ -74,14 +74,14 @@ export function liveDispensingFromPumpState(
   const out: Record<string, ActiveDispensingState> = {}
   for (const [key, live] of Object.entries(pumpLiveState)) {
     const sale = live.latestSale
-    if (!sale || !live.isRecentlyActive) continue
-    if (!inProgressSaleStatus(sale.status)) continue
-    const conn = connectionForPump(sale.pumpId || key, connections, pumps)
+    if (!sale || !inProgressSaleStatus(sale.status)) continue
+    const conn = connectionForPump(sale.pumpId || key, connections, pumps, sale.nozzleId)
     const vol = Number(sale.volumeLiters || 0)
     const amt = Number(sale.amount || 0)
     out[key] = {
       transactionId: sale.transactionId,
       pumpId: key,
+      nozzleId: sale.nozzleId || undefined,
       tankId: conn?.tankId ? String(conn.tankId) : '',
       finalVolume: vol,
       finalAmount: amt,

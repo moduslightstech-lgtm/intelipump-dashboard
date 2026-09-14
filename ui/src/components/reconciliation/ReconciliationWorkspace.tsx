@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { fmtLiters, fmtNaira, fmtSignedNaira, type DayCloseRow } from '../../api/client'
+import { formatStatusLabel } from '../../lib/enumPresentation'
 import {
   closeBlocker,
   closeDisabledExplanation,
@@ -110,14 +111,14 @@ export default function ReconciliationWorkspace({
         </div>
       ) : null}
 
-      <div className="card space-y-2 py-3">
+      <div className="card space-y-3 py-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 className="text-white text-lg font-semibold">{data.stationName}</h2>
             <p className="text-sm text-slate-400">{formatBusinessDate(data.businessDate)}</p>
+            <p className="text-sm text-slate-300 mt-2">{checks}</p>
           </div>
           <div className="flex items-center gap-2">
-            <span className={statusBadge(wf).className}>{wf}</span>
             {actions.isAdmin ? (
               <div className="relative">
                 <button
@@ -179,21 +180,38 @@ export default function ReconciliationWorkspace({
             ) : null}
           </div>
         </div>
-        <p className="text-sm text-slate-300">Reconciliation readiness · {checks}</p>
         <div className="grid sm:grid-cols-3 gap-2 text-sm">
-          <div>
-            {finStatus === 'MATCH' ? '✓' : '!'} Financial{' '}
-            <span className={statusBadge(finStatus).className}>{finStatus}</span>
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+            <span className="text-slate-300">Financial</span>
+            <span className={statusBadge(finStatus).className} aria-label={`Financial status: ${statusBadge(finStatus).text}`}>
+              {statusBadge(finStatus).text}
+            </span>
           </div>
-          <div>
-            {integrity?.status === 'MATCH' ? '✓' : '!'} Transaction Integrity{' '}
-            <span className={statusBadge(integrity?.status).className}>{integrity?.status || 'WAITING'}</span>
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+            <span className="text-slate-300">Transaction integrity</span>
+            <span
+              className={statusBadge(integrity?.status).className}
+              aria-label={`Transaction integrity: ${statusBadge(integrity?.status || 'WAITING').text}`}
+            >
+              {statusBadge(integrity?.status || 'WAITING').text}
+            </span>
           </div>
-          <div>
-            {inventory?.status === 'MATCH' ? '✓' : '!'} Tank Inventory{' '}
-            <span className={statusBadge(inventory?.status).className}>{inventory?.status || 'INCOMPLETE'}</span>
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+            <span className="text-slate-300">Tank inventory</span>
+            <span
+              className={statusBadge(inventory?.status).className}
+              aria-label={`Tank inventory: ${statusBadge(inventory?.status || 'INCOMPLETE').text}`}
+            >
+              {statusBadge(inventory?.status || 'INCOMPLETE').text}
+            </span>
           </div>
         </div>
+        <p className="text-sm text-slate-200">
+          Overall status:{' '}
+          <span className={statusBadge(wf).className} aria-label={`Overall status: ${statusBadge(wf).text}`}>
+            {statusBadge(wf).text}
+          </span>
+        </p>
         {data.lateData?.flag || data.lateDataReceived ? (
           <p className="text-sm text-amber-300">
             {data.lateData?.summary || 'Late transactions arrived after this reconciliation was closed.'}
@@ -420,7 +438,7 @@ function TankInventoryCard({
                 <td className="pr-3">{tank.actualClosingLiters == null ? '—' : fmtLiters(tank.actualClosingLiters)}</td>
                 <td className="pr-3">{tank.varianceLiters == null ? '—' : fmtLiters(tank.varianceLiters)}</td>
                 <td>
-                  <span className={statusBadge(tank.status).className}>{tank.status}</span>
+                  <span className={statusBadge(tank.status).className}>{statusBadge(tank.status).text}</span>
                 </td>
               </tr>
             ))}
@@ -428,6 +446,26 @@ function TankInventoryCard({
         </table>
       </div>
       {!inventory?.tanks?.length ? <p className="text-sm text-slate-500">No tanks on this station yet.</p> : null}
+      {detailed && inventory?.tanks?.length ? (
+        <div className="space-y-2 text-sm text-slate-300">
+          {(inventory.tanks || []).slice(0, 4).map((tank: any) => (
+            <div key={`${tank.tankId}-breakdown`} className="rounded border border-slate-800 px-3 py-2">
+              <div className="text-xs uppercase tracking-wide text-slate-500 mb-1">{tank.tankCode}</div>
+              <div>Opening stock {fmtLiters(tank.openingLiters)}</div>
+              <div>+ Fuel delivered {fmtLiters(tank.deliveryLiters ?? tank.breakdown?.fuelDelivered)}</div>
+              <div>− Fuel sold {fmtLiters(tank.dispensedLiters ?? tank.breakdown?.fuelSold)}</div>
+              <div className="text-white">= Expected closing stock {tank.expectedClosingLiters == null ? '—' : fmtLiters(tank.expectedClosingLiters)}</div>
+              <div>Actual closing reading {tank.actualClosingLiters == null ? '—' : fmtLiters(tank.actualClosingLiters)}</div>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {data.lateData?.flag || (data.lateData as any)?.summary ? (
+        <p className="text-sm text-amber-300">
+          {formatStatusLabel((data.lateData as any)?.status || 'LATE_DATA_RECEIVED')}
+          {(data.lateData as any)?.summary ? ` — ${(data.lateData as any).summary}` : ''}
+        </p>
+      ) : null}
       {detailed && inventory?.tanks?.some((tank) => tank.blocker) ? (
         <ul className="text-sm text-slate-400 list-disc list-inside">
           {inventory.tanks

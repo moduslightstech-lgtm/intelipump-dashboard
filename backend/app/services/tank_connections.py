@@ -123,6 +123,26 @@ def _fallback_connections(
         if not candidates:
             continue
         tank = candidates[0][1]
+        nested = [n for n in (pump.get("nozzles") or []) if n]
+        if nested:
+            for nozzle in nested:
+                key = (str(tank["id"]), pid, str(nozzle.get("id") or nozzle.get("nozzleCode") or ""))
+                if key in used_pairs:
+                    continue
+                used_pairs.add(key)
+                out.append(
+                    _payload(
+                        f"fallback:{tank['id']}:{pid}:{nozzle.get('id') or nozzle.get('nozzleCode')}",
+                        tank,
+                        pump,
+                        nozzle.get("product") or tank.get("product") or pump.get("product"),
+                        f"{tank.get('tankCode')} → {pump.get('mqttPumpId') or pump.get('pumpCode')} · {nozzle.get('name') or nozzle.get('nozzleCode')}",
+                        source="FALLBACK",
+                        is_primary=True,
+                        nozzle=nozzle,
+                    )
+                )
+            continue
         key = (str(tank["id"]), pid)
         if key in used_pairs:
             continue
@@ -168,8 +188,19 @@ def _payload(
         "pumpName": pump_name,
         "mqttPumpId": pump.get("mqttPumpId"),
         "nozzleId": str(nozzle["id"]) if nozzle and nozzle.get("id") else None,
+        "destinationNozzleId": (
+            str(
+                (nozzle or {}).get("mqttNozzleId")
+                or (nozzle or {}).get("nozzleCode")
+                or (nozzle or {}).get("id")
+                or ""
+            ).strip()
+            or None
+        ),
         "nozzleName": nozzle_name,
         "nozzleCode": (nozzle or {}).get("nozzleCode") if nozzle else None,
+        "mqttNozzleId": (nozzle or {}).get("mqttNozzleId") if nozzle else None,
+        "sourceIdentifier": (nozzle or {}).get("sourceIdentifier") if nozzle else None,
         "product": product or (nozzle or {}).get("product") or tank.get("product") or pump.get("product"),
         "lineLabel": friendly,
         "source": source,

@@ -17,6 +17,7 @@ import ExecutiveOverviewPage from './pages/ExecutiveOverviewPage'
 import UsersPage from './pages/UsersPage'
 import TanksPage from './pages/TanksPage'
 import TankReadingsPage from './pages/station-manager/TankReadingsPage'
+import FuelDeliveriesPage from './pages/FuelDeliveriesPage'
 import {
   StationManagerHistoryPage,
   StationManagerProfilePage,
@@ -108,6 +109,8 @@ function AppRoutes() {
           <Route path="connections" element={<AdminStationConnectionsPage />} />
         </Route>
         <Route path="station-manager/tank-readings" element={<TankReadingsPage />} />
+        <Route path="fuel-deliveries" element={<FuelDeliveriesPage />} />
+        <Route path="station-manager/fuel-deliveries" element={<FuelDeliveriesPage />} />
         <Route path="station-manager/history" element={<StationManagerHistoryPage />} />
         <Route
           path="station-manager/reconciliation"

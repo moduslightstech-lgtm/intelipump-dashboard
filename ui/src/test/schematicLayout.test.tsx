@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  autoArrangeNodes,
   buildAutoForecourtLayout,
   buildForecourtNodes,
   groupPumpsIntoIslands,
@@ -8,6 +9,8 @@ import {
   toLayoutPersist,
   topologyKey,
 } from '../components/twin/schematic/autoLayout'
+import { LAYOUT_SCHEMA_VERSION } from '../components/twin/schematic/constants'
+import { idleTwoNozzleState } from '../components/twin/schematic/dispenserFixtures'
 import { buildConnectionGraph } from '../components/twin/schematic/connectionGraph'
 import { displayPumpStatus, pumpStatusLabel } from '../components/twin/schematic/display'
 import { fourTankTwelvePumpState } from '../components/twin/schematic/fourByTwelveFixture'
@@ -44,25 +47,28 @@ function layoutAndRoutes(state: TwinLiveState, width = 1440) {
 }
 
 describe('1. one tank connected to two pumps', () => {
-  it('routes two branches from one trunk', () => {
+  it('routes two supply pipes from one trunk', () => {
     const { nodes, routes, trunks } = layoutAndRoutes(oneTankTwoPumps())
     expect(nodes.filter((n) => n.kind === 'TANK')).toHaveLength(1)
     expect(nodes.filter((n) => n.kind === 'PUMP')).toHaveLength(2)
     expect(routes).toHaveLength(2)
     expect(trunks).toHaveLength(1)
     expect(routes.every((r) => r.tankId === 't1')).toBe(true)
+    expect(new Set(routes.map((r) => r.id)).size).toBe(2)
+    expect(trunks[0].id).toBe(`trunk:t1`)
+    expect(routes.every((r) => r.segmentType === 'PUMP_SUPPLY')).toBe(true)
   })
 })
 
 describe('2. four tanks / twelve pumps fixture', () => {
-  it('places 4 tanks, 12 physical pumps, 24 nozzle cards', () => {
+  it('places 4 tanks, 12 physical pumps, 24 nozzle ports', () => {
     const { nodes } = layoutAndRoutes(fourTankTwelvePumpState(), 1440)
     expect(nodes.filter((n) => n.kind === 'TANK')).toHaveLength(4)
     expect(nodes.filter((n) => n.kind === 'ISLAND')).toHaveLength(12)
     expect(nodes.filter((n) => n.kind === 'PUMP')).toHaveLength(24)
-    expect(nodes.some((n) => n.kind === 'OFFICE')).toBe(true)
-    expect(nodes.some((n) => n.kind === 'ENTRANCE')).toBe(true)
-    expect(nodes.some((n) => n.kind === 'EXIT')).toBe(true)
+    expect(nodes.some((n) => n.kind === 'OFFICE')).toBe(false)
+    expect(nodes.some((n) => n.kind === 'ENTRANCE')).toBe(false)
+    expect(nodes.some((n) => n.kind === 'EXIT')).toBe(false)
     expect(nodes.filter((n) => n.kind === 'ISLAND')[0]?.label).toMatch(/Pump/i)
   })
 })
@@ -172,7 +178,7 @@ describe('10. missing pump or tank reference', () => {
 })
 
 describe('11. no node overlap after automatic layout', () => {
-  it('keeps tanks, pumps, office, and gates apart', () => {
+  it('keeps tanks and physical pumps apart', () => {
     const nodes = buildForecourtNodes(fourTankTwelvePumpState(), 1440)
     expect(nodesHaveNoOverlap(nodes)).toBe(true)
   })
@@ -180,7 +186,7 @@ describe('11. no node overlap after automatic layout', () => {
 
 describe('12. pipe endpoints use tank outlet and pump top ports', () => {
   it('anchors correctly', () => {
-    const { nodes, routes } = layoutAndRoutes(oneTankTwoPumps())
+    const { nodes, routes, trunks } = layoutAndRoutes(oneTankTwoPumps())
     const tank = nodes.find((n) => n.kind === 'TANK')!
     const pump = nodes.find((n) => n.kind === 'PUMP')!
     const outletY = tank.y + Math.min(
@@ -189,24 +195,31 @@ describe('12. pipe endpoints use tank outlet and pump top ports', () => {
     )
     expect(getTankOutletAnchor(tank).y).toBe(outletY)
     expect(getPumpInletAnchor(pump).y).toBe(pump.y)
-    expect(routes[0].source.y).toBe(outletY)
+    expect(trunks[0].source.y).toBe(outletY)
+    expect(routes[0].source.y).toBe(trunks[0].y)
     expect(routes[0].target.y).toBe(nodes.find((n) => n.id === routes[0].pumpId)!.y)
   })
 })
 
 describe('13. pipes do not pass through unrelated node interiors', () => {
-  it('avoids office/entrance/exit boxes', () => {
-    const { nodes, routes } = layoutAndRoutes(fourTankTwelvePumpState(), 1440)
+  it('avoids tank and pump boxes', () => {
+    const { nodes, routes, trunks } = layoutAndRoutes(fourTankTwelvePumpState(), 1440)
     const hits = routes.filter((r) => routeHitsUnrelated(r, nodes))
     expect(hits).toHaveLength(0)
+    expect(trunks.every((t) => t.path.startsWith('M '))).toBe(true)
   })
 })
 
-describe('14. shared trunk branches to the correct pumps', () => {
-  it('maps each route pump id to a live pump', () => {
+describe('14. shared trunk supplies the correct physical pumps', () => {
+  it('maps each supply route to a live island or pump', () => {
     const { nodes, routes } = layoutAndRoutes(fourTankTwelvePumpState())
-    const pumpIds = new Set(nodes.filter((n) => n.kind === 'PUMP').map((n) => n.id))
-    expect(routes.every((r) => pumpIds.has(r.pumpId))).toBe(true)
+    const targets = new Set(
+      nodes.filter((n) => n.kind === 'PUMP' || n.kind === 'ISLAND').map((n) => n.id),
+    )
+    expect(routes.every((r) => targets.has(r.pumpId) || targets.has(String(r.targetNodeId || '')))).toBe(
+      true,
+    )
+    expect(routes.every((r) => r.segmentType === 'PUMP_SUPPLY')).toBe(true)
   })
 })
 
@@ -273,6 +286,18 @@ describe('19. live status changes do not move nodes', () => {
     expect(firstPump?.x).toBe(secondPump?.x)
     expect(firstPump?.y).toBe(secondPump?.y)
   })
+
+  it('does not change topology when live LCD amounts change', () => {
+    const a = oneTankTwoPumps()
+    const before = topologyKey(a)
+    a.pumps = a.pumps!.map((p) => ({
+      ...p,
+      lastTransactionAmount: 600,
+      lastTransactionVolume: 0.51,
+      inferredStatus: 'DISPENSING',
+    }))
+    expect(topologyKey(a)).toBe(before)
+  })
 })
 
 describe('20. responsive island columns', () => {
@@ -310,7 +335,7 @@ describe('22. accessible names and status labels', () => {
 })
 
 describe('physical pump / nozzle grouping', () => {
-  it('renders one physical pump with two independent nozzle cards', () => {
+  it('renders one physical pump with two independent nozzle ports', () => {
     const groups = groupPumpsIntoIslands([
       {
         id: 'p1',
@@ -349,6 +374,215 @@ describe('physical pump / nozzle grouping', () => {
     expect(nozzles.map((n) => n.label)).toEqual(['Nozzle 1', 'Nozzle 2'])
     expect(nozzles[0].status).toBe('DISPENSING')
     expect(nozzles[1].status).toBe('IDLE')
+  })
+
+  it('relabels saved Pump 1 / Pump 2 cards to nested nozzles', () => {
+    const state: TwinLiveState = {
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          {
+            assetType: 'ISLAND',
+            assetId: 'shell-p1',
+            label: 'Pump 1',
+            x: 80,
+            y: 200,
+            width: 460,
+            height: 200,
+          },
+          {
+            assetType: 'PUMP',
+            assetId: 'p1',
+            label: 'Pump 1',
+            x: 100,
+            y: 230,
+            width: 196,
+            height: 136,
+            configuration: { islandId: 'shell-p1' },
+          },
+          {
+            assetType: 'PUMP',
+            assetId: 'legacy-p2',
+            label: 'Pump 2',
+            x: 340,
+            y: 230,
+            width: 196,
+            height: 136,
+            configuration: { islandId: 'shell-p1' },
+          },
+        ],
+      },
+      tanks: [{ id: 't1', name: 'PMS Lab Tank', product: 'PMS' }],
+      pumps: [
+        {
+          id: 'p1',
+          name: 'Pump 1',
+          mqttPumpId: 'pump-1',
+          nozzles: [
+            { id: 'n1', name: 'Nozzle 1', sourceIdentifier: 'pump-1', product: 'PMS', inferredStatus: 'IDLE' },
+            { id: 'n2', name: 'Nozzle 2', sourceIdentifier: 'pump-2', product: 'PMS', inferredStatus: 'UNKNOWN' },
+          ],
+        },
+      ],
+      tankPumpConnections: [
+        { id: 'c1', tankId: 't1', pumpId: 'p1', nozzleId: 'n1', product: 'PMS', isPrimary: true, active: true },
+        { id: 'c2', tankId: 't1', pumpId: 'p1', nozzleId: 'n2', product: 'PMS', isPrimary: true, active: true },
+      ],
+    }
+    const { nodes, warnings } = layoutAndRoutes(state)
+    const inner = nodes.filter((n) => n.kind === 'PUMP')
+    expect(inner.map((n) => n.label)).toEqual(['Nozzle 1', 'Nozzle 2'])
+    expect(inner.map((n) => n.id)).toEqual(['n1', 'n2'])
+    expect(inner.every((n) => n.raw?.assetRole === 'NOZZLE')).toBe(true)
+    expect(warnings.some((w) => w.code === 'UNCONNECTED_PUMP')).toBe(false)
+    expect(warnings.some((w) => w.code === 'PRODUCT_NOT_MAPPED')).toBe(false)
+    expect(nodes.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+    expect(nodes.find((n) => n.kind === 'ISLAND')?.x).toBe(80)
+    expect(nodes.find((n) => n.kind === 'ISLAND')?.y).toBe(200)
+  })
+})
+
+describe('saved layout is positions only', () => {
+  function currentTopology(extras: Record<string, unknown> = {}): TwinLiveState {
+    return {
+      ...idleTwoNozzleState(),
+      station: { id: 'lab', mqttStationId: 'InteliPump-US-Lab', stationCode: 'LAB' },
+      ...extras,
+    }
+  }
+
+  it('restores only matching canonical IDs from a legacy island layout', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          { assetType: 'TANK', assetId: 't1', x: 40, y: 60 },
+          { assetType: 'ISLAND', assetId: 'island-1', label: 'ISLAND 1', x: 320, y: 240, width: 460, height: 296 },
+          { assetType: 'ISLAND', assetId: 'shell-p1', label: 'Pump 1', x: 120, y: 220 },
+          { assetType: 'PUMP', assetId: 'legacy-empty', label: 'Pump', x: 500, y: 240, width: 196, height: 136 },
+        ],
+      },
+    })
+    const nodes = buildForecourtNodes(state)
+    const islands = nodes.filter((n) => n.kind === 'ISLAND')
+    expect(islands).toHaveLength(1)
+    expect(islands[0].id).toBe('shell-p1')
+    expect(islands[0].label).toBe('Pump 1')
+    expect(islands[0].x).toBe(120)
+    expect(islands[0].y).toBe(220)
+    expect(nodes.some((n) => n.id === 'island-1' || n.label === 'ISLAND 1')).toBe(false)
+    expect(nodes.filter((n) => n.kind === 'PUMP')).toHaveLength(2)
+  })
+
+  it('maps a single obsolete island position onto Pump 1', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [{ assetType: 'ISLAND', assetId: 'island-1', label: 'ISLAND 1', x: 333, y: 277 }],
+      },
+    })
+    const island = buildForecourtNodes(state).find((n) => n.kind === 'ISLAND')!
+    expect(island.id).toBe('shell-p1')
+    expect(island.x).toBe(333)
+    expect(island.y).toBe(277)
+  })
+
+  it('does not restore deleted topology from saved layout', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          { assetType: 'TANK', assetId: 't-dead', x: 10, y: 10 },
+          { assetType: 'ISLAND', assetId: 'ghost-pump', x: 400, y: 400 },
+          { assetType: 'TANK', assetId: 't1', x: 88, y: 48 },
+        ],
+      },
+    })
+    const nodes = buildForecourtNodes(state)
+    expect(nodes.some((n) => n.id === 't-dead' || n.id === 'ghost-pump')).toBe(false)
+    expect(nodes.find((n) => n.kind === 'TANK')?.id).toBe('t1')
+    expect(nodes.find((n) => n.kind === 'TANK')?.x).toBe(88)
+    expect(nodes.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+  })
+
+  it('auto-positions new equipment that has no saved coordinates', () => {
+    const auto = buildForecourtNodes({
+      ...currentTopology(),
+      pumps: [
+        ...(currentTopology().pumps || []),
+        {
+          id: 'p2',
+          name: 'Pump 2',
+          pumpCode: 'P2',
+          mqttPumpId: 'p2',
+          nozzles: [
+            { id: 'n3', name: 'Nozzle 1', product: 'PMS' },
+            { id: 'n4', name: 'Nozzle 2', product: 'PMS' },
+          ],
+        },
+      ],
+      layout: {
+        mode: 'CUSTOM',
+        items: [{ assetType: 'ISLAND', assetId: 'shell-p1', x: 140, y: 260 }],
+      },
+    })
+    const islands = auto.filter((n) => n.kind === 'ISLAND')
+    expect(islands).toHaveLength(2)
+    expect(islands.find((n) => n.id === 'shell-p1')?.x).toBe(140)
+    expect(islands.find((n) => n.id === 'shell-p2')?.x).not.toBe(140)
+  })
+
+  it('keeps the same equipment node count on first load and Auto reset', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          { assetType: 'ISLAND', assetId: 'island-1', x: 200, y: 200, height: 296 },
+          { assetType: 'PUMP', assetId: 'old-card', x: 200, y: 200 },
+        ],
+      },
+    })
+    const first = buildForecourtNodes(state)
+    const reset = autoArrangeNodes(state)
+    const count = (nodes: typeof first) =>
+      nodes.filter((n) => n.kind === 'ISLAND' || n.kind === 'TANK' || n.kind === 'PUMP').length
+    expect(count(first)).toBe(count(reset))
+    expect(first.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+    expect(reset.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+  })
+
+  it('preserves tank positions and discards control-room nodes during island migration', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          { assetType: 'TANK', assetId: 't1', x: 77, y: 55 },
+          { assetType: 'OFFICE', x: 900, y: 66 },
+          { assetType: 'ISLAND', assetId: 'island-1', x: 250, y: 300 },
+        ],
+      },
+    })
+    const nodes = buildForecourtNodes(state)
+    expect(nodes.find((n) => n.kind === 'TANK')?.x).toBe(77)
+    expect(nodes.find((n) => n.kind === 'OFFICE')).toBeUndefined()
+    expect(nodes.find((n) => n.kind === 'ISLAND')?.x).toBe(250)
+  })
+
+  it('does not recreate the empty duplicate box after a second build (refresh)', () => {
+    const state = currentTopology({
+      layout: {
+        mode: 'CUSTOM',
+        items: [
+          { assetType: 'ISLAND', assetId: 'island-1', x: 200, y: 200 },
+          { assetType: 'ISLAND', assetId: 'shell-p1', x: 200, y: 200 },
+        ],
+      },
+    })
+    const a = buildForecourtNodes(state)
+    const b = buildForecourtNodes(state)
+    expect(a.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+    expect(b.filter((n) => n.kind === 'ISLAND')).toHaveLength(1)
+    expect(toLayoutPersist(a).layout_version).toBe(LAYOUT_SCHEMA_VERSION)
   })
 })
 

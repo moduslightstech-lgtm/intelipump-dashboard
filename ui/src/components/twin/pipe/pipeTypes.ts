@@ -12,6 +12,8 @@ export type Rect = {
 
 export type PipeStatus = 'IDLE' | 'ACTIVE' | 'WARNING' | 'FAULT'
 
+export type PipeSegmentType = 'TANK_TRUNK' | 'NOZZLE_BRANCH' | 'PUMP_SUPPLY'
+
 export type PipeRoute = {
   id: string
   tankId: string
@@ -25,11 +27,40 @@ export type PipeRoute = {
   connection: Record<string, unknown>
   lineLabel?: string | null
   mappingSource: string
+  segmentType?: PipeSegmentType
+  stationId?: string
+  nozzleId?: string
+  connectionId?: string
+  physicalPumpId?: string
+  nozzleIds?: string[]
+  connectionIds?: string[]
+  active?: boolean
+  primary?: boolean
+  targetNodeId?: string
+}
+
+export type PipeTrunkSegment = {
+  id: string
+  tankId: string
+  product: string
+  y: number
+  path: string
+  stationId?: string
+  segmentType: 'TANK_TRUNK'
+  nozzleIds: string[]
+  connectionIds: string[]
+  source: Point
+  target: Point
+  split: Point
+  targetNodeId: string
+  active: boolean
 }
 
 export type ActiveDispensingState = {
   transactionId: string
   pumpId: string
+  nozzleId?: string
+  stationId?: string
   tankId: string
   finalVolume: number
   finalAmount: number
@@ -40,6 +71,7 @@ export type ActiveDispensingState = {
   durationMs: number
   product?: string
   connectionId?: string
+  mappingWarning?: string
 }
 
 export type LayoutNodeBox = {

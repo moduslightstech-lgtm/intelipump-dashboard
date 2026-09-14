@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { IntegrityAnomaly, IntegrityTransaction } from '../lib/anomalyPresentation'
+import { formatStatusLabel } from '../lib/enumPresentation'
 import type { ValueCheck } from '../lib/valueCheck'
 
 /**
@@ -551,6 +552,7 @@ export const getStationManagerHistory = (params?: {
   date_from?: string
   date_to?: string
   status?: string
+  lateness?: string
   page?: number
   page_size?: number
 }) =>
@@ -607,6 +609,65 @@ export const correctTankReadingBatch = (batchId: string, body: Record<string, un
   api.put<any>(`/api/v1/station-manager/admin/tank-readings/${batchId}/correct`, body)
 export const getTankReadingAudit = (batchId: string) =>
   api.get<any[]>(`/api/v1/station-manager/tank-readings/batches/${batchId}/audit`)
+
+export type FuelDelivery = {
+  id: string
+  stationId: string
+  stationName?: string
+  tankId?: string
+  tankCode?: string
+  tankName?: string
+  product?: string
+  businessDate: string
+  deliveredAt?: string
+  quantityLitres: number
+  supplierName?: string
+  supplierReference?: string
+  waybillNumber?: string
+  vehicleRegistration?: string
+  notes?: string
+  status: string
+  version: number
+  createdByName?: string
+  warnings?: string[]
+  stockPreview?: Record<string, unknown>
+}
+
+export const listFuelDeliveries = (params?: Record<string, string | number | undefined>) =>
+  api.get<{
+    items: FuelDelivery[]
+    page: number
+    pageSize: number
+    total: number
+    hasMore: boolean
+  }>('/api/v1/fuel-deliveries', { params })
+
+export const getFuelDelivery = (id: string) => api.get<FuelDelivery>(`/api/v1/fuel-deliveries/${id}`)
+
+export const getFuelDeliveryTanks = (stationId: string) =>
+  api.get<any[]>('/api/v1/fuel-deliveries/tanks', { params: { station_id: stationId } })
+
+export const getFuelDeliveryStockPreview = (stationId: string, tankId: string, quantityLitres: number) =>
+  api.get<any>('/api/v1/fuel-deliveries/stock-preview', {
+    params: { station_id: stationId, tank_id: tankId, quantity_litres: quantityLitres },
+  })
+
+export const getFuelDeliveryInventorySummary = (stationId: string, businessDate?: string) =>
+  api.get<any>('/api/v1/fuel-deliveries/inventory-summary', {
+    params: { station_id: stationId, business_date: businessDate },
+  })
+
+export const createFuelDelivery = (body: Record<string, unknown>) =>
+  api.post<FuelDelivery>('/api/v1/fuel-deliveries', body)
+
+export const updateFuelDelivery = (id: string, body: Record<string, unknown>) =>
+  api.put<FuelDelivery>(`/api/v1/fuel-deliveries/${id}`, body)
+
+export const completeFuelDelivery = (id: string, body?: Record<string, unknown>) =>
+  api.post<FuelDelivery>(`/api/v1/fuel-deliveries/${id}/complete`, body || {})
+
+export const voidFuelDelivery = (id: string, body: { reason: string; version?: number }) =>
+  api.post<FuelDelivery>(`/api/v1/fuel-deliveries/${id}/void`, body)
 
 export const getExecutiveDashboard = () => api.get<any>('/api/v1/executive/dashboard')
 export const getExecutiveStationPerformance = () => api.get<any[]>('/api/v1/executive/station-performance')
@@ -1184,12 +1245,7 @@ export function fmtTime(iso: string | null | undefined, timeZone = 'Africa/Lagos
 }
 
 export function humanizeEnum(value?: string | null) {
-  if (!value) return '—'
-  return value
-    .replace(/[_-]+/g, ' ')
-    .trim()
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase())
+  return formatStatusLabel(value)
 }
 
 export function stationLabel(station?: { name?: string | null; station_code?: string; mqtt_station_id?: string | null } | null) {

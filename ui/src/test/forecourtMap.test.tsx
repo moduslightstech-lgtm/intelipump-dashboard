@@ -154,9 +154,9 @@ describe('auto layout node counts', () => {
     const nodes = buildForecourtNodes(sampleState())
     expect(nodes.filter((n) => n.kind === 'PUMP')).toHaveLength(1)
     expect(nodes.filter((n) => n.kind === 'TANK')).toHaveLength(2)
-    expect(nodes.some((n) => n.kind === 'OFFICE')).toBe(true)
-    expect(nodes.some((n) => n.kind === 'ENTRANCE')).toBe(true)
-    expect(nodes.some((n) => n.kind === 'EXIT')).toBe(true)
+    expect(nodes.some((n) => n.kind === 'OFFICE')).toBe(false)
+    expect(nodes.some((n) => n.kind === 'ENTRANCE')).toBe(false)
+    expect(nodes.some((n) => n.kind === 'EXIT')).toBe(false)
   })
 
   it('scales pump nodes for 4, 8 and 12 pumps including auto-placed missing', () => {

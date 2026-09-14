@@ -38,4 +38,6 @@ def test_aggregate_empty_unknown():
 
 def test_friendly_nozzle_name_hides_raw_pump_id():
     assert friendly_nozzle_name({"name": "pump-1"}, 0) == "Nozzle 1"
+    assert friendly_nozzle_name({"name": "Pump 1"}, 0) == "Nozzle 1"
+    assert friendly_nozzle_name({"name": "Pump 2", "nozzleNumber": 2}, 1) == "Nozzle 2"
     assert friendly_nozzle_name({"name": "Nozzle 2"}, 1) == "Nozzle 2"

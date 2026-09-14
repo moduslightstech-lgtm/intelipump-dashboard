@@ -1,5 +1,5 @@
 import { productPipeColor } from '../pipe/pipeTheme'
-import type { PipeRoute, Point } from '../pipe/pipeTypes'
+import type { PipeRoute, PipeTrunkSegment, Point } from '../pipe/pipeTypes'
 import { LANE_GAP, PIPE_CLEARANCE, TANK_FOOTER_H, TANK_OUTLET_Y } from './constants'
 import { inflate, pathToPoints, segmentHitsRect, type Rect } from './geometry'
 import type { SchematicNode, ValidatedConnection } from './types'
@@ -44,6 +44,62 @@ export function buildOrthogonalPipePath(
   }
   points.push({ x: target.x, y: target.y })
   return { path: polylineOrthogonal(points), mid: { x: (source.x + target.x) / 2, y: manifoldY } }
+}
+
+/** Branch from the shared split point to a nozzle inlet. Does not redraw the tank drop. */
+export function buildBranchPipePath(
+  split: Point,
+  target: Point,
+  viaX?: number,
+  localRailY?: number,
+): string {
+  const points: Point[] = [{ x: split.x, y: split.y }]
+  if (viaX != null && localRailY != null) {
+    points.push({ x: viaX, y: split.y }, { x: viaX, y: localRailY }, { x: target.x, y: localRailY })
+  } else if (Math.abs(target.x - split.x) > 0.5) {
+    points.push({ x: target.x, y: split.y })
+  }
+  points.push({ x: target.x, y: target.y })
+  return polylineOrthogonal(points)
+}
+
+export function trunkSegmentId(tankId: string): string {
+  return `trunk:${tankId}`
+}
+
+export function branchSegmentId(connectionId: string, pumpId: string, nozzleId: string): string {
+  return `branch:${connectionId}:${pumpId}:${nozzleId}`
+}
+
+export function pumpSupplySegmentId(tankId: string, physicalPumpId: string): string {
+  return `supply:${tankId}:${physicalPumpId}`
+}
+
+function nozzleIdentity(pump: SchematicNode, conn: ValidatedConnection): string {
+  const raw = conn.raw || {}
+  return String(
+    raw.nozzleId ||
+      raw.mqttNozzleId ||
+      raw.nozzleCode ||
+      raw.destinationNozzleId ||
+      pump.raw?.nozzleCode ||
+      pump.raw?.mqttNozzleId ||
+      pump.raw?.sourceIdentifier ||
+      pump.id,
+  )
+}
+
+function physicalPumpIdentity(pump: SchematicNode, conn: ValidatedConnection): string {
+  const raw = conn.raw || {}
+  return String(
+    raw.mqttPumpId ||
+      raw.mqtt_pump_id ||
+      pump.raw?.parentMqttPumpId ||
+      raw.physicalPumpId ||
+      pump.raw?.parentPumpId ||
+      raw.pumpId ||
+      pump.id,
+  )
 }
 
 function polylineOrthogonal(points: Point[]): string {
@@ -102,8 +158,8 @@ function nodeRect(n: { x: number; y: number; w: number; h: number }): Rect {
 
 export function collectObstacles(nodes: SchematicNode[]): Rect[] {
   return nodes
-    .filter((n) => ['OFFICE', 'ENTRANCE', 'EXIT', 'TANK', 'PUMP'].includes(n.kind))
-    .map((n) => inflate(nodeRect(n), n.kind === 'OFFICE' ? 10 : 4))
+    .filter((n) => ['TANK', 'PUMP'].includes(n.kind))
+    .map((n) => inflate(nodeRect(n), 4))
 }
 
 export function nudgeBranchX(
@@ -141,18 +197,23 @@ export function computePipeManifoldY(
 export function buildManifoldRoutes(
   nodes: SchematicNode[],
   connections: ValidatedConnection[],
-): { routes: PipeRoute[]; trunks: { tankId: string; product: string; y: number; path: string }[] } {
+  opts?: { stationId?: string },
+): { routes: PipeRoute[]; trunks: PipeTrunkSegment[] } {
   const tanks = nodes.filter((n) => n.kind === 'TANK')
   const pumps = nodes.filter((n) => n.kind === 'PUMP')
+  const islands = nodes.filter((n) => n.kind === 'ISLAND')
   if (!tanks.length || !pumps.length || !connections.length) {
     return { routes: [], trunks: [] }
   }
 
   const tankBottom = Math.max(...tanks.map((t) => t.y + t.h))
-  const pumpTop = Math.min(...pumps.map((p) => p.y))
+  const pumpTop = Math.min(
+    ...[...pumps, ...islands].map((p) => p.y),
+  )
   const obstacles = collectObstacles(nodes)
   const tankById = new Map(tanks.map((t) => [t.id, t]))
   const pumpById = new Map(pumps.map((p) => [p.id, p]))
+  const stationId = String(opts?.stationId || '')
 
   type Group = {
     tank: SchematicNode
@@ -175,7 +236,7 @@ export function buildManifoldRoutes(
   }
 
   const ordered = [...groups.values()].sort((a, b) => a.tank.x - b.tank.x || a.tank.id.localeCompare(b.tank.id))
-  const trunks: { tankId: string; product: string; y: number; path: string }[] = []
+  const trunks: PipeTrunkSegment[] = []
   const routes: PipeRoute[] = []
   const usedBranchXs: number[] = []
   const firstPumpY = Math.min(...pumps.map((p) => p.y))
@@ -186,55 +247,137 @@ export function buildManifoldRoutes(
     const members = [...group.members].sort(
       (a, b) => a.pump.x + a.pump.w / 2 - (b.pump.x + b.pump.w / 2),
     )
-    const outletTotal = members.length
-    const xs: number[] = []
+    const outlet = getTankOutletAnchor(group.tank, 0, 1)
+    const split: Point = { x: outlet.x, y: manifoldY }
+    const nozzleIds: string[] = []
+    const connectionIds: string[] = []
 
-    members.forEach((m, mi) => {
-      const source = getTankOutletAnchor(group.tank, mi, outletTotal)
-      let target = getPumpInletAnchor(m.pump)
-      const ignored = obstacles.filter((o) => {
-        const tankHit =
-          Math.abs(o.x - group.tank.x + 4) < 8 && Math.abs(o.y - group.tank.y + 4) < 8
-        const pumpHit = Math.abs(o.x - m.pump.x + 4) < 8 && Math.abs(o.y - m.pump.y + 4) < 8
-        return tankHit || pumpHit
+    // One visible supply pipe per tank → physical pump (not per nozzle).
+    const byPhysical = new Map<
+      string,
+      { pump: SchematicNode; conns: ValidatedConnection[]; nozzleIds: string[] }
+    >()
+    for (const m of members) {
+      const physicalPumpId = physicalPumpIdentity(m.pump, m.conn)
+      const nozzleId = nozzleIdentity(m.pump, m.conn)
+      nozzleIds.push(nozzleId)
+      connectionIds.push(String(m.conn.id))
+      const island =
+        islands.find((isle) => {
+          const asset = String(isle.assetId || isle.raw?.id || '')
+          return (
+            isle.id === `shell-${physicalPumpId}` ||
+            asset === physicalPumpId ||
+            isle.id === m.pump.parentId ||
+            isle.id === m.pump.islandId
+          )
+        }) || m.pump
+      const existing = byPhysical.get(physicalPumpId)
+      if (existing) {
+        existing.conns.push(m.conn)
+        existing.nozzleIds.push(nozzleId)
+      } else {
+        byPhysical.set(physicalPumpId, {
+          pump: island,
+          conns: [m.conn],
+          nozzleIds: [nozzleId],
+        })
+      }
+    }
+
+    ;[...byPhysical.entries()]
+      .sort((a, b) => a[1].pump.x + a[1].pump.w / 2 - (b[1].pump.x + b[1].pump.w / 2))
+      .forEach(([physicalPumpId, entry]) => {
+        let target = getPumpInletAnchor(entry.pump)
+        const ignored = obstacles.filter((o) => {
+          const tankHit =
+            Math.abs(o.x - group.tank.x + 4) < 8 && Math.abs(o.y - group.tank.y + 4) < 8
+          const pumpHit = Math.abs(o.x - entry.pump.x + 4) < 8 && Math.abs(o.y - entry.pump.y + 4) < 8
+          return tankHit || pumpHit
+        })
+        const others = obstacles.filter((o) => !ignored.includes(o))
+        const nudgedX = nudgeBranchX(target.x, manifoldY, entry.pump.y, others, usedBranchXs)
+        if (nudgedX !== target.x) target = { x: nudgedX, y: target.y }
+        usedBranchXs.push(target.x)
+
+        const lowerRow = entry.pump.y > firstPumpY + 24
+        const viaX = lowerRow ? nearest(target.x, corridors) : undefined
+        const localRailY = lowerRow ? entry.pump.y - 18 : undefined
+        const path = buildBranchPipePath(split, target, viaX, localRailY)
+        const primary = entry.conns.find((c) => c.isPrimary) || entry.conns[0]
+        routes.push({
+          id: pumpSupplySegmentId(group.tank.id, physicalPumpId),
+          tankId: group.tank.id,
+          pumpId: entry.pump.id,
+          product: group.product,
+          path,
+          source: split,
+          target,
+          manifoldY,
+          status: 'IDLE',
+          connection: primary?.raw || {},
+          lineLabel: primary?.lineLabel,
+          mappingSource: primary?.role || 'PRIMARY',
+          segmentType: 'PUMP_SUPPLY',
+          stationId,
+          nozzleIds: [...new Set(entry.nozzleIds)],
+          connectionIds: entry.conns.map((c) => String(c.id)),
+          connectionId: primary ? String(primary.id) : undefined,
+          physicalPumpId,
+          active: entry.conns.some((c) => c.active),
+          primary: Boolean(primary?.isPrimary),
+          targetNodeId: entry.pump.id,
+        })
       })
-      const others = obstacles.filter((o) => !ignored.includes(o))
-      const nudgedX = nudgeBranchX(target.x, manifoldY, m.pump.y, others, usedBranchXs)
-      if (nudgedX !== target.x) target = { x: nudgedX, y: target.y }
-      usedBranchXs.push(target.x)
-      xs.push(source.x, target.x)
 
-      const lowerRow = m.pump.y > firstPumpY + 24
-      const viaX = lowerRow ? nearest(target.x, corridors) : undefined
-      const localRailY = lowerRow ? m.pump.y - 18 : undefined
-      const { path } = buildOrthogonalPipePath(source, target, manifoldY, viaX, localRailY)
-      routes.push({
-        id: m.conn.id,
-        tankId: group.tank.id,
-        pumpId: m.pump.id,
-        product: group.product,
-        path,
-        source,
-        target,
-        manifoldY,
-        status: 'IDLE',
-        connection: m.conn.raw,
-        lineLabel: m.conn.lineLabel,
-        mappingSource: m.conn.role,
-      })
-    })
-
-    if (xs.length) {
+    if (members.length) {
       trunks.push({
+        id: trunkSegmentId(group.tank.id),
         tankId: group.tank.id,
         product: group.product,
         y: manifoldY,
-        path: `M ${Math.min(...xs)} ${manifoldY} L ${Math.max(...xs)} ${manifoldY}`,
+        path: polylineOrthogonal([outlet, split]),
+        stationId,
+        segmentType: 'TANK_TRUNK',
+        nozzleIds: [...new Set(nozzleIds)],
+        connectionIds,
+        source: outlet,
+        target: split,
+        split,
+        targetNodeId: members[0].pump.id,
+        active: members.some((m) => m.conn.active),
       })
     }
   })
 
   return { routes, trunks }
+}
+
+export function trunkToPipeRoute(trunk: PipeTrunkSegment): PipeRoute {
+  return {
+    id: trunk.id,
+    tankId: trunk.tankId,
+    pumpId: trunk.targetNodeId,
+    product: trunk.product,
+    path: trunk.path,
+    source: trunk.source,
+    target: trunk.target,
+    manifoldY: trunk.y,
+    status: 'IDLE',
+    connection: {},
+    mappingSource: 'PRIMARY',
+    segmentType: 'TANK_TRUNK',
+    stationId: trunk.stationId,
+    nozzleIds: [...trunk.nozzleIds],
+    connectionIds: [...trunk.connectionIds],
+    active: trunk.active,
+    primary: true,
+    targetNodeId: trunk.targetNodeId,
+  }
+}
+
+export function pipeSegmentsForRender(routes: PipeRoute[], trunks: PipeTrunkSegment[]): PipeRoute[] {
+  return [...trunks.map(trunkToPipeRoute), ...routes]
 }
 
 export function routeHitsUnrelated(
@@ -246,7 +389,7 @@ export function routeHitsUnrelated(
   const bandTop = tanks.length ? Math.max(...tanks.map((t) => t.y + t.h)) + 2 : 0
   const bandBottom = pumps.length ? Math.min(...pumps.map((p) => p.y)) - 2 : 0
   const interiors = nodes
-    .filter((n) => ['OFFICE', 'ENTRANCE', 'EXIT', 'TANK', 'PUMP'].includes(n.kind))
+    .filter((n) => ['TANK', 'PUMP'].includes(n.kind))
     .filter((n) => n.id !== route.tankId && n.id !== route.pumpId)
     .map((n) => ({ x: n.x + 8, y: n.y + 8, w: Math.max(4, n.w - 16), h: Math.max(4, n.h - 16) }))
   const pts = pathToPoints(route.path)

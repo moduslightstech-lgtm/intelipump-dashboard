@@ -22,7 +22,6 @@ import {
   setTwinViewPreference,
   type TwinViewMode,
 } from '../lib/twinViewPreference'
-import { useDispensingPlayback } from '../hooks/useDispensingPlayback'
 import { normalizeRole } from '../lib/roles'
 
 const BabylonStationTwin = lazy(() => import('../components/BabylonStationTwin'))
@@ -86,13 +85,6 @@ export default function DigitalTwinPage() {
     window.addEventListener('beforeunload', onLeave)
     return () => window.removeEventListener('beforeunload', onLeave)
   }, [layoutDirty, editLayout])
-
-  const anim = useDispensingPlayback({
-    stationId,
-    mqttStationId: twinQ.data?.station?.mqttStationId,
-    stationCode: twinQ.data?.station?.stationCode,
-    enabled: !!stationId && viewMode === 'operational',
-  })
 
   useEffect(() => {
     if (twinQ.data?.station) {
@@ -333,15 +325,15 @@ export default function DigitalTwinPage() {
           <OperationalTwinView
             state={twinQ.data}
             stationId={stationId}
-            activeByPump={anim.activeByPump}
-            activePumpId={anim.activePumpId}
-            activeTankId={anim.activeTankId}
-            activeConnectionId={anim.activeConnectionId}
-            phase={anim.phase}
-            flashTx={anim.flashTx}
-            liveVolume={anim.liveVolume}
-            liveAmount={anim.liveAmount}
-            restoredPumpIds={anim.restoredPumpIds}
+            activeByPump={{}}
+            activePumpId={null}
+            activeTankId={null}
+            activeConnectionId={null}
+            phase="idle"
+            flashTx={null}
+            liveVolume={0}
+            liveAmount={0}
+            restoredPumpIds={[]}
             editMode={editLayout}
             canEdit={canEdit}
             includeInactive={includeInactive}

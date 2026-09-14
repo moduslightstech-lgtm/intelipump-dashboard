@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fmtLiters, fmtNaira, fmtTime, type TwinLiveState } from '../../api/client'
-import { pumpGridClass, pumpMatchesId } from '../../lib/pumpIdentity'
 import {
   deriveOperationalStatus,
   mapEdgeToConnectivityStatus,
@@ -13,14 +12,14 @@ import {
   liveDispensingFromPumpState,
   livePumpInferredStatus,
   inProgressSaleStatus,
-  completedSaleStatus,
 } from '../../lib/liveDispensing'
+import { findSession, flowingSessions, operationalDisplay } from '../../lib/nozzleSessions'
+import { catalogFromPumps } from '../../lib/nozzleIdentity'
 import { applyLiveTankDrawdown } from '../../lib/liveTankLevels'
 import { getConnections } from './forecourtLayout'
 import ForecourtMap, { type ForecourtSelection } from './ForecourtMap'
-import PumpCard from './PumpCard'
-import TankCard from './TankCard'
-import { aggregatePhysicalPumpStatus } from './schematic/physicalPump'
+import { aggregatePhysicalPumpStatus, physicalPumpIsOffline } from './schematic/physicalPump'
+import { displayPumpStatus } from './schematic/display'
 
 type Props = {
   state?: TwinLiveState
@@ -119,8 +118,29 @@ export default function OperationalTwinView({
   onDraftChange,
 }: Props) {
   const [selection, setSelection] = useState<ForecourtSelection>(null)
+  const [adminAlert, setAdminAlert] = useState<{
+    type: string
+    message: string
+    pumpId?: string
+    nozzleId?: string
+  } | null>(null)
   const now = useMinuteTick()
   const station = state?.station
+
+  useEffect(() => {
+    const onAlert = (ev: Event) => {
+      const detail = (ev as CustomEvent).detail || {}
+      if (detail.type !== 'POSSIBLE_UNINTENDED_FLOW') return
+      setAdminAlert({
+        type: String(detail.type),
+        message: String(detail.message || 'Possible unintended flow'),
+        pumpId: detail.pumpId ? String(detail.pumpId) : undefined,
+        nozzleId: detail.nozzleId ? String(detail.nozzleId) : undefined,
+      })
+    }
+    window.addEventListener('intelipump:admin-alert', onAlert)
+    return () => window.removeEventListener('intelipump:admin-alert', onAlert)
+  }, [])
 
   const stationKey =
     station?.mqttStationId || station?.stationCode || station?.name || null
@@ -140,9 +160,12 @@ export default function OperationalTwinView({
     return ids.filter(Boolean)
   }, [state?.pumps])
 
+  const nozzleCatalog = useMemo(() => catalogFromPumps(state?.pumps || []), [state?.pumps])
+
   const liveSales = useStationLiveSales({
     stationId: station?.mqttStationId || null,
     configuredPumpIds,
+    nozzleCatalog,
     enabled: Boolean(station?.mqttStationId),
   })
 
@@ -190,22 +213,89 @@ export default function OperationalTwinView({
         connections,
         catalogPumps,
       ),
-      pumps: (base.pumps || []).map((p) => {
-        const nozzles = (p.nozzles || []).map((n: Record<string, any>) => {
-          const keys = [n.sourceIdentifier, n.mqttNozzleId, n.mqttPumpId, n.nozzleCode]
-          const live = keys.map((k) => liveSales.pumpLiveState[canonicalPumpId(String(k || ''))]).find(Boolean)
-          if (!live?.latestSale) return n
+      pumps: (base.pumps || []).map((p: Record<string, any>) => {
+        const catalogNozzles = p.nozzles || []
+        const dispenserOffline = physicalPumpIsOffline(
+          p.inferredStatus,
+          catalogNozzles.map((n: Record<string, any>) => n.inferredStatus),
+        )
+        const nozzles = catalogNozzles.map((n: Record<string, any>) => {
+          const session = findSession(
+            liveSales.nozzleSessions || {},
+            String(base.station?.mqttStationId || base.station?.stationCode || _stationId || ''),
+            [p.mqttPumpId, p.pumpCode, getConfiguredPumpId(p), p.id],
+            [n.nozzleCode, n.mqttNozzleId, n.id, n.nozzleNumber != null ? `nozzle-${n.nozzleNumber}` : null, n.sourceIdentifier],
+          )
+          if (session) {
+            const display = operationalDisplay(session)
+            const liveOpen = display === 'DISPENSING' || display === 'SALE_COMPLETED'
+            const lastAmount =
+              session.lastCompleted?.amount ??
+              n.lastCompletedAmount ??
+              n.lastTransactionAmount ??
+              null
+            const lastVolume =
+              session.lastCompleted?.volumeLiters ??
+              n.lastCompletedVolume ??
+              n.lastTransactionVolume ??
+              null
+            // Keep totals on the nozzle continuously — never flash empty between
+            // live ticks or when flipping SALE_COMPLETED → LAST SALE.
+            const shownAmount = liveOpen
+              ? session.amount
+              : lastAmount ?? session.amount
+            const shownVolume = liveOpen
+              ? session.volumeLiters
+              : lastVolume ?? session.volumeLiters
+            const equipmentStatus = liveOpen
+              ? display === 'SALE_COMPLETED'
+                ? 'SALE_COMPLETED'
+                : 'DISPENSING'
+              : display === 'READY'
+                ? 'READY'
+                : dispenserOffline || displayPumpStatus(n.inferredStatus) === 'OFFLINE'
+                  ? 'OFFLINE'
+                  : 'IDLE'
+            return {
+              ...n,
+              liveAmount: liveOpen ? shownAmount : null,
+              liveVolume: liveOpen ? shownVolume : null,
+              livePricePerLitre: liveOpen ? session.pricePerLiter : null,
+              lastCompletedAmount: lastAmount,
+              lastCompletedVolume: lastVolume,
+              lastTransactionAmount: lastAmount,
+              lastTransactionVolume: lastVolume,
+              lastTransactionAt:
+                session.lastCompleted?.completedAt || session.completedAt || n.lastTransactionAt,
+              lastTransactionPrice: session.lastCompleted?.pricePerLiter ?? session.pricePerLiter,
+              livePresentation: display === 'LAST_SALE' ? 'IDLE' : display,
+              liveTransactionId: session.transactionId,
+              liveSequence: session.sequence,
+              startedAt: session.startedAt,
+              mappingWarning: session.mappingWarning,
+              product: session.product || n.product,
+              inferredStatus: equipmentStatus,
+            }
+          }
+          // No live session: only this nozzle's twin last-sale fields (never
+          // pump-level shared totals that would duplicate across hoses).
           return {
             ...n,
-            lastTransactionAmount: live.latestSale.amount,
-            lastTransactionVolume: live.latestSale.volumeLiters,
-            lastTransactionAt: live.lastSaleAt,
-            product: live.latestSale.product || n.product,
-            inferredStatus: livePumpInferredStatus(liveOperational, live, n.inferredStatus),
+            liveAmount: null,
+            liveVolume: null,
+            lastCompletedAmount: n.lastTransactionAmount ?? n.lastCompletedAmount ?? null,
+            lastCompletedVolume: n.lastTransactionVolume ?? n.lastCompletedVolume ?? null,
+            inferredStatus:
+              dispenserOffline && displayPumpStatus(n.inferredStatus) !== 'DISPENSING'
+                ? 'OFFLINE'
+                : displayPumpStatus(n.inferredStatus) === 'DISPENSING'
+                  ? 'IDLE'
+                  : n.inferredStatus,
           }
         })
         const key = canonicalPumpId(getConfiguredPumpId(p))
         const live = liveSales.pumpLiveState[key]
+        // Never infer whole-pump DISPENSING for dual-hose cards — nozzles own live state.
         const inferred = nozzles.length
           ? undefined
           : live?.latestSale
@@ -220,7 +310,9 @@ export default function OperationalTwinView({
           lastTransactionAt: live?.lastSaleAt ?? p.lastTransactionAt,
           product: live?.latestSale?.product || p.product,
           recentSaleCount: live?.todayTransactionCount,
-          isRecentlyActive: live?.isRecentlyActive,
+          isRecentlyActive: nozzles.some(
+            (n: Record<string, any>) => displayPumpStatus(n.inferredStatus) === 'DISPENSING',
+          ),
           inferredStatus:
             nozzles.length > 0
               ? aggregatePhysicalPumpStatus(nozzles.map((n: Record<string, any>) => n.inferredStatus))
@@ -235,34 +327,93 @@ export default function OperationalTwinView({
     edgeStatus,
     liveSales.summary,
     liveSales.pumpLiveState,
+    liveSales.nozzleSessions,
     liveSales.sales,
   ])
 
   const pipeActiveByPump = useMemo(() => {
-    const live = liveDispensingFromPumpState(
+    // Authoritative source: per-nozzle flowing sessions.
+    // Never light branches from pump-scoped playback without a nozzleId
+    // (that incorrectly animated both branches when only nozzle-2 dispensed).
+    const merged: Record<string, import('./pipe/pipeTypes').ActiveDispensingState> = {}
+    const connections = getConnections(displayState) || []
+
+  const live = liveDispensingFromPumpState(
       liveSales.pumpLiveState,
-      getConnections(displayState),
+      connections,
       (displayState?.pumps || []) as Record<string, unknown>[],
       0,
     )
-    const merged = { ...(activeByPump || {}) }
     for (const [key, s] of Object.entries(live)) {
-      merged[key] = s
+      // Ignore pump-scoped rows without a hose id — those incorrectly lit both branches.
+      if (!s.nozzleId) continue
+      // Prefer station|pump|nozzle session keys; skip bare pump ids that lack nozzle isolation.
+      if (!key.includes('|') && !String(s.nozzleId).includes('nozzle') && key === canonicalPumpId(s.pumpId)) {
+        continue
+      }
+      merged[key] = { ...s }
+    }
+
+    for (const [key, s] of Object.entries(activeByPump || {})) {
+      if (s.phase !== 'DISPENSING') continue
+      if (!s.nozzleId) continue
+      merged[key] = { ...s }
+    }
+
+    for (const session of flowingSessions(liveSales.nozzleSessions || {})) {
+      const conn = connections.find((c) => {
+        const ids = [
+          c.nozzleId,
+          c.mqttNozzleId,
+          c.nozzleCode,
+          c.sourceIdentifier,
+          c.destinationNozzleId,
+        ]
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+        if (ids.includes(String(session.nozzleId || '').trim())) return true
+        const source = String(c.sourceIdentifier || '').trim()
+        if (!source) return false
+        const nozzleNum = String(session.nozzleId || '').replace(/^nozzle-/i, '')
+        return source === `pump-${nozzleNum}` || source === session.nozzleId
+      })
+      const key = session.key || `${session.pumpId}|${session.nozzleId}`
+      merged[key] = {
+        transactionId: session.transactionId || '',
+        pumpId: session.pumpId,
+        nozzleId: session.nozzleId,
+        stationId: session.stationId,
+        tankId: conn ? String(conn.tankId || '') : '',
+        finalVolume: Number(session.volumeLiters || 0),
+        finalAmount: Number(session.amount || 0),
+        currentVolume: Number(session.volumeLiters || 0),
+        currentAmount: Number(session.amount || 0),
+        phase: 'DISPENSING',
+        startedAt: 0,
+        durationMs: 1,
+        product: session.product || undefined,
+        connectionId: conn?.id ? String(conn.id) : undefined,
+        mappingWarning: session.mappingWarning,
+      }
     }
     for (const [key, s] of Object.entries(merged)) {
-      const row = liveSales.pumpLiveState[key]
-      if (s.phase !== 'DISPENSING') delete merged[key]
-      else if (row && !row.isRecentlyActive) delete merged[key]
-      else if (completedSaleStatus(row?.latestSale?.status)) delete merged[key]
+      if (s.phase !== 'DISPENSING' || !s.nozzleId || !s.transactionId) delete merged[key]
+    }
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('INTELIPUMP_DEBUG_LIVE') === '1') {
+      // eslint-disable-next-line no-console
+      console.debug('[intelipump-pipe]', {
+        flowing: Object.values(merged).map((s) => ({
+          pumpId: s.pumpId,
+          nozzleId: s.nozzleId,
+          transactionId: s.transactionId,
+          connectionId: s.connectionId,
+        })),
+      })
     }
     return merged
-  }, [activeByPump, displayState, liveSales.pumpLiveState])
+  }, [activeByPump, displayState, liveSales.pumpLiveState, liveSales.nozzleSessions])
 
   const displayStation = displayState?.station
-  const tanks = displayState?.tanks || []
-  const pumps = displayState?.pumps || []
-  const reconStatus = String(displayState?.reconciliationStatus || 'NONE')
-
   const salesToday = liveSales.summary?.totalAmount ?? displayState?.salesToday
   const volumeToday = liveSales.summary?.totalVolumeLiters ?? displayState?.volumeToday
   const txToday = liveSales.summary?.transactionCount ?? displayState?.transactionCountToday
@@ -300,7 +451,7 @@ export default function OperationalTwinView({
             </div>
           </div>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
           <StatusPill
             label="Operational"
             value={liveOperational}
@@ -328,21 +479,32 @@ export default function OperationalTwinView({
           <StatusPill label="Sales today" value={fmtNaira(salesToday)} tone="green" />
           <StatusPill label="Volume today" value={fmtLiters(volumeToday)} tone="neutral" />
           <StatusPill label="Tx today" value={String(txToday ?? 0)} tone="neutral" />
-          <StatusPill
-            label="Reconciliation"
-            value={reconStatus}
-            tone={
-              reconStatus === 'APPROVED' || reconStatus === 'BALANCED'
-                ? 'green'
-                : reconStatus === 'VARIANCE' || reconStatus === 'FAILED'
-                  ? 'amber'
-                  : 'neutral'
-            }
-          />
         </div>
         {liveSales.restError && (
           <div className="text-xs text-amber-300 bg-amber-950/30 border border-amber-900 rounded px-3 py-2">
             {liveSales.restError} — showing last successful values when available.
+          </div>
+        )}
+        {adminAlert && (
+          <div className="text-xs text-amber-100 bg-amber-950/50 border border-amber-700 rounded px-3 py-2 flex items-start justify-between gap-3">
+            <div>
+              <div className="font-semibold uppercase tracking-wide text-amber-200">
+                Admin alert · {adminAlert.type.replace(/_/g, ' ')}
+              </div>
+              <div className="mt-0.5 opacity-90">{adminAlert.message}</div>
+              {(adminAlert.pumpId || adminAlert.nozzleId) && (
+                <div className="mt-0.5 opacity-70">
+                  {[adminAlert.pumpId, adminAlert.nozzleId].filter(Boolean).join(' / ')}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              className="shrink-0 text-amber-200/80 hover:text-white underline"
+              onClick={() => setAdminAlert(null)}
+            >
+              Dismiss
+            </button>
           </div>
         )}
         {liveOperational === 'CLOSED' && (
@@ -372,62 +534,6 @@ export default function OperationalTwinView({
         viewportWidth={typeof window === 'undefined' ? 1440 : window.innerWidth}
         onDraftChange={onDraftChange}
       />
-
-      <div className="space-y-4">
-        <details className="card">
-          <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
-            Tank list ({tanks.length})
-          </summary>
-          <div className="mt-3 grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {tanks.map((t) => (
-              <TankCard key={String(t.id)} tank={t} />
-            ))}
-          </div>
-        </details>
-
-        <details className="card" open={pumps.length <= 8} data-testid="pump-list">
-          <summary className="text-sm font-semibold text-slate-300 cursor-pointer">
-            Pump list ({pumps.length})
-          </summary>
-          <div className={`mt-3 grid gap-3 ${pumpGridClass(pumps.length)}`}>
-            {pumps.map((p) => {
-              const nozzles = p.nozzles || []
-              const nozzleLive = nozzles.some((n: Record<string, any>) => {
-                const keys = [n.sourceIdentifier, n.mqttNozzleId, n.mqttPumpId]
-                return keys.some((k) => {
-                  const live = liveSales.pumpLiveState[canonicalPumpId(String(k || ''))]
-                  return live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status)
-                })
-              })
-              const key = canonicalPumpId(getConfiguredPumpId(p))
-              const live = liveSales.pumpLiveState[key]
-              const liveDispensing =
-                nozzleLive ||
-                Boolean(live?.isRecentlyActive && inProgressSaleStatus(live.latestSale?.status))
-              const active = activePumpId != null && pumpMatchesId(p, activePumpId)
-              const playbackPulse = active && phase === 'pulse'
-              return (
-                <PumpCard
-                  key={String(p.id)}
-                  pump={p}
-                  animating={liveDispensing || playbackPulse}
-                  phase={
-                    liveDispensing || playbackPulse
-                      ? 'pulse'
-                      : active && phase === 'completed'
-                        ? 'completed'
-                        : 'idle'
-                  }
-                  flashAmount={active ? flashTx?.amount : live?.latestSale?.amount}
-                  flashVolume={active ? flashTx?.volumeLiters : live?.latestSale?.volumeLiters}
-                  activePumpId={activePumpId}
-                  recentCount={live?.todayTransactionCount}
-                />
-              )
-            })}
-          </div>
-        </details>
-      </div>
     </div>
   )
 }

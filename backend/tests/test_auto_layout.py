@@ -137,7 +137,7 @@ def test_auto_layout_island_and_row_gaps():
         top = next(i for i in islands if round(i["y"], 1) == rows[0])
         bot = next(i for i in islands if round(i["y"], 1) == rows[1])
         vgap = bot["y"] - (top["y"] + top["height"])
-        assert vgap >= 80
+        assert vgap >= 100
     layout = _layout_for(1)
     assert sum(1 for i in layout["items"] if i["assetType"] == "PUMP") == 1
 

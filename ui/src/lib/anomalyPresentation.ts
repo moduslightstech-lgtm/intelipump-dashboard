@@ -1,3 +1,4 @@
+import { formatStatusLabel } from './enumPresentation'
 import { paginateItems } from './salesDateFilter'
 
 export const ANOMALY_PAGE_SIZES = [10, 25, 50] as const
@@ -106,10 +107,7 @@ export const ISSUE_FILTERS: { id: AnomalyIssueFilter; label: string }[] = [
 ]
 
 function humanizeCode(code: string) {
-  return code
-    .replace(/_/g, ' ')
-    .toLowerCase()
-    .replace(/\b\w/g, (ch) => ch.toUpperCase())
+  return formatStatusLabel(code)
 }
 
 export function getAnomalyLabel(flag?: string | null) {

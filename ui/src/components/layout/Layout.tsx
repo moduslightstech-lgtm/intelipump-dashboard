@@ -127,6 +127,7 @@ const ADMIN_NAV: NavItem[] = [
   { to: '/stations', label: 'Stations', icon: Icons.stations },
   { to: '/admin/stations', label: 'Admin Stations', icon: Icons.admin },
   { to: '/station-manager/tank-readings', label: 'Tank Reading', icon: Icons.tanks },
+  { to: '/fuel-deliveries', label: 'Fuel Deliveries', icon: Icons.tanks },
   { to: '/devices', label: 'Devices', icon: Icons.devices },
   { to: '/tanks', label: 'Tanks', icon: Icons.tanks },
   { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
@@ -139,6 +140,7 @@ const EXEC_NAV: NavItem[] = [
   { to: '/executive', label: 'Executive Overview', end: true, icon: Icons.overview },
   { to: '/transactions', label: 'Sales', icon: Icons.transactions },
   { to: '/reconciliations', label: 'Reconciliation', icon: Icons.recon },
+  { to: '/fuel-deliveries', label: 'Fuel Deliveries', icon: Icons.tanks },
   { to: '/stations', label: 'Stations', icon: Icons.stations },
   { to: '/digital-twin', label: 'Digital Twin', icon: Icons.twin },
   { to: '/alerts', label: 'Alerts', icon: Icons.alerts },
@@ -147,6 +149,7 @@ const EXEC_NAV: NavItem[] = [
 const MANAGER_NAV: NavItem[] = [
   { to: '/', label: 'Overview', end: true, icon: Icons.overview },
   { to: '/station-manager/tank-readings', label: 'Tank Reading', icon: Icons.tanks },
+  { to: '/fuel-deliveries', label: 'Fuel Deliveries', icon: Icons.tanks },
   { to: '/station-manager/history', label: 'Submission History', icon: Icons.transactions },
   { to: '/station-manager/profile', label: 'Profile', icon: Icons.profile },
 ]

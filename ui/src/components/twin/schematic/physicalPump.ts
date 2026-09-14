@@ -1,8 +1,12 @@
 import { displayPumpStatus } from './display'
 
+export function isChannelStyleName(name: string | null | undefined): boolean {
+  return /^pump[\s_-]*\d+(-n\d+)?$/i.test(String(name || '').trim())
+}
+
 export function friendlyNozzleName(nozzle: Record<string, any>, index: number): string {
   const name = String(nozzle.name || '').trim()
-  if (name && !/^pump-\d+$/i.test(name) && !/^pump-\d+-n\d+$/i.test(name)) return name
+  if (name && !isChannelStyleName(name)) return name
   const n = Number(nozzle.nozzleNumber ?? nozzle.nozzle_number ?? index + 1)
   return `Nozzle ${Number.isFinite(n) ? n : index + 1}`
 }
@@ -36,10 +40,29 @@ export function nozzlesForPhysicalPump(pump: Record<string, any>): Record<string
   ]
 }
 
+export function isEquipmentOffline(status?: string | null): boolean {
+  return displayPumpStatus(status) === 'OFFLINE'
+}
+
+/** Last-sale history must not keep one nozzle Idle when the dispenser is offline. */
+export function physicalPumpIsOffline(
+  pumpStatus?: string | null,
+  nozzleStatuses: Array<string | null | undefined> = [],
+  livePresentations: Array<string | null | undefined> = [],
+): boolean {
+  const anyLive = livePresentations.some((s) => {
+    const shown = displayPumpStatus(s)
+    return shown === 'DISPENSING' || shown === 'SALE_COMPLETED'
+  })
+  if (anyLive) return false
+  return isEquipmentOffline(pumpStatus) || nozzleStatuses.some((s) => isEquipmentOffline(s))
+}
+
 export function aggregatePhysicalPumpStatus(nozzleStatuses: Array<string | null | undefined>): string {
   const norms = nozzleStatuses.map((s) => displayPumpStatus(s))
   if (!norms.length) return 'UNKNOWN'
   if (norms.some((s) => s === 'DISPENSING')) return 'DISPENSING'
+  if (norms.some((s) => s === 'SALE_COMPLETED')) return 'SALE_COMPLETED'
   if (norms.some((s) => s === 'FAULT')) return 'FAULT'
   if (norms.every((s) => s === 'OFFLINE')) return 'OFFLINE'
   if (norms.every((s) => s === 'POWERED_OFF')) return 'POWERED_OFF'

@@ -701,7 +701,7 @@ def calculate_from_tank_submission(
                 FuelDelivery.station_id == station.id,
                 FuelDelivery.tank_id == tank.id,
                 FuelDelivery.business_date == business_date,
-                FuelDelivery.status == "CONFIRMED",
+                FuelDelivery.status.in_(("COMPLETED", "CONFIRMED", "ACCEPTED", "POSTED")),
             )
         )
         delivery_val = _dec(deliveries)

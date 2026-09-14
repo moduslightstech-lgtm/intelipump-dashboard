@@ -8,7 +8,15 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Tuple, Union
 
 from app.models import NormalizedTransaction, ValidationError
-from app.phase9 import FILLING_UPDATED, event_type_of, is_phase9_envelope, scaled_sale_fields
+from app.phase9 import (
+    FILL_COMPLETE_EVENTS,
+    INCIDENT_EVENTS,
+    LIVE_FILL_EVENTS,
+    TRANSACTION_STARTED_EVENTS,
+    event_type_of,
+    is_phase9_envelope,
+    scaled_sale_fields,
+)
 
 
 def _first(payload: dict[str, Any], *keys: str) -> Any:
@@ -159,6 +167,11 @@ def normalize_transaction(
             transaction_completed_at=completed,
             raw_payload=dict(payload),
             source_topic=source_topic,  # exact topic string as received
+            deduplication_key=(
+                str(_first(payload, "deduplicationKey", "deduplication_key")).strip()
+                if _first(payload, "deduplicationKey", "deduplication_key") is not None
+                else None
+            ),
         ),
         None,
     )
@@ -203,9 +216,13 @@ def _normalize_phase9_transaction(
     if price is None and volume > 0:
         price = (amount / volume).quantize(Decimal("0.01"))
     event = event_type_of(payload)
-    in_progress = event == FILLING_UPDATED
+    in_progress = event in LIVE_FILL_EVENTS
+    # TRANSACTION_STARTED is published only after verified dispensing begins.
+    verified_started = event in TRANSACTION_STARTED_EVENTS
+    is_fill_complete = event in FILL_COMPLETE_EVENTS
+    is_incident = event in INCIDENT_EVENTS
     if price is None:
-        if in_progress:
+        if in_progress or verified_started or is_incident:
             price = Decimal("0")
         else:
             return None, ValidationError(
@@ -214,10 +231,19 @@ def _normalize_phase9_transaction(
             )
 
     started = _parse_timestamp(fields["started_at"])
-    completed = None if in_progress else _parse_timestamp(
+    completed = None if (in_progress or verified_started) else _parse_timestamp(
         fields["completed_at"] or fields["occurred_at"]
     )
     device_timestamp = _parse_timestamp(fields["occurred_at"]) or completed
+
+    if is_incident:
+        status = event
+    elif in_progress or verified_started:
+        status = "DISPENSING"
+    elif is_fill_complete:
+        status = "COMPLETED"
+    else:
+        status = fields["status"] or "COMPLETED"
 
     return (
         NormalizedTransaction(
@@ -234,7 +260,7 @@ def _normalize_phase9_transaction(
             currency=fields["currency"],
             price_per_liter=price,
             raw_frame=None,
-            status="DISPENSING" if in_progress else fields["status"],
+            status=status,
             device_timestamp=device_timestamp,
             transaction_started_at=started,
             transaction_completed_at=completed,

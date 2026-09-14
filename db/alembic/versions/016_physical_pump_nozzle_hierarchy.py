@@ -24,6 +24,11 @@ MQTT_STATION = "InteliPump-US-Lab"
 
 
 def upgrade() -> None:
+    # Alembic default version_num is VARCHAR(32). This revision id is 34 chars.
+    op.execute(
+        "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(128)"
+    )
+
     op.execute("ALTER TABLE nozzles ADD COLUMN IF NOT EXISTS name VARCHAR")
     op.execute("ALTER TABLE nozzles ADD COLUMN IF NOT EXISTS side_id VARCHAR")
     op.execute("ALTER TABLE nozzles ADD COLUMN IF NOT EXISTS source_identifier VARCHAR")
@@ -72,6 +77,22 @@ def upgrade() -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_nozzles_source_identifier
             ON nozzles (station_id, source_identifier)
+        """
+    )
+
+    # 004 only allowed station/pump. Nozzle aliases are required for US Lab
+    # (legacy channel pump-1/pump-2 → nozzle-1/nozzle-2).
+    op.execute(
+        """
+        ALTER TABLE mqtt_identity_map
+            DROP CONSTRAINT IF EXISTS mqtt_identity_map_entity_type_check
+        """
+    )
+    op.execute(
+        """
+        ALTER TABLE mqtt_identity_map
+            ADD CONSTRAINT mqtt_identity_map_entity_type_check
+            CHECK (entity_type IN ('station', 'pump', 'nozzle'))
         """
     )
 

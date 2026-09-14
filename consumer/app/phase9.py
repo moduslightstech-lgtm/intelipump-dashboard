@@ -27,12 +27,11 @@ DEVICE_HEARTBEAT_EVENTS = frozenset({"HEARTBEAT"})
 DEVICE_STATUS_EVENTS = frozenset({"DEVICE_ONLINE", "DEVICE_OFFLINE"})
 
 FILLING_UPDATED = "FILLING_UPDATED"
+DISPENSING_UPDATE = "DISPENSING_UPDATE"
+LIVE_FILL_EVENTS = frozenset({FILLING_UPDATED, DISPENSING_UPDATE})
 
 IGNORED_EVENTS = frozenset(
     {
-        "TRANSACTION_STARTED",
-        "FILLING_STARTED",
-        "FILLING_COMPLETED",
         "STATE_CHANGED",
         "PUMP_STATE_CHANGED",
         "ALARM_ACTIVE",
@@ -41,6 +40,30 @@ IGNORED_EVENTS = frozenset(
         "AUDIT_EVENT",
         "COMMAND_RESULT",
         "COMMAND_INTAKE",
+    }
+)
+
+# Hose lift / start → treat as live dispensing (zero or partial totals OK).
+TRANSACTION_STARTED_EVENTS = frozenset(
+    {
+        "TRANSACTION_STARTED",
+        "FILLING_STARTED",
+    }
+)
+
+# Hang-up / fill complete without a separate TRANSACTION_COMPLETED envelope.
+FILL_COMPLETE_EVENTS = frozenset(
+    {
+        "FILLING_COMPLETED",
+        "TRANSACTION_COMPLETED",
+    }
+)
+
+# Admin / non-financial nozzle events (not normal sales).
+INCIDENT_EVENTS = frozenset(
+    {
+        "POSSIBLE_UNINTENDED_FLOW",
+        "CANCELLED_NO_SALE",
     }
 )
 
@@ -69,12 +92,44 @@ def is_phase9_envelope(payload: dict[str, Any]) -> bool:
     event = event_type_of(payload)
     if event in DEVICE_HEARTBEAT_EVENTS | DEVICE_STATUS_EVENTS | IGNORED_EVENTS:
         return True
-    if event == TRANSACTION_COMPLETED:
+    if (
+        event == TRANSACTION_COMPLETED
+        or event in LIVE_FILL_EVENTS
+        or event in TRANSACTION_STARTED_EVENTS
+        or event in FILL_COMPLETE_EVENTS
+        or event in INCIDENT_EVENTS
+    ):
         return True
     inner = payload.get("payload")
     return isinstance(inner, dict) and (
         "raw_volume" in inner or "rawVolume" in inner or "transaction_uuid" in inner
     )
+
+
+def classify_phase9_message(topic: str, payload: dict[str, Any]) -> str:
+    """Return routing kind for one MQTT message."""
+    event = event_type_of(payload)
+    if event in IGNORED_EVENTS:
+        return KIND_IGNORED
+    if event in DEVICE_HEARTBEAT_EVENTS or is_phase9_device_heartbeat_topic(topic):
+        return KIND_HEARTBEAT
+    if event in DEVICE_STATUS_EVENTS or is_phase9_device_status_topic(topic):
+        return KIND_DEVICE_STATUS
+    tx_events = {
+        TRANSACTION_COMPLETED,
+        *LIVE_FILL_EVENTS,
+        *TRANSACTION_STARTED_EVENTS,
+        *FILL_COMPLETE_EVENTS,
+        *INCIDENT_EVENTS,
+    }
+    if event in tx_events or (is_phase9_transactions_topic(topic) and event in tx_events):
+        return KIND_TRANSACTION
+    if is_phase9_transactions_topic(topic) and not event:
+        # Topic-only: persist only completed sales, never fill/start noise.
+        return KIND_TRANSACTION
+    if event or is_phase9_envelope(payload) or is_phase9_transactions_topic(topic):
+        return KIND_UNSUPPORTED
+    return KIND_UNSUPPORTED
 
 
 def inner_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,28 +177,6 @@ def extract_phase9_device_id(topic: str) -> Optional[str]:
         if after.endswith(suffix) or suffix in after:
             return _as_str(after.split(suffix, 1)[0])
     return _as_str(after.strip("/"))
-
-
-def classify_phase9_message(topic: str, payload: dict[str, Any]) -> str:
-    """Return routing kind for one MQTT message."""
-    event = event_type_of(payload)
-    if event in IGNORED_EVENTS:
-        return KIND_IGNORED
-    if event in DEVICE_HEARTBEAT_EVENTS or is_phase9_device_heartbeat_topic(topic):
-        return KIND_HEARTBEAT
-    if event in DEVICE_STATUS_EVENTS or is_phase9_device_status_topic(topic):
-        return KIND_DEVICE_STATUS
-    if event in {TRANSACTION_COMPLETED, FILLING_UPDATED} or (
-        is_phase9_transactions_topic(topic)
-        and event in {TRANSACTION_COMPLETED, FILLING_UPDATED}
-    ):
-        return KIND_TRANSACTION
-    if is_phase9_transactions_topic(topic) and not event:
-        # Topic-only: persist only completed sales, never fill/start noise.
-        return KIND_TRANSACTION
-    if event or is_phase9_envelope(payload) or is_phase9_transactions_topic(topic):
-        return KIND_UNSUPPORTED
-    return KIND_UNSUPPORTED
 
 
 def flatten_device_fields(payload: dict[str, Any]) -> dict[str, Any]:
@@ -217,6 +250,17 @@ def scale_raw(raw: Any, decimals: int) -> Optional[Decimal]:
     return quantized
 
 
+def _optional_decimal(value: Any) -> Optional[Decimal]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
     """Identity + scaled money/volume from a Phase 9 transaction envelope."""
     inner = inner_payload(payload)
@@ -234,6 +278,24 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
     )
     raw_currency = _as_str(first_present(inner, "currency") or first_present(payload, "currency"))
     currency = "NGN" if not raw_currency or raw_currency.upper() == "USD" else raw_currency
+    volume = scale_raw(first_present(inner, "raw_volume", "rawVolume"), volume_decimals)
+    if volume is None:
+        volume = _optional_decimal(
+            first_present(inner, "volumeLiters", "volume_liters")
+            or first_present(payload, "volumeLiters", "volume_liters")
+        )
+    amount = scale_raw(first_present(inner, "raw_amount", "rawAmount"), amount_decimals)
+    if amount is None:
+        amount = _optional_decimal(first_present(inner, "amount") or first_present(payload, "amount"))
+    price = scale_raw(
+        first_present(inner, "raw_unit_price", "rawUnitPrice", "raw_price", "rawPrice"),
+        price_decimals,
+    )
+    if price is None:
+        price = _optional_decimal(
+            first_present(inner, "pricePerLiter", "price_per_liter")
+            or first_present(payload, "pricePerLiter", "price_per_liter")
+        )
     return {
         "transaction_id": _as_str(
             first_present(
@@ -276,12 +338,9 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
         "volume_decimals": volume_decimals,
         "amount_decimals": amount_decimals,
         "price_decimals": price_decimals,
-        "volume": scale_raw(first_present(inner, "raw_volume", "rawVolume"), volume_decimals),
-        "amount": scale_raw(first_present(inner, "raw_amount", "rawAmount"), amount_decimals),
-        "price": scale_raw(
-            first_present(inner, "raw_unit_price", "rawUnitPrice", "raw_price", "rawPrice"),
-            price_decimals,
-        ),
+        "volume": volume,
+        "amount": amount,
+        "price": price,
         "currency": currency,
         "status": _as_str(
             first_present(inner, "final_status", "status") or first_present(payload, "status")

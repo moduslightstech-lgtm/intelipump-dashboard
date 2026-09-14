@@ -110,7 +110,15 @@ def create_station(
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> Station:
-    station = Station(**body.model_dump())
+    data = body.model_dump()
+    country = str(data.get("country") or "").strip().upper()
+    if country in {"NG", "NIGERIA"}:
+        data["timezone"] = data.get("timezone") or "Africa/Lagos"
+        if str(data.get("timezone") or "").strip() in {"", "America/Chicago"}:
+            data["timezone"] = "Africa/Lagos"
+    elif not data.get("timezone"):
+        data["timezone"] = "Africa/Lagos"
+    station = Station(**data)
     db.add(station)
     db.commit()
     db.refresh(station)
@@ -260,10 +268,14 @@ def update_device(
 
 @pumps_router.get("", response_model=list[PumpOut])
 def list_pumps(
+    include_inactive: bool = Query(False),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ) -> list[Pump]:
-    return list(db.scalars(select(Pump).order_by(Pump.pump_code)).all())
+    stmt = select(Pump).order_by(Pump.pump_code)
+    if not include_inactive:
+        stmt = stmt.where(Pump.active.is_(True))
+    return list(db.scalars(stmt).all())
 
 
 @pumps_router.post("", response_model=PumpOut, status_code=201)

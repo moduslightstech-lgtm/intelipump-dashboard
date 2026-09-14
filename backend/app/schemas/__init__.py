@@ -123,6 +123,14 @@ class StationCreate(BaseModel):
     operational_status: Optional[str] = None
     connectivity_status: Optional[str] = None
 
+    @model_validator(mode="after")
+    def default_nigeria_timezone(self) -> "StationCreate":
+        country = (self.country or "").strip().upper()
+        if country in {"NG", "NIGERIA"}:
+            if not self.timezone or self.timezone.strip() in {"America/Chicago", ""}:
+                self.timezone = "Africa/Lagos"
+        return self
+
 
 class StationUpdate(BaseModel):
     name: Optional[str] = None

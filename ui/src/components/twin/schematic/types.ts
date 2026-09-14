@@ -69,6 +69,7 @@ export type LayoutPersistItem = {
 
 export type LayoutPersist = {
   name: string
+  layout_version?: number
   canvas_width: number
   canvas_height: number
   items: LayoutPersistItem[]
@@ -79,5 +80,4 @@ export type SchematicSelection =
   | { kind: 'PUMP'; node: SchematicNode }
   | { kind: 'ISLAND'; node: SchematicNode }
   | { kind: 'PIPE'; routeId: string }
-  | { kind: 'OFFICE' | 'ENTRANCE' | 'EXIT'; node: SchematicNode }
   | null

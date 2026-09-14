@@ -1,16 +1,19 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { fmtLiters, fmtNaira, fmtTime } from '../../../api/client'
 import { displayPumpStatus, pumpStatusLabel, readingSourceLabel } from './display'
+import { hasMeaningfulSale } from './lcdDisplay'
 import type { SchematicNode, SchematicSelection, ValidatedConnection } from './types'
 
 type Props = {
   selection: SchematicSelection
   connections: ValidatedConnection[]
   nodes?: SchematicNode[]
+  stationId?: string | null
   onClose: () => void
 }
 
-export default function EquipmentDrawer({ selection, connections, nodes = [], onClose }: Props) {
+export default function EquipmentDrawer({ selection, connections, nodes = [], stationId, onClose }: Props) {
   if (!selection) return null
   return (
     <aside
@@ -25,13 +28,10 @@ export default function EquipmentDrawer({ selection, connections, nodes = [], on
       </div>
       <div className="space-y-2 p-3 pt-2 text-sm">
         {selection.kind === 'TANK' && <TankDetails node={selection.node} connections={connections} nodes={nodes} />}
-        {selection.kind === 'PUMP' && <PumpDetails node={selection.node} connections={connections} />}
-        {selection.kind === 'PIPE' && <PipeDetails routeId={selection.routeId} connections={connections} />}
-        {(selection.kind === 'OFFICE' ||
-          selection.kind === 'ENTRANCE' ||
-          selection.kind === 'EXIT') && (
-          <p className="text-slate-300">{selection.node.label}</p>
+        {selection.kind === 'PUMP' && (
+          <PumpDetails node={selection.node} connections={connections} stationId={stationId} />
         )}
+        {selection.kind === 'PIPE' && <PipeDetails routeId={selection.routeId} connections={connections} />}
       </div>
     </aside>
   )
@@ -72,9 +72,11 @@ function TankDetails({
 function PumpDetails({
   node,
   connections,
+  stationId,
 }: {
   node: SchematicNode
   connections: ValidatedConnection[]
+  stationId?: string | null
 }) {
   const p = node.raw
   const isPhysical = p.assetRole === 'PHYSICAL_PUMP'
@@ -86,17 +88,30 @@ function PumpDetails({
   )
   const lastStatus = String(p.lastTransactionStatus || '')
   const nozzles = Array.isArray(p.nozzles) ? p.nozzles : []
+  const product = node.product || p.product
+  const productMissing = !String(product || '').trim()
+  const mappingHref = stationId ? `/admin/stations/${stationId}/pumps` : '/admin/stations'
+  const showLastSale = hasMeaningfulSale(p.lastTransactionAmount, p.lastTransactionVolume)
   return (
     <>
       <h3 className="font-semibold text-white">{p.name || node.label}</h3>
       <Row label={isPhysical ? 'Pump code' : 'Nozzle'} value={isPhysical ? p.pumpCode : p.name || node.label} />
       <Row label="State" value={pumpStatusLabel(displayPumpStatus(node.status))} />
-      <Row label="Product" value={node.product || p.product || 'Product not mapped'} />
+      <Row label="Product" value={productMissing ? 'Product not mapped' : String(product)} />
+      {productMissing ? (
+        <p className="text-xs text-amber-200">
+          Product not mapped.{' '}
+          <Link className="underline" to={mappingHref}>
+            Assign a product in Administration
+          </Link>
+          .
+        </p>
+      ) : null}
       <Row label="Last activity" value={fmtTime(p.lastTransactionAt)} />
       {lastStatus.toUpperCase() === 'COMPLETED' ? (
         <p className="text-xs text-slate-400">Last sale completed</p>
       ) : null}
-      {p.lastTransactionAmount != null ? (
+      {showLastSale ? (
         <Row
           label="Last sale"
           value={`${fmtNaira(p.lastTransactionAmount)} · ${fmtLiters(p.lastTransactionVolume)}`}

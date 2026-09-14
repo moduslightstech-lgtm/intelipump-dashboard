@@ -14,18 +14,29 @@ import { canAccessPath, normalizeRole } from '../lib/roles'
 import type { PumpSale } from '../types/sales'
 
 describe('applyLiveStationStatus', () => {
-  it('clears pump OFFLINE when the live Pi is ONLINE', () => {
+  it('does not turn an offline physical pump Idle just because the Pi is ONLINE', () => {
     const next = applyLiveStationStatus(
       {
         station: { operationalStatus: 'OPEN', connectivityStatus: 'OFFLINE' },
-        pumps: [{ id: 'p1', inferredStatus: 'OFFLINE' }],
+        pumps: [
+          {
+            id: 'p1',
+            inferredStatus: 'OFFLINE',
+            nozzles: [
+              { id: 'n1', inferredStatus: 'OFFLINE' },
+              { id: 'n2', inferredStatus: 'OFFLINE' },
+            ],
+          },
+        ],
       },
       'OPEN',
       'ONLINE',
       'ONLINE',
     )
     expect(next?.station?.connectivityStatus).toBe('ONLINE')
-    expect(next?.pumps?.[0]?.inferredStatus).toBe('IDLE')
+    expect(next?.pumps?.[0]?.inferredStatus).toBe('OFFLINE')
+    expect(next?.pumps?.[0]?.nozzles?.[0]?.inferredStatus).toBe('OFFLINE')
+    expect(next?.pumps?.[0]?.nozzles?.[1]?.inferredStatus).toBe('OFFLINE')
   })
 
   it('overlays edge connectivity and schedule on twin state', () => {
@@ -217,7 +228,7 @@ describe('hang-up duplicate collapse', () => {
     ).toBe('IDLE')
   })
 
-  it('clears DISPENSING after live ticks go idle', () => {
+  it('keeps DISPENSING while live ticks continue even if the recent flag is false', () => {
     expect(
       livePumpInferredStatus(
         'OPEN',
@@ -241,12 +252,12 @@ describe('hang-up duplicate collapse', () => {
           todaySalesAmount: 2000,
           todayVolumeLiters: 1.7,
           todayTransactionCount: 1,
-          liveActivityStatus: 'IDLE',
+          liveActivityStatus: 'ACTIVE',
           isRecentlyActive: false,
         },
         'DISPENSING',
       ),
-    ).toBe('IDLE')
+    ).toBe('DISPENSING')
   })
 })
 

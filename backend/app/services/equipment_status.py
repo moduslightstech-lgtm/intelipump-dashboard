@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 COMPLETED_AS_IDLE = {
     "COMPLETED",
     "COMPLETE",
@@ -13,6 +15,7 @@ FAULT_STATES = {"FAULT", "ERROR"}
 OFFLINE_STATES = {"OFFLINE"}
 POWERED_OFF_STATES = {"POWERED_OFF", "CLOSED"}
 IDLE_STATES = {"IDLE", "AVAILABLE", "READY"}
+INTERRUPTED_STATES = {"INTERRUPTED", "STALE"}
 
 
 def normalize_equipment_status(status: str | None) -> str:
@@ -29,6 +32,8 @@ def normalize_equipment_status(status: str | None) -> str:
         return "OFFLINE"
     if s in IDLE_STATES:
         return "IDLE"
+    if s in INTERRUPTED_STATES:
+        return "INTERRUPTED"
     if s in {"INACTIVE"}:
         return "INACTIVE"
     return s or "UNKNOWN"
@@ -55,7 +60,7 @@ def aggregate_physical_pump_status(nozzle_statuses: list[str | None]) -> str:
         return "OFFLINE"
     if all(s == "POWERED_OFF" for s in norms):
         return "POWERED_OFF"
-    if any(s in {"IDLE", "AVAILABLE", "READY", "INACTIVE"} for s in norms):
+    if any(s in {"IDLE", "AVAILABLE", "READY", "INACTIVE", "INTERRUPTED"} for s in norms):
         return "IDLE"
     if any(s not in {"UNKNOWN"} for s in norms):
         return "IDLE"
@@ -64,7 +69,7 @@ def aggregate_physical_pump_status(nozzle_statuses: list[str | None]) -> str:
 
 def friendly_nozzle_name(nozzle: dict, index: int) -> str:
     name = str(nozzle.get("name") or "").strip()
-    if name and not name.lower().startswith("pump-"):
+    if name and not re.match(r"^pump[\s_-]*\d+(-n\d+)?$", name, re.I):
         return name
     number = nozzle.get("nozzleNumber") or nozzle.get("nozzle_number") or index + 1
     try:

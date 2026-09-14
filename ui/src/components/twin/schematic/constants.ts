@@ -16,21 +16,52 @@ export const TANK_INNER_Y = 8
 export const TANK_INNER_W = 172
 export const TANK_INNER_H = 62
 
-/** Authoritative pump card size — used by CSS, React Flow, and auto-layout. */
-export const PUMP_NODE_WIDTH = 196
-export const PUMP_NODE_HEIGHT = 136
+/** Authoritative physical dispenser size — CSS, React Flow, and auto-layout. */
+export const DISPENSER_WIDTH = 520
+/** Content-fitted card height (two nozzle panels). Measured layout may grow. */
+export const DISPENSER_HEIGHT = 320
+/** @deprecated Hoses removed; kept at 0 so layout math stays stable. */
+export const HOSE_OVERHANG = 0
+export const DISPENSER_HEADER_H = 36
+export const PIPE_PORT_SIZE = 18
+export const LCD_EXTRA_ROW_H = 0
+export const LAYOUT_SCHEMA_VERSION = 4
+
+/** Single tank→physical-pump supply handle (not per-nozzle). */
+export const PUMP_SUPPLY_HANDLE_ID = 'in:supply'
+
+export function physicalPumpNodeId(physicalPumpId: string): string {
+  return `shell-${physicalPumpId}`
+}
+
+export function physicalPumpIdAliases(
+  physicalPumpId: string,
+  stationId?: string | null,
+): string[] {
+  const id = String(physicalPumpId || '').trim()
+  if (!id) return []
+  const station = String(stationId || '').trim()
+  return [
+    physicalPumpNodeId(id),
+    id,
+    station ? `pump:${station}:${id}` : '',
+    `island-${id}`,
+  ].filter(Boolean)
+}
+export const PUMP_NODE_WIDTH = DISPENSER_WIDTH
+export const PUMP_NODE_HEIGHT = DISPENSER_HEIGHT
 export const PUMP_W = PUMP_NODE_WIDTH
 export const PUMP_H = PUMP_NODE_HEIGHT
 export const PUMPS_PER_ISLAND = 2
-/** Visible gap between independent pump cards (borders must not touch). */
-export const PUMP_HORIZONTAL_GAP = 40
-export const PUMP_INNER_GAP = PUMP_HORIZONTAL_GAP
-export const PUMP_VERTICAL_GAP = 80
-export const ISLAND_PAD_X = 20
-export const ISLAND_PAD_Y = 36
-export const ISLAND_PAD_BOTTOM = 16
-export const ISLAND_W = ISLAND_PAD_X * 2 + PUMP_NODE_WIDTH * 2 + PUMP_HORIZONTAL_GAP
-export const ISLAND_H = ISLAND_PAD_Y + PUMP_NODE_HEIGHT + ISLAND_PAD_BOTTOM
+/** Visible gap between independent physical pump cabinets. */
+export const PUMP_HORIZONTAL_GAP = 64
+export const PUMP_INNER_GAP = 40
+export const PUMP_VERTICAL_GAP = 100
+export const ISLAND_PAD_X = HOSE_OVERHANG
+export const ISLAND_PAD_Y = DISPENSER_HEADER_H
+export const ISLAND_PAD_BOTTOM = 12
+export const ISLAND_W = HOSE_OVERHANG * 2 + DISPENSER_WIDTH
+export const ISLAND_H = DISPENSER_HEIGHT
 export const ISLAND_GAP_X = 64
 export const ISLAND_GAP_Y = PUMP_VERTICAL_GAP
 
@@ -39,6 +70,26 @@ export const OFFICE_H = 72
 export const OFFICE_CLEARANCE = 48
 export const MARKER_W = 96
 export const MARKER_H = 28
+
+/** Decorative site markers — never rendered on the tank/pump schematic. */
+export const DECORATIVE_LAYOUT_KINDS = ['OFFICE', 'ENTRANCE', 'EXIT'] as const
+export type DecorativeLayoutKind = (typeof DECORATIVE_LAYOUT_KINDS)[number]
+
+export const DECORATIVE_LAYOUT_IDS = new Set([
+  'office',
+  'entrance',
+  'exit',
+  'control-room',
+  'control_room',
+  'controlroom',
+])
+
+export const DECORATIVE_LAYOUT_LABELS = new Set([
+  'control room',
+  'entrance',
+  'exit',
+  'office',
+])
 
 export const MIN_NODE_GAP = PUMP_HORIZONTAL_GAP
 export const LANE_GAP = 20
@@ -77,7 +128,11 @@ export const DEFAULT_METRICS: LayoutMetrics = {
 
 export function islandSize(metrics: LayoutMetrics = DEFAULT_METRICS) {
   return {
-    w: ISLAND_PAD_X * 2 + metrics.pumpW * 2 + PUMP_HORIZONTAL_GAP,
-    h: ISLAND_PAD_Y + metrics.pumpH + ISLAND_PAD_BOTTOM,
+    w: HOSE_OVERHANG * 2 + metrics.pumpW,
+    h: metrics.pumpH,
   }
+}
+
+export function nozzleHandleId(nozzleId: string): string {
+  return `in:${nozzleId}`
 }

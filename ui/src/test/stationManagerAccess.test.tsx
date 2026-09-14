@@ -28,8 +28,11 @@ vi.mock('../api/client', () => ({
   getStationManagerCurrentReadings: vi.fn(async () => ({
     data: {
       businessDate: '2026-09-07',
+      todayBusinessDate: '2026-09-07',
       deadlineLocal: '22:30',
       uiStatus: 'SUBMITTED',
+      alreadySubmitted: true,
+      isLatePreview: false,
       station: { name: 'IntelliPump US Lab', stationCode: 'US-LAB-001' },
       batch: {
         status: 'SUBMITTED',
@@ -196,9 +199,9 @@ describe('Station Manager tank reading surfaces', () => {
   it('shows Tank Reading and a read-only submission summary without reconciliation fields', async () => {
     render(wrap(<TankReadingsPage />))
     expect(await screen.findByText('Tank Reading')).toBeInTheDocument()
-    expect(await screen.findByText("Today's Tank Reading")).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /View submission/i })).toBeInTheDocument()
     expect(screen.getAllByText('IntelliPump US Lab').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('SUBMITTED').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Submitted').length).toBeGreaterThan(0)
     expect(screen.getAllByText(/84,025 L|84025 L/).length).toBeGreaterThan(0)
     expect(screen.queryByText(/Pump sales/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/Reported collections/i)).not.toBeInTheDocument()

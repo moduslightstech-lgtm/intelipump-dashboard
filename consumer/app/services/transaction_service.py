@@ -12,6 +12,11 @@ from psycopg2.extras import Json
 from app.database import Database
 from app.models import NormalizedTransaction, ValidationError
 from app.services.identity import resolve_nozzle_uuid, resolve_pump_uuid, resolve_station_uuid
+from app.services.nozzle_identity import (
+    canonicalize_identity,
+    live_debug_enabled,
+    load_nozzle_catalog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +81,28 @@ class TransactionService:
             return "rejected"
 
         assert transaction is not None
+        status_u = (transaction.status or "").upper()
+        # Non-financial nozzle events: persist MQTT audit only — never sales rows.
+        if status_u in {"POSSIBLE_UNINTENDED_FLOW", "CANCELLED_NO_SALE"}:
+            self._save_mqtt_message(
+                topic=topic,
+                payload=json_payload,
+                qos=qos,
+                retained=retained,
+                status="processed_incident",
+                transaction_id=None,
+                error_message=None,
+                received_at=received_at,
+            )
+            logger.warning(
+                "Incident event (not a sale) topic=%s status=%s station=%s pump=%s nozzle=%s",
+                topic,
+                status_u,
+                transaction.station_id,
+                transaction.pump_id,
+                getattr(transaction, "nozzle_id", None),
+            )
+            return "processed_incident"
         try:
             inserted = self._insert_transaction(transaction, received_at)
             # deviceId is optional on the Pi payload; only touch devices when present
@@ -169,7 +196,11 @@ class TransactionService:
                 source_topic = COALESCE(
                     EXCLUDED.source_topic, pump_transactions.source_topic
                 )
-            RETURNING id
+            WHERE NOT (
+                pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
+            )
+            RETURNING id, (xmax = 0) AS is_insert
         """
         upsert_hierarchy = """
             ON CONFLICT (id) DO UPDATE SET
@@ -220,8 +251,15 @@ class TransactionService:
                 ),
                 mapping_status = COALESCE(
                     EXCLUDED.mapping_status, pump_transactions.mapping_status
+                ),
+                deduplication_key = COALESCE(
+                    pump_transactions.deduplication_key, EXCLUDED.deduplication_key
                 )
-            RETURNING id
+            WHERE NOT (
+                pump_transactions.status IN ('COMPLETED', 'COMPLETE')
+                AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
+            )
+            RETURNING id, (xmax = 0) AS is_insert
         """
         hierarchy_sql = f"""
             INSERT INTO pump_transactions (
@@ -229,11 +267,12 @@ class TransactionService:
                 volume_liters, amount, currency, price_per_liter, raw_frame,
                 status, source_topic, device_timestamp, transaction_started_at,
                 transaction_completed_at, raw_payload, received_at, created_at,
-                station_uuid, pump_uuid, nozzle_uuid, source_identifier, mapping_status
+                station_uuid, pump_uuid, nozzle_uuid, source_identifier, mapping_status,
+                deduplication_key
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             {upsert_hierarchy}
         """
@@ -277,24 +316,55 @@ class TransactionService:
 
         with self._db.connection() as conn:
             with conn.cursor() as cur:
+                received_pump = tx.pump_id
+                received_nozzle = tx.nozzle_id
+                station_uuid = resolve_station_uuid(cur, tx.station_id)
+                catalog = load_nozzle_catalog(cur, station_uuid) if station_uuid is not None else []
+                ident = canonicalize_identity(
+                    pump_id=tx.pump_id,
+                    nozzle_id=tx.nozzle_id,
+                    source_identifier=getattr(tx, "source_identifier", None),
+                    catalog=catalog,
+                )
+                if ident.mapped and ident.pump_id:
+                    tx.pump_id = ident.pump_id
+                    tx.nozzle_id = ident.nozzle_id
+                if not getattr(tx, "source_identifier", None):
+                    tx.source_identifier = ident.source_identifier or received_pump
+                if live_debug_enabled():
+                    logger.info(
+                        "live_identity source_channel=%s received_pump=%s received_nozzle=%s "
+                        "normalized_pump=%s normalized_nozzle=%s transaction_id=%s "
+                        "status=%s amount=%s volume=%s mapped=%s warning=%s",
+                        tx.source_identifier,
+                        received_pump,
+                        received_nozzle,
+                        tx.pump_id,
+                        tx.nozzle_id,
+                        tx.transaction_id,
+                        tx.status,
+                        tx.amount,
+                        tx.volume_liters,
+                        ident.mapped,
+                        ident.warning,
+                    )
                 if self._absorb_hangup_duplicate(cur, tx, received_at):
                     return False
-                station_uuid = resolve_station_uuid(cur, tx.station_id)
-                pump_uuid = (
-                    resolve_pump_uuid(cur, station_uuid, tx.pump_id)
-                    if station_uuid is not None
-                    else None
-                )
-                nozzle_uuid = None
-                if station_uuid is not None:
+                if self._dedupe_key_already_present(cur, tx):
+                    return False
+                pump_uuid = ident.pump_uuid
+                if pump_uuid is None and station_uuid is not None:
+                    pump_uuid = resolve_pump_uuid(cur, station_uuid, tx.pump_id)
+                nozzle_uuid = ident.nozzle_uuid
+                if nozzle_uuid is None and station_uuid is not None and ident.mapped:
                     nozzle_uuid = resolve_nozzle_uuid(
                         cur,
                         station_uuid,
                         pump_uuid=pump_uuid,
-                        mqtt_pump_id=getattr(tx, "source_identifier", None) or tx.pump_id,
-                        mqtt_nozzle_id=tx.nozzle_id or getattr(tx, "source_identifier", None),
+                        mqtt_pump_id=tx.source_identifier or tx.pump_id,
+                        mqtt_nozzle_id=tx.nozzle_id,
                     )
-                mapping_status = "MAPPED" if pump_uuid and nozzle_uuid else "REQUIRES_MAPPING"
+                mapping_status = "MAPPED" if ident.mapped and pump_uuid and nozzle_uuid else "REQUIRES_MAPPING"
                 if station_uuid is None:
                     logger.warning(
                         "No catalog mapping for MQTT stationId=%s "
@@ -302,6 +372,18 @@ class TransactionService:
                         tx.station_id,
                     )
                     mapping_status = "REQUIRES_MAPPING"
+                elif not ident.mapped:
+                    logger.warning(
+                        "identity_requires_mapping station=%s received_pump=%s received_nozzle=%s "
+                        "amount=%s volume=%s (sale retained; not assigned to nozzle-1)",
+                        tx.station_id,
+                        received_pump,
+                        received_nozzle,
+                        tx.amount,
+                        tx.volume_liters,
+                    )
+                    mapping_status = "REQUIRES_MAPPING"
+                    nozzle_uuid = None
                 elif pump_uuid is None:
                     logger.warning(
                         "No catalog mapping for MQTT pumpId=%s at station=%s "
@@ -343,6 +425,7 @@ class TransactionService:
                     str(nozzle_uuid) if nozzle_uuid else None,
                     getattr(tx, "source_identifier", None) or tx.pump_id,
                     mapping_status,
+                    getattr(tx, "deduplication_key", None),
                 )
                 resolved_params = hierarchy_params[:21]
                 extended_params = hierarchy_params[:19]
@@ -364,17 +447,35 @@ class TransactionService:
                 try:
                     cur.execute(hierarchy_sql, hierarchy_params)
                 except Exception as exc:
-                    if getattr(exc, "pgcode", None) != "42703":
+                    pgcode = getattr(exc, "pgcode", None)
+                    if pgcode == "23505":
+                        # Concurrent insert with same id or deduplication_key.
+                        conn.rollback()
+                        logger.info(
+                            "event=duplicate_transaction_ignored stationId=%s pumpId=%s "
+                            "nozzleId=%s transactionId=%s deduplicationKey=%s source=consumer_retry",
+                            tx.station_id,
+                            tx.pump_id,
+                            tx.nozzle_id,
+                            tx.transaction_id,
+                            getattr(tx, "deduplication_key", None),
+                        )
+                        return False
+                    if pgcode != "42703":
                         raise
                     conn.rollback()
                     logger.warning(
-                        "nozzle_uuid/mapping_status columns missing; "
+                        "nozzle_uuid/mapping_status/deduplication_key columns missing; "
                         "falling back to station_uuid/pump_uuid insert"
                     )
                     try:
                         cur.execute(resolved_sql, resolved_params)
                     except Exception as exc2:
-                        if getattr(exc2, "pgcode", None) != "42703":
+                        pgcode2 = getattr(exc2, "pgcode", None)
+                        if pgcode2 == "23505":
+                            conn.rollback()
+                            return False
+                        if pgcode2 != "42703":
                             raise
                         conn.rollback()
                         logger.warning(
@@ -384,7 +485,11 @@ class TransactionService:
                         try:
                             cur.execute(extended_sql, extended_params)
                         except Exception as exc3:
-                            if getattr(exc3, "pgcode", None) != "42703":
+                            pgcode3 = getattr(exc3, "pgcode", None)
+                            if pgcode3 == "23505":
+                                conn.rollback()
+                                return False
+                            if pgcode3 != "42703":
                                 raise
                             conn.rollback()
                             logger.warning(
@@ -393,37 +498,38 @@ class TransactionService:
                             )
                             cur.execute(legacy_sql, legacy_params)
                 row = cur.fetchone()
-                return row is not None
+                if row is None:
+                    return False
+                # Fresh insert or meaningful live update (incl. DISPENSING→COMPLETED).
+                # Already-complete same-id retries hit the WHERE filter → no row.
+                return True
 
-    def _absorb_hangup_duplicate(
-        self, cur, tx: NormalizedTransaction, received_at: datetime
-    ) -> bool:
-        """Fold holster twins into the live-fill row. Returns True if skipped."""
+    def _dedupe_key_already_present(self, cur, tx: NormalizedTransaction) -> bool:
+        """Return True when another row already owns this business key.
+
+        Prefer the unique index + 23505 for races; this is a fast path that
+        avoids INSERT when the duplicate is already visible.
+
+        When the existing row is still DISPENSING and this message is COMPLETED,
+        merge completion into that live row so SSE still emits the hang-up.
+        """
+        key = getattr(tx, "deduplication_key", None)
+        if not key:
+            return False
         status = (tx.status or "").upper()
-        incoming_done = status in {"COMPLETED", "COMPLETE"}
-        incoming_live = status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
-        if not incoming_done and not incoming_live:
+        # Live fills may share a key across updates with the same transaction id;
+        # only enforce cross-id dedupe for completed sales.
+        if status not in {"COMPLETED", "COMPLETE"}:
             return False
         try:
             cur.execute(
                 """
                 SELECT id, status FROM pump_transactions
-                WHERE station_id = %s AND pump_id = %s
-                  AND amount IS NOT DISTINCT FROM %s
-                  AND volume_liters IS NOT DISTINCT FROM %s
-                  AND id <> %s
-                  AND received_at >= %s
-                ORDER BY received_at DESC
+                WHERE station_id = %s
+                  AND deduplication_key = %s
                 LIMIT 1
                 """,
-                (
-                    tx.station_id,
-                    tx.pump_id,
-                    tx.amount,
-                    tx.volume_liters,
-                    tx.transaction_id,
-                    received_at - _HANGUP_DUP_WINDOW,
-                ),
+                (tx.station_id, key),
             )
         except Exception as exc:
             if getattr(exc, "pgcode", None) == "42703":
@@ -435,16 +541,166 @@ class TransactionService:
         existing_id = str(row[0])
         if existing_id == str(tx.transaction_id):
             return False
+        existing_status = str(row[1] or "").upper() if len(row) > 1 else ""
+        if existing_status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}:
+            try:
+                cur.execute(
+                    """
+                    UPDATE pump_transactions SET
+                        status = %s,
+                        amount = COALESCE(%s, amount),
+                        volume_liters = COALESCE(%s, volume_liters),
+                        price_per_liter = COALESCE(%s, price_per_liter),
+                        transaction_completed_at = COALESCE(%s, transaction_completed_at),
+                        raw_payload = %s,
+                        received_at = %s
+                    WHERE id = %s
+                    """,
+                    (
+                        tx.status,
+                        tx.amount,
+                        tx.volume_liters,
+                        tx.price_per_liter,
+                        tx.transaction_completed_at,
+                        Json(tx.raw_payload),
+                        datetime.now(timezone.utc),
+                        existing_id,
+                    ),
+                )
+            except Exception as exc:
+                if getattr(exc, "pgcode", None) == "42703":
+                    return True
+                raise
+            logger.info(
+                "merged_completion_into_live_by_dedupe_key into_id=%s dropped_id=%s key=%s",
+                existing_id,
+                tx.transaction_id,
+                key,
+            )
+            return True
+        logger.info(
+            "event=duplicate_transaction_ignored stationId=%s pumpId=%s nozzleId=%s "
+            "transactionId=%s existingId=%s deduplicationKey=%s source=mqtt_retry",
+            tx.station_id,
+            tx.pump_id,
+            tx.nozzle_id,
+            tx.transaction_id,
+            existing_id,
+            key,
+        )
+        return True
+
+    def _absorb_hangup_duplicate(
+        self, cur, tx: NormalizedTransaction, received_at: datetime
+    ) -> bool:
+        """Fold holster twins into the live-fill row. Returns True if skipped.
+
+        Must be nozzle-scoped: US Lab maps both DART addresses onto pump-1
+        (nozzle-1 vs nozzle-2). Matching only pump+amount+volume drops the
+        second hose's live ticks and completions.
+        """
+        status = (tx.status or "").upper()
+        incoming_done = status in {"COMPLETED", "COMPLETE"}
+        incoming_live = status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+        if not incoming_done and not incoming_live:
+            return False
+        nozzle = getattr(tx, "nozzle_id", None)
+        source = getattr(tx, "source_identifier", None)
+        try:
+            cur.execute(
+                """
+                SELECT id, status, deduplication_key FROM pump_transactions
+                WHERE station_id = %s AND pump_id = %s
+                  AND amount IS NOT DISTINCT FROM %s
+                  AND volume_liters IS NOT DISTINCT FROM %s
+                  AND id <> %s
+                  AND received_at >= %s
+                  AND (
+                    (nozzle_id IS NOT DISTINCT FROM %s)
+                    OR (
+                      %s IS NOT NULL
+                      AND source_identifier IS NOT DISTINCT FROM %s
+                    )
+                  )
+                ORDER BY received_at DESC
+                LIMIT 1
+                """,
+                (
+                    tx.station_id,
+                    tx.pump_id,
+                    tx.amount,
+                    tx.volume_liters,
+                    tx.transaction_id,
+                    received_at - _HANGUP_DUP_WINDOW,
+                    nozzle,
+                    source,
+                    source,
+                ),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                # Older schema without deduplication_key / source_identifier.
+                try:
+                    cur.execute(
+                        """
+                        SELECT id, status FROM pump_transactions
+                        WHERE station_id = %s AND pump_id = %s
+                          AND amount IS NOT DISTINCT FROM %s
+                          AND volume_liters IS NOT DISTINCT FROM %s
+                          AND id <> %s
+                          AND received_at >= %s
+                          AND nozzle_id IS NOT DISTINCT FROM %s
+                        ORDER BY received_at DESC
+                        LIMIT 1
+                        """,
+                        (
+                            tx.station_id,
+                            tx.pump_id,
+                            tx.amount,
+                            tx.volume_liters,
+                            tx.transaction_id,
+                            received_at - _HANGUP_DUP_WINDOW,
+                            nozzle,
+                        ),
+                    )
+                except Exception as exc2:
+                    if getattr(exc2, "pgcode", None) == "42703":
+                        return False
+                    raise
+            else:
+                raise
+        row = cur.fetchone()
+        if not row or len(row) < 2:
+            return False
+        existing_id = str(row[0])
+        if existing_id == str(tx.transaction_id):
+            return False
         existing_status = str(row[1] or "").upper()
         existing_done = existing_status in {"COMPLETED", "COMPLETE"}
+        existing_key = row[2] if len(row) > 2 else None
+        incoming_key = getattr(tx, "deduplication_key", None)
+
+        # Two completed sales with distinct stable identities are legitimate
+        # consecutive customers (e.g. both ₦200 / 0.17 L) — never fold them.
+        if (
+            incoming_done
+            and existing_done
+            and incoming_key
+            and existing_key
+            and incoming_key != existing_key
+        ):
+            return False
+
         if existing_done or (incoming_live and not incoming_done):
             logger.info(
                 "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
-                "incoming=%s existing=%s",
+                "incoming=%s existing=%s nozzle=%s source=%s",
                 existing_id,
                 tx.transaction_id,
                 status,
                 existing_status,
+                nozzle,
+                source,
             )
             return True
         if not incoming_done:
@@ -454,6 +710,9 @@ class TransactionService:
                 """
                 UPDATE pump_transactions SET
                     status = %s,
+                    amount = COALESCE(%s, amount),
+                    volume_liters = COALESCE(%s, volume_liters),
+                    price_per_liter = COALESCE(%s, price_per_liter),
                     transaction_completed_at = COALESCE(%s, transaction_completed_at),
                     raw_payload = %s,
                     received_at = %s
@@ -461,6 +720,9 @@ class TransactionService:
                 """,
                 (
                     tx.status,
+                    tx.amount,
+                    tx.volume_liters,
+                    tx.price_per_liter,
                     tx.transaction_completed_at,
                     Json(tx.raw_payload),
                     received_at,

@@ -13,6 +13,12 @@ export interface PumpSale {
   status: string | null
   sourceTopic: string | null
   receivedAt: string
+  sequence?: number | null
+  eventType?: string | null
+  startedAt?: string | null
+  completedAt?: string | null
+  mappingWarning?: string | null
+  sourceIdentifier?: string | null
 }
 
 export interface RecentSalesResponse {
@@ -81,6 +87,13 @@ export function parsePumpSale(raw: unknown): PumpSale | null {
     status: d.status == null || d.status === '' ? null : String(d.status),
     sourceTopic: d.sourceTopic == null || d.sourceTopic === '' ? null : String(d.sourceTopic),
     receivedAt: String(d.receivedAt || d.occurredAt || new Date().toISOString()),
+    sequence: num(d.sequence),
+    eventType: d.eventType == null || d.eventType === '' ? null : String(d.eventType),
+    startedAt: d.startedAt == null || d.startedAt === '' ? null : String(d.startedAt),
+    completedAt: d.completedAt == null || d.completedAt === '' ? null : String(d.completedAt),
+    mappingWarning: d.mappingWarning == null || d.mappingWarning === '' ? null : String(d.mappingWarning),
+    sourceIdentifier:
+      d.sourceIdentifier == null || d.sourceIdentifier === '' ? null : String(d.sourceIdentifier),
   }
 }
 

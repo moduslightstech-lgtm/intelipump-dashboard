@@ -61,8 +61,8 @@ class ConsumerApp:
         payload: Optional[dict],
         transaction: object,
         validation_error: object,
-    ) -> None:
-        self.service.process_message(
+    ) -> str:
+        return self.service.process_message(
             topic=topic,
             raw_payload=raw,
             qos=qos,
@@ -154,10 +154,49 @@ class ConsumerApp:
             return
 
         if kind == KIND_TRANSACTION:
+            nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+            tx_id = (
+                payload.get("transactionId")
+                or nested.get("transaction_uuid")
+                or nested.get("transactionId")
+            )
+            logger.info(
+                "live_mqtt_received topic=%s stationId=%s pumpId=%s nozzleId=%s "
+                "eventType=%s transactionId=%s sequence=%s amount=%s volumeLitres=%s",
+                topic,
+                payload.get("stationId") or nested.get("stationId"),
+                nested.get("pumpId") or nested.get("pump_id") or payload.get("pumpId"),
+                nested.get("nozzleId") or nested.get("nozzle_id") or payload.get("nozzleId"),
+                payload.get("eventType"),
+                tx_id,
+                payload.get("sequence") or nested.get("sessionSequence"),
+                nested.get("amount") or payload.get("amount"),
+                nested.get("volumeLitres") or nested.get("volume_liters"),
+            )
             transaction, validation_error = normalize_transaction(
                 payload, source_topic=topic
             )
-            self.handle_transaction_message(
+            if validation_error is not None:
+                logger.warning(
+                    "live_event_rejected stationId=%s transactionId=%s errorType=%s message=%s",
+                    payload.get("stationId") or nested.get("stationId"),
+                    tx_id,
+                    validation_error.error_type,
+                    validation_error.message,
+                )
+            elif transaction is not None:
+                logger.info(
+                    "live_event_validated stationId=%s pumpId=%s nozzleId=%s "
+                    "transactionId=%s status=%s amount=%s volumeLitres=%s",
+                    transaction.station_id,
+                    transaction.pump_id,
+                    transaction.nozzle_id,
+                    transaction.transaction_id,
+                    transaction.status,
+                    transaction.amount,
+                    transaction.volume_liters,
+                )
+            result = self.handle_transaction_message(
                 topic=topic,
                 raw=raw,
                 qos=qos,
@@ -166,6 +205,16 @@ class ConsumerApp:
                 transaction=transaction,
                 validation_error=validation_error,
             )
+            if result == "processed" and transaction is not None:
+                logger.info(
+                    "live_event_forwarded_to_sse stationId=%s pumpId=%s nozzleId=%s "
+                    "transactionId=%s status=%s",
+                    transaction.station_id,
+                    transaction.pump_id,
+                    transaction.nozzle_id,
+                    transaction.transaction_id,
+                    transaction.status,
+                )
             return
 
         logger.info(

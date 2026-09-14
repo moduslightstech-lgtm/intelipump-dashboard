@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { apiUrls } from '../config/api'
 import {
+  parsePumpSale,
   parseSaleCreatedEvent,
   type LiveStreamStatus,
   type PumpSale,
@@ -11,6 +12,7 @@ type Opts = {
   stationId?: string | null
   enabled?: boolean
   onSale?: (sale: PumpSale) => void
+  onSnapshot?: (sales: PumpSale[]) => void
   onConnected?: () => void
   onHeartbeat?: (timestamp: string) => void
   onReconnectRefresh?: () => void
@@ -30,10 +32,12 @@ export function useLiveSalesStream(opts: Opts) {
   const [lastError, setLastError] = useState<string | null>(null)
 
   const onSaleRef = useRef(opts.onSale)
+  const onSnapshotRef = useRef(opts.onSnapshot)
   const onConnectedRef = useRef(opts.onConnected)
   const onHeartbeatRef = useRef(opts.onHeartbeat)
   const onReconnectRefreshRef = useRef(opts.onReconnectRefresh)
   onSaleRef.current = opts.onSale
+  onSnapshotRef.current = opts.onSnapshot
   onConnectedRef.current = opts.onConnected
   onHeartbeatRef.current = opts.onHeartbeat
   onReconnectRefreshRef.current = opts.onReconnectRefresh
@@ -96,11 +100,62 @@ export function useLiveSalesStream(opts: Opts) {
           const parsed = parseSaleCreatedEvent(JSON.parse(String((ev as MessageEvent).data)))
           if (!parsed) return
           const sale = parsed.transaction
-          // Stream URL is already station-scoped. Do not drop US-LAB-001 vs
-          // InteliPump-US-Lab alias mismatches, and allow fill progress on the
-          // same transactionId (volume/amount updates during a dispense).
+          if (import.meta.env.DEV || localStorage.getItem('INTELIPUMP_DEBUG_LIVE') === '1') {
+            // eslint-disable-next-line no-console
+            console.debug('digital_twin_live_event_received', {
+              stationId: sale.stationId,
+              pumpId: sale.pumpId,
+              nozzleId: sale.nozzleId,
+              transactionId: sale.transactionId,
+              eventType: sale.eventType || sale.status,
+              sequence: sale.sequence,
+              amount: sale.amount,
+              volumeLitres: sale.volumeLiters,
+            })
+          }
           markLive(sale.receivedAt)
           onSaleRef.current?.(sale)
+        } catch {
+          /* ignore malformed */
+        }
+      })
+
+      es.addEventListener('nozzle_state_changed', (ev) => {
+        try {
+          const data = JSON.parse(String((ev as MessageEvent).data || '{}')) as Record<string, unknown>
+          const sale = parsePumpSale({
+            ...data,
+            status: data.status || data.state,
+            receivedAt: data.occurredAt || data.receivedAt,
+          })
+          if (!sale) return
+          if (import.meta.env.DEV || localStorage.getItem('INTELIPUMP_DEBUG_LIVE') === '1') {
+            // eslint-disable-next-line no-console
+            console.debug('digital_twin_live_event_received', {
+              stationId: sale.stationId,
+              pumpId: sale.pumpId,
+              nozzleId: sale.nozzleId,
+              transactionId: sale.transactionId,
+              eventType: sale.eventType || sale.status,
+              sequence: sale.sequence,
+              amount: sale.amount,
+              volumeLitres: sale.volumeLiters,
+            })
+          }
+          markLive(sale.receivedAt)
+          onSaleRef.current?.(sale)
+        } catch {
+          /* ignore malformed */
+        }
+      })
+
+      es.addEventListener('nozzle.snapshot', (ev) => {
+        try {
+          const data = JSON.parse(String((ev as MessageEvent).data || '{}'))
+          const list = Array.isArray(data.sales) ? data.sales : []
+          const sales = list.map(parsePumpSale).filter((s: PumpSale | null): s is PumpSale => s != null)
+          markLive(data.timestamp)
+          onSnapshotRef.current?.(sales)
         } catch {
           /* ignore malformed */
         }

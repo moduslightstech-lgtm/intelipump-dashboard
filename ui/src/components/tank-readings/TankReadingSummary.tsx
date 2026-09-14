@@ -1,3 +1,5 @@
+import { formatStatusLabel } from '../../lib/enumPresentation'
+
 export type TankReadingSummaryTank = {
   tankId?: string
   tankCode?: string
@@ -11,16 +13,19 @@ export type TankReadingSummaryData = {
   station?: {
     name?: string
     stationCode?: string
+    timezone?: string
   } | null
   stationName?: string
   stationCode?: string
   businessDate?: string
   uiStatus?: string
+  timezoneUsed?: string
   batch?: {
     status?: string
     submittedAt?: string | null
     submittedByUser?: { name?: string | null } | null
     isLate?: boolean
+    lateReason?: string | null
     correctedByAdministrator?: boolean
     correctedAt?: string | null
     notes?: string | null
@@ -46,7 +51,7 @@ function formatDate(iso?: string | null) {
   })
 }
 
-function formatDateTime(iso?: string | null) {
+function formatDateTime(iso?: string | null, timeZone?: string | null) {
   if (!iso) return '—'
   const dt = new Date(iso)
   if (Number.isNaN(dt.getTime())) return iso
@@ -56,6 +61,7 @@ function formatDateTime(iso?: string | null) {
     year: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    timeZone: timeZone || undefined,
   })
 }
 
@@ -70,7 +76,8 @@ export default function TankReadingSummary({
 }) {
   const stationName = data.station?.name || data.stationName || 'Station'
   const stationCode = data.station?.stationCode || data.stationCode
-  const status = data.uiStatus || data.batch?.status || '—'
+  const rawStatus = data.uiStatus || data.batch?.status || '—'
+  const status = data.batch?.isLate ? 'Late submission' : formatStatusLabel(rawStatus)
   const tanks = data.tanks || []
   const total = tanks.reduce((sum, tank) => {
     const value = tank.closingVolumeLiters
@@ -79,7 +86,8 @@ export default function TankReadingSummary({
   const notes = tanks.map((tank) => tank.notes).filter(Boolean)
   const batchNotes = data.notes || data.batch?.notes
   const submittedBy = data.batch?.submittedByUser?.name || '—'
-  const corrected = Boolean(data.batch?.correctedByAdministrator || status === 'CORRECTED')
+  const corrected = Boolean(data.batch?.correctedByAdministrator || rawStatus === 'CORRECTED')
+  const tz = data.timezoneUsed || data.station?.timezone
 
   return (
     <div className="space-y-4">
@@ -93,26 +101,29 @@ export default function TankReadingSummary({
       <dl className="space-y-2 text-sm border-y border-dashed border-slate-700 py-3">
         <div className="flex justify-between gap-3">
           <dt className="text-slate-500">Status</dt>
-          <dd className="text-emerald-300 font-medium">
-            {status}
-            {data.batch?.isLate ? <span className="ml-2 text-amber-300 text-xs">LATE</span> : null}
-          </dd>
+          <dd className="text-emerald-300 font-medium">{status}</dd>
         </div>
         <div className="flex justify-between gap-3">
           <dt className="text-slate-500">Submitted</dt>
-          <dd className="text-slate-200">{formatDateTime(data.batch?.submittedAt)}</dd>
+          <dd className="text-slate-200">{formatDateTime(data.batch?.submittedAt, tz)}</dd>
         </div>
         <div className="flex justify-between gap-3">
           <dt className="text-slate-500">Submitted by</dt>
           <dd className="text-slate-200">{submittedBy}</dd>
         </div>
+        {data.batch?.lateReason ? (
+          <div className="flex justify-between gap-3">
+            <dt className="text-slate-500">Late reason</dt>
+            <dd className="text-slate-200 text-right max-w-[70%]">{data.batch.lateReason}</dd>
+          </div>
+        ) : null}
         {corrected ? (
           <div className="flex justify-between gap-3">
             <dt className="text-slate-500">Correction</dt>
             <dd className="text-slate-200 text-right">
               Corrected by administrator
               {data.batch?.correctedAt ? (
-                <div className="text-xs text-slate-500">{formatDateTime(data.batch.correctedAt)}</div>
+                <div className="text-xs text-slate-500">{formatDateTime(data.batch.correctedAt, tz)}</div>
               ) : null}
             </dd>
           </div>

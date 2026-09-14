@@ -41,9 +41,9 @@ function wrap(ui: React.ReactNode) {
 }
 
 describe('humanizeEnum and dates', () => {
-  it('title-cases underscored enums', () => {
+  it('sentence-cases underscored enums', () => {
     expect(humanizeEnum('heartbeat_timeout_during_operating_hours')).toBe(
-      'Heartbeat Timeout During Operating Hours',
+      'Heartbeat timeout during operating hours',
     )
   })
 

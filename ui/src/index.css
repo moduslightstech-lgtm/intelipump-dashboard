@@ -94,6 +94,23 @@
     @apply bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-full;
   }
 
+  /* Compact filter toolbar controls (~40px) */
+  .input-compact {
+    @apply bg-slate-700 border border-slate-600 text-white rounded-md px-2.5 h-10 text-sm leading-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 w-full disabled:opacity-50;
+  }
+
+  .field-label {
+    @apply block text-[11px] font-medium text-slate-400 mb-0.5 leading-tight;
+  }
+
+  .btn-compact {
+    @apply inline-flex items-center justify-center h-10 px-3 rounded-md text-sm font-medium transition-colors;
+  }
+
+  .filter-chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-slate-600 bg-slate-800/80 px-2.5 py-1 text-xs text-slate-200;
+  }
+
   .section-title {
     @apply text-xl font-bold text-white;
   }
@@ -141,12 +158,88 @@
   }
 }
 
+.fuel-pipe-base {
+  fill: none;
+}
+
+.fuel-pipe-flow {
+  animation: schematic-pipe-flow 0.7s linear infinite;
+}
+
 .schematic-pipe-flow {
   animation: schematic-pipe-flow 0.7s linear infinite;
 }
 
+.schematic-pipe-flow-fuel {
+  stroke: #fbbf24;
+}
+
+.nozzle-dispensing-pulse {
+  box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.45);
+}
+
+.nozzle-status-dot {
+  /* Steady active indicator — opacity pulse looked like Idle↔Dispensing flicker */
+  box-shadow: 0 0 6px currentColor;
+  opacity: 1;
+}
+
+.nozzle-status-pulse {
+  box-shadow: 0 0 8px currentColor;
+  animation: nozzle-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes nozzle-status-pulse {
+  50% {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+}
+
+.hose-handle-pulse {
+  animation: hose-handle-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes hose-handle-pulse {
+  50% {
+    opacity: 0.7;
+    filter: brightness(1.25);
+  }
+}
+
+.hose-active-glow {
+  filter: drop-shadow(0 0 4px rgba(52, 211, 153, 0.65));
+}
+
+.hose-active-static {
+  outline: 1px solid rgba(52, 211, 153, 0.7);
+}
+
+.hose-active-motion {
+  transform-box: fill-box;
+  transform-origin: 18px 8px;
+  animation: hose-active-motion 1.5s ease-in-out infinite;
+}
+
+@keyframes hose-active-motion {
+  50% {
+    transform: translateY(-2px) rotate(2deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .schematic-pipe-flow {
+  .schematic-pipe-flow,
+  .fuel-pipe-flow {
+    animation: none;
+  }
+  .schematic-pipe-particles {
+    display: none;
+  }
+  .nozzle-status-dot,
+  .nozzle-status-pulse,
+  .nozzle-dispensing-pulse,
+  .hose-handle-pulse,
+  .hose-active-motion {
     animation: none;
   }
 }

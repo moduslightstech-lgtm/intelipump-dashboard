@@ -47,6 +47,7 @@ class PumpTransaction(Base):
     side_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     source_identifier: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     mapping_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    deduplication_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     product: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     volume_liters: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
@@ -514,6 +515,10 @@ class TankReadingBatch(Base):
     last_modified_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     last_modified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_late: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    late_reason: Mapped[Optional[str]] = mapped_column(Text)
+    late_by_minutes: Mapped[Optional[int]] = mapped_column(Integer)
+    deadline_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    timezone_used: Mapped[Optional[str]] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -578,6 +583,7 @@ class FuelDelivery(Base):
     __tablename__ = "fuel_deliveries"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     station_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("stations.id", ondelete="CASCADE"), nullable=False
     )
@@ -587,13 +593,30 @@ class FuelDelivery(Base):
     product: Mapped[Optional[str]] = mapped_column(String)
     delivery_reference: Mapped[Optional[str]] = mapped_column(String)
     supplier: Mapped[Optional[str]] = mapped_column(String)
+    supplier_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    supplier_reference: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    waybill_number: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    vehicle_registration: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     volume_liters: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     business_date: Mapped[date] = mapped_column(Date, nullable=False)
     source: Mapped[str] = mapped_column(String, default="MANUAL", nullable=False)
     status: Mapped[str] = mapped_column(String, default="DRAFT", nullable=False)
     entered_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    updated_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    completed_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    voided_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    voided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    void_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    overfill_warning_acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    overfill_acknowledged_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+    overfill_acknowledged_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

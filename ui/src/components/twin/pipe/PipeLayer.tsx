@@ -1,11 +1,11 @@
 import { memo, useMemo } from 'react'
 import type { ForecourtNode } from '../forecourtLayout'
+import { isSchematicPipeFlowing } from '../schematic/pipeFlow'
+import { pipeSegmentsForRender } from '../schematic/orthogonalRouting'
 import { buildManifoldRoutes } from './pipeRouting'
-import { PIPE_THEME, productPipeColor } from './pipeTheme'
 import type { ActiveDispensingState, PipeRoute, PipeStatus } from './pipeTypes'
 import PipeConnection from './PipeConnection'
 import ActivePipeFlow from './ActivePipeFlow'
-import { pumpMatchesId } from '../../../lib/pumpIdentity'
 
 type Props = {
   nodes: ForecourtNode[]
@@ -20,23 +20,10 @@ function routeStatus(
   route: PipeRoute,
   activeByPump: Record<string, ActiveDispensingState>,
   stationClosed: boolean,
+  branches: PipeRoute[],
 ): PipeStatus {
   if (stationClosed) return 'IDLE'
-  for (const s of Object.values(activeByPump)) {
-    if (s.phase !== 'DISPENSING') continue
-    const match =
-      route.pumpId === s.pumpId ||
-      pumpMatchesId(
-        {
-          id: route.pumpId,
-          mqttPumpId: (route.connection as any)?.mqttPumpId,
-          pumpCode: (route.connection as any)?.pumpCode,
-        },
-        s.pumpId,
-      ) ||
-      (s.connectionId && route.id === s.connectionId)
-    if (match && s.phase === 'DISPENSING') return 'ACTIVE'
-  }
+  if (isSchematicPipeFlowing(route, undefined, activeByPump, { branches })) return 'ACTIVE'
   return route.status
 }
 
@@ -48,13 +35,17 @@ function PipeLayer({
   stationClosed = false,
   onSelectPipe,
 }: Props) {
-  const { routes, trunks } = useMemo(
+  const { routes: branchRoutes, trunks } = useMemo(
     () => buildManifoldRoutes(nodes, connections),
     [nodes, connections],
   )
+  const routes = useMemo(
+    () => pipeSegmentsForRender(branchRoutes, trunks),
+    [branchRoutes, trunks],
+  )
 
-  const inactive = routes.filter((r) => routeStatus(r, activeByPump, stationClosed) !== 'ACTIVE')
-  const active = routes.filter((r) => routeStatus(r, activeByPump, stationClosed) === 'ACTIVE')
+  const inactive = routes.filter((r) => routeStatus(r, activeByPump, stationClosed, branchRoutes) !== 'ACTIVE')
+  const active = routes.filter((r) => routeStatus(r, activeByPump, stationClosed, branchRoutes) === 'ACTIVE')
 
   return (
     <g data-testid="pipe-layer">
@@ -67,26 +58,11 @@ function PipeLayer({
         }
       `}</style>
 
-      {/* trunk rails per tank/product */}
-      {trunks.map((t) => (
-        <path
-          key={`trunk-${t.tankId}`}
-          d={t.path}
-          fill="none"
-          stroke={productPipeColor(t.product)}
-          strokeWidth={PIPE_THEME.trunk.strokeWidth}
-          strokeLinecap="round"
-          opacity={0.35}
-          data-testid={`manifold-trunk-${t.tankId}`}
-        />
-      ))}
-
-      {/* Layer: inactive pipes */}
       {inactive.map((route) => (
         <PipeConnection
           key={route.id}
           route={route}
-          status={routeStatus(route, activeByPump, stationClosed)}
+          status={routeStatus(route, activeByPump, stationClosed, branchRoutes)}
           selected={selectedPipeId === route.id}
           onClick={() => onSelectPipe?.(route)}
         />

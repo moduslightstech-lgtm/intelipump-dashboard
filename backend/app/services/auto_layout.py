@@ -19,13 +19,19 @@ PUMP_W = 196
 PUMP_H = 136
 PUMPS_PER_ISLAND = 2
 PUMP_INNER_GAP = 40
-ISLAND_PAD_X = 20
-ISLAND_PAD_Y = 36
-ISLAND_PAD_BOTTOM = 16
-ISLAND_W = ISLAND_PAD_X * 2 + PUMP_W * 2 + PUMP_INNER_GAP
-ISLAND_H = ISLAND_PAD_Y + PUMP_H + ISLAND_PAD_BOTTOM
+DISPENSER_WIDTH = 380
+DISPENSER_HEIGHT = 208
+HOSE_OVERHANG = 32
+DISPENSER_HEADER_H = 28
+LCD_EXTRA_ROW_H = 118
+PIPE_PORT_SIZE = 18
+ISLAND_PAD_X = HOSE_OVERHANG
+ISLAND_PAD_Y = DISPENSER_HEADER_H
+ISLAND_PAD_BOTTOM = 12
+ISLAND_W = HOSE_OVERHANG * 2 + DISPENSER_WIDTH
+ISLAND_H = DISPENSER_HEIGHT
 ISLAND_GAP_X = 64
-ISLAND_GAP_Y = 80
+ISLAND_GAP_Y = 100
 ISLAND_COLS = 3
 
 OFFICE_W = 148
@@ -76,9 +82,22 @@ def _shell_size(inner_count: int) -> tuple[float, float]:
     n = max(1, inner_count)
     cols = min(2, n)
     rows = max(1, math.ceil(n / cols))
-    w = ISLAND_PAD_X * 2 + cols * PUMP_W + max(0, cols - 1) * PUMP_INNER_GAP
-    h = ISLAND_PAD_Y + rows * PUMP_H + max(0, rows - 1) * 28 + ISLAND_PAD_BOTTOM
+    w = HOSE_OVERHANG * 2 + DISPENSER_WIDTH
+    h = DISPENSER_HEIGHT + max(0, rows - 1) * LCD_EXTRA_ROW_H
     return w, h
+
+
+def _nozzle_port_box(ix: float, iy: float, shell_w: float, index: int, count: int) -> tuple[float, float, float, float]:
+    n = max(1, count)
+    cols = min(2, n)
+    col = index % cols
+    row = index // cols
+    cabinet_x = ix + HOSE_OVERHANG
+    cabinet_w = max(PIPE_PORT_SIZE, shell_w - HOSE_OVERHANG * 2)
+    slot = cabinet_w / cols
+    x = cabinet_x + col * slot + slot / 2 - PIPE_PORT_SIZE / 2
+    y = iy + 8 + row * LCD_EXTRA_ROW_H
+    return x, y, PIPE_PORT_SIZE, PIPE_PORT_SIZE
 
 
 def _group_physical_pumps(pumps: list[dict[str, Any]]) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
@@ -167,7 +186,8 @@ def build_auto_layout(
     )
     pump_top = TANK_BAND_Y + TANK_H + band
     islands_h = rows * typical_h + max(0, rows - 1) * ISLAND_GAP_Y
-    canvas_h = min(MAX_CANVAS_HEIGHT, max(MIN_CANVAS_HEIGHT, pump_top + islands_h + MARKER_H + 40))
+    content_h = pump_top + islands_h + MARKER_H + 40
+    canvas_h = min(MAX_CANVAS_HEIGHT, max(MIN_CANVAS_HEIGHT, content_h))
     group_left = MARGIN + max(0, (canvas_w - MARGIN * 2 - OFFICE_W - OFFICE_CLEARANCE - core_w) / 2)
 
     add(
@@ -191,8 +211,8 @@ def build_auto_layout(
         configuration={"role": "boundary"},
     )
     add("OFFICE", None, "Control room", canvas_w - MARGIN - OFFICE_W, TANK_BAND_Y, OFFICE_W, OFFICE_H)
-    add("ENTRANCE", None, "ENTRANCE", MARGIN + 8, canvas_h - MARKER_H - 16, MARKER_W, MARKER_H)
-    add("EXIT", None, "EXIT", canvas_w - MARGIN - MARKER_W - 8, canvas_h - MARKER_H - 16, MARKER_W, MARKER_H)
+    add("ENTRANCE", None, "ENTRANCE", MARGIN + 8, content_h - MARKER_H - 16, MARKER_W, MARKER_H)
+    add("EXIT", None, "EXIT", canvas_w - MARGIN - MARKER_W - 8, content_h - MARKER_H - 16, MARKER_W, MARKER_H)
 
     tank_total = len(tanks) * TANK_W + max(0, len(tanks) - 1) * TANK_GAP
     tank_start = group_left + max(0, (core_w - tank_total) / 2)
@@ -237,12 +257,8 @@ def build_auto_layout(
                 "role": "PHYSICAL_PUMP",
             },
         )
-        inner_cols = min(2, max(1, len(inners)))
         for pi, inner in enumerate(inners):
-            icol = pi % inner_cols
-            irow = pi // inner_cols
-            x = ix + ISLAND_PAD_X + icol * (PUMP_W + PUMP_INNER_GAP)
-            y = iy + ISLAND_PAD_Y + irow * (PUMP_H + 28)
+            x, y, port_w, port_h = _nozzle_port_box(ix, iy, shell_w, pi, len(inners))
             is_nozzle = inner is not pump and (inner.get("nozzleCode") or inner.get("nozzle_code") or inner.get("name"))
             iid = str(inner.get("id") or inner.get("nozzleCode") or f"{pump_id}-n{pi + 1}")
             label = str(
@@ -256,8 +272,8 @@ def build_auto_layout(
                 label,
                 x,
                 y,
-                PUMP_W,
-                PUMP_H,
+                port_w,
+                port_h,
                 configuration={
                     "pumpCode": inner.get("pumpCode") or inner.get("nozzleCode") or iid,
                     "product": product,
@@ -282,7 +298,7 @@ def build_auto_layout(
         assigned_pump = device.get("assignedPumpId") or device.get("pumpId")
         if assigned_pump and str(assigned_pump) in pump_positions:
             px, py = pump_positions[str(assigned_pump)]
-            dx, dy = px + PUMP_W + 8, py + 10
+            dx, dy = px + DISPENSER_WIDTH + 8, py + 10
         else:
             dx = gateway_x
             dy = gateway_y + unassigned_i * (DEVICE_H + 12)

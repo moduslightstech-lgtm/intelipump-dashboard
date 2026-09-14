@@ -1,31 +1,32 @@
 import type { TwinLiveState } from '../../../api/client'
 import {
   DEFAULT_METRICS,
+  DECORATIVE_LAYOUT_IDS,
+  DECORATIVE_LAYOUT_KINDS,
+  DECORATIVE_LAYOUT_LABELS,
+  DISPENSER_HEIGHT,
+  HOSE_OVERHANG,
   ISLAND_GAP_X,
   ISLAND_GAP_Y,
-  ISLAND_PAD_X,
-  ISLAND_PAD_Y,
   LANE_GAP,
-  MARKER_H,
-  MARKER_W,
+  LAYOUT_SCHEMA_VERSION,
+  LCD_EXTRA_ROW_H,
   MAX_CANVAS_H,
   MIN_CANVAS_H,
   MIN_CANVAS_W,
   MIN_NODE_GAP,
   MARGIN,
-  OFFICE_CLEARANCE,
-  OFFICE_H,
-  OFFICE_W,
   PIPE_BAND_BASE,
+  PIPE_PORT_SIZE,
+  physicalPumpIdAliases,
   PUMP_HORIZONTAL_GAP,
-  PUMP_NODE_WIDTH,
   PUMP_VERTICAL_GAP,
   TANK_BAND_Y,
   TANK_GAP,
   type LayoutMetrics,
   islandSize,
 } from './constants'
-import { aggregatePhysicalPumpStatus, nozzlesForPhysicalPump } from './physicalPump'
+import { aggregatePhysicalPumpStatus, friendlyNozzleName, nozzlesForPhysicalPump } from './physicalPump'
 import { assertNoNodeOverlap, rectsOverlap, snapToGrid } from './geometry'
 import type { LayoutPersist, LayoutPersistItem, SchematicNode } from './types'
 
@@ -68,9 +69,51 @@ export function pumpShellSize(nozzleCount: number, metrics: LayoutMetrics = DEFA
   const cols = Math.min(2, n)
   const rows = Math.ceil(n / cols)
   return {
-    w: ISLAND_PAD_X * 2 + cols * metrics.pumpW + Math.max(0, cols - 1) * PUMP_HORIZONTAL_GAP,
-    h: ISLAND_PAD_Y + rows * metrics.pumpH + Math.max(0, rows - 1) * 28 + 16,
+    w: HOSE_OVERHANG * 2 + metrics.pumpW,
+    h: metrics.pumpH + Math.max(0, rows - 1) * LCD_EXTRA_ROW_H,
   }
+}
+
+export function nozzlePortBox(
+  island: { x: number; y: number; w: number; h: number },
+  index: number,
+  count: number,
+): { x: number; y: number; w: number; h: number } {
+  const n = Math.max(1, count)
+  const cols = Math.min(2, n)
+  const col = index % cols
+  const row = Math.floor(index / cols)
+  const cabinetX = island.x + HOSE_OVERHANG
+  const cabinetW = Math.max(PIPE_PORT_SIZE, island.w - HOSE_OVERHANG * 2)
+  const slot = cabinetW / cols
+  return {
+    x: cabinetX + col * slot + slot / 2 - PIPE_PORT_SIZE / 2,
+    y: island.y + 8 + row * LCD_EXTRA_ROW_H,
+    w: PIPE_PORT_SIZE,
+    h: PIPE_PORT_SIZE,
+  }
+}
+
+export function isDecorativeLayoutKind(kind?: string | null): boolean {
+  const k = String(kind || '').trim().toUpperCase()
+  return (DECORATIVE_LAYOUT_KINDS as readonly string[]).includes(k)
+}
+
+export function isDecorativeLayoutNode(
+  node: { kind?: string; id?: string; label?: string; assetId?: string } | null | undefined,
+): boolean {
+  if (!node) return false
+  if (isDecorativeLayoutKind(node.kind)) return true
+  const ids = [node.id, node.assetId].map((v) => String(v || '').trim().toLowerCase())
+  if (ids.some((id) => DECORATIVE_LAYOUT_IDS.has(id))) return true
+  const label = String(node.label || '').trim().toLowerCase()
+  return Boolean(label) && DECORATIVE_LAYOUT_LABELS.has(label)
+}
+
+export function stripDecorativeLayoutNodes<T extends { kind?: string; id?: string; label?: string; assetId?: string }>(
+  nodes: T[],
+): T[] {
+  return nodes.filter((n) => !isDecorativeLayoutNode(n))
 }
 
 export function schematicViewportHeight(opts: {
@@ -79,9 +122,10 @@ export function schematicViewportHeight(opts: {
   viewportHeight?: number
 }): number {
   const n = Math.max(1, opts.physicalPumpCount)
-  const minH = n <= 2 ? 580 : n <= 6 ? 640 : 720
+  const minH = n <= 2 ? 640 : n <= 6 ? 720 : 780
   const vh = opts.viewportHeight ?? (typeof window === 'undefined' ? 900 : window.innerHeight)
-  const maxFromPage = Math.max(minH, Math.round(vh * 0.62))
+  // Fill most of the viewport now that tank/pump list widgets are gone.
+  const maxFromPage = Math.max(minH, Math.round(vh * 0.78))
   const topology = Math.max(minH, opts.canvasHeight + 12)
   return Math.min(Math.max(minH, topology), Math.min(maxFromPage, MAX_CANVAS_H))
 }
@@ -98,6 +142,70 @@ export function pipeBandHeight(tankCount: number): number {
 
 function catalogPumps(state?: TwinLiveState) {
   return (state?.pumps || []).filter((p) => !String(p.id || '').startsWith('ledger:'))
+}
+
+function catalogNozzleEntries(pumps: Record<string, any>[]) {
+  return pumps.flatMap((pump) =>
+    nozzlesForPhysicalPump(pump).map((nozzle, index) => ({ pump, nozzle, index })),
+  )
+}
+
+function savedItemConfig(item: Record<string, any>): Record<string, any> {
+  return (item.configuration || item.configuration_json || {}) as Record<string, any>
+}
+
+function resolveSavedPumpNozzle(
+  assetId: string,
+  item: Record<string, any>,
+  pumps: Record<string, any>[],
+  claimed: Set<string>,
+): { nozzle: Record<string, any>; pump: Record<string, any>; index: number } | null {
+  const entries = catalogNozzleEntries(pumps)
+  const unused = () => entries.filter((e) => !claimed.has(String(e.nozzle.id)))
+  const hit = unused().find(
+    (e) =>
+      e.nozzle.id === assetId ||
+      e.nozzle.nozzleCode === assetId ||
+      e.nozzle.sourceIdentifier === assetId ||
+      e.nozzle.mqttNozzleId === assetId ||
+      e.nozzle.mqttPumpId === assetId,
+  )
+  if (hit) return hit
+
+  const parent = pumps.find(
+    (p) => p.id === assetId || p.pumpCode === assetId || p.mqttPumpId === assetId,
+  )
+  if (parent) {
+    const nested = unused().filter((e) => e.pump.id === parent.id)
+    if (nested[0]) return nested[0]
+  }
+
+  const cfg = savedItemConfig(item)
+  const islandId = String(cfg.islandId || cfg.physicalPumpId || '')
+  if (islandId) {
+    const onIsland = unused().find(
+      (e) => `shell-${e.pump.id}` === islandId || String(e.pump.id) === islandId,
+    )
+    if (onIsland) return onIsland
+  }
+
+  const label = String(item.label || '').trim()
+  if (label) {
+    const bySource = unused().find((e) => {
+      if (e.nozzle.sourceIdentifier === label || e.nozzle.mqttPumpId === label) return true
+      if (/^pump[\s_-]*2$/i.test(label) && /2$/.test(String(e.nozzle.sourceIdentifier || e.nozzle.nozzleCode || ''))) {
+        return true
+      }
+      return false
+    })
+    if (bySource) return bySource
+  }
+
+  if (pumps.length === 1) {
+    const only = unused()[0]
+    if (only) return only
+  }
+  return null
 }
 
 function stationLabel(state?: TwinLiveState): string {
@@ -146,18 +254,16 @@ export function buildAutoForecourtLayout(
   const coreW = Math.max(tankRowW, islandRowW)
   const canvasWidth = Math.max(
     MIN_CANVAS_W,
-    Math.min(Math.max(usableW, 640), Math.ceil(coreW + OFFICE_W + OFFICE_CLEARANCE + MARGIN * 2)),
+    Math.min(Math.max(usableW, 640), Math.ceil(coreW + MARGIN * 2 + 48)),
     Math.ceil(coreW + MARGIN * 2 + 24),
   )
 
   const pumpTop = TANK_BAND_Y + metrics.tankH + band
   const islandsBlockH = rows * isle.h + Math.max(0, rows - 1) * ISLAND_GAP_Y
-  const canvasHeight = Math.min(
-    MAX_CANVAS_H,
-    Math.max(MIN_CANVAS_H, pumpTop + islandsBlockH + MARKER_H + 40),
-  )
+  const contentHeight = pumpTop + islandsBlockH + 48
+  const canvasHeight = Math.min(MAX_CANVAS_H, Math.max(MIN_CANVAS_H, contentHeight))
 
-  const groupLeft = MARGIN + Math.max(0, (canvasWidth - MARGIN * 2 - OFFICE_W - OFFICE_CLEARANCE - coreW) / 2)
+  const groupLeft = MARGIN + Math.max(0, (canvasWidth - MARGIN * 2 - coreW) / 2)
   const nodes: SchematicNode[] = []
 
   nodes.push({
@@ -182,42 +288,6 @@ export function buildAutoForecourtLayout(
     label: 'Forecourt',
     status: 'STATIC',
     raw: { role: 'boundary' },
-  })
-
-  nodes.push({
-    id: 'office',
-    kind: 'OFFICE',
-    x: canvasWidth - MARGIN - OFFICE_W,
-    y: TANK_BAND_Y,
-    w: OFFICE_W,
-    h: OFFICE_H,
-    label: 'Control room',
-    status: 'STATIC',
-    raw: {},
-  })
-
-  nodes.push({
-    id: 'entrance',
-    kind: 'ENTRANCE',
-    x: MARGIN + 8,
-    y: canvasHeight - MARKER_H - 12,
-    w: MARKER_W,
-    h: MARKER_H,
-    label: 'ENTRANCE',
-    status: 'STATIC',
-    raw: {},
-  })
-
-  nodes.push({
-    id: 'exit',
-    kind: 'EXIT',
-    x: canvasWidth - MARGIN - MARKER_W - 8,
-    y: canvasHeight - MARKER_H - 12,
-    w: MARKER_W,
-    h: MARKER_H,
-    label: 'EXIT',
-    status: 'STATIC',
-    raw: {},
   })
 
   const tankTotal = tanks.length * metrics.tankW + Math.max(0, tanks.length - 1) * TANK_GAP
@@ -270,40 +340,41 @@ export function buildAutoForecourtLayout(
       },
     })
 
-    const innerCols = Math.min(2, Math.max(1, island.pumps.length))
     island.pumps.forEach((pump, pi) => {
-      const icol = pi % innerCols
-      const irow = Math.floor(pi / innerCols)
+      const port = nozzlePortBox({ x: ix, y: iy, w: shell.w, h: shell.h }, pi, island.pumps.length)
       nodes.push({
         id: String(pump.id),
         kind: 'PUMP',
-        x: ix + ISLAND_PAD_X + icol * (metrics.pumpW + PUMP_HORIZONTAL_GAP),
-        y: iy + ISLAND_PAD_Y + irow * (metrics.pumpH + 28),
-        w: metrics.pumpW,
-        h: metrics.pumpH,
-        label: String(pump.name || `Nozzle ${pi + 1}`),
+        x: port.x,
+        y: port.y,
+        w: port.w,
+        h: port.h,
+        label: friendlyNozzleName(pump, pi),
         status: String(pump.inferredStatus || pump.status || 'UNKNOWN'),
         product: pump.product as string | undefined,
         parentId: island.islandId,
         islandId: island.islandId,
         assetId: String(pump.id),
-        raw: { ...pump, assetRole: 'NOZZLE', parentPumpId: String(physical?.id || '') },
+        raw: { ...pump, assetRole: 'NOZZLE', parentPumpId: String(physical?.id || ''), parentPumpName: pumpName },
       })
     })
   })
 
-  return { nodes, canvasWidth, canvasHeight }
+  return { nodes: stripDecorativeLayoutNodes(nodes), canvasWidth, canvasHeight }
 }
 
 function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT_METRICS): SchematicNode[] {
   const tanks = state?.tanks || []
   const pumps = catalogPumps(state)
+  const claimedNozzles = new Set<string>()
   const isle = islandSize(metrics)
   const nodes: SchematicNode[] = []
   for (const item of state?.layout?.items || []) {
     const assetType = String(item.assetType || item.asset_type || '').toUpperCase()
     if (assetType === 'DEVICE') continue
+    if (isDecorativeLayoutKind(assetType)) continue
     const assetId = String(item.assetId || item.asset_id || item.id || '')
+    if (isDecorativeLayoutNode({ kind: assetType, id: assetId, label: String(item.label || '') })) continue
     const x = Number(item.x ?? item.x_position ?? 0)
     const y = Number(item.y ?? item.y_position ?? 0)
     const w = Number(item.width ?? 40)
@@ -325,48 +396,65 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
         raw: tank as Record<string, any>,
       })
     } else if (assetType === 'PUMP') {
-      const pump = pumps.find((p) => p.id === assetId || p.pumpCode === assetId) || { id: assetId }
+      const resolved = resolveSavedPumpNozzle(assetId, item as Record<string, any>, pumps, claimedNozzles)
+      if (!resolved) continue
+      claimedNozzles.add(String(resolved.nozzle.id))
+      const { nozzle, pump, index } = resolved
+      const parentId = String(cfg.islandId || `shell-${pump.id}`)
+      const islandBox = nodes.find((n) => n.id === parentId && n.kind === 'ISLAND')
+      const siblings = (islandBox?.raw?.pumpIds as string[] | undefined)?.length || 2
+      const port = islandBox
+        ? nozzlePortBox(islandBox, index, Math.max(siblings, index + 1))
+        : { x, y, w: PIPE_PORT_SIZE, h: PIPE_PORT_SIZE }
       nodes.push({
-        id: String(pump.id || assetId),
+        id: String(nozzle.id),
         kind: 'PUMP',
-        x,
-        y,
-        w: PUMP_NODE_WIDTH,
-        h: Math.max(h, metrics.pumpH),
-        label: String(pump.name || pump.mqttPumpId || pump.pumpCode || item.label || assetId),
-        status: String(pump.inferredStatus || pump.status || 'UNKNOWN'),
-        product: pump.product as string | undefined,
-        islandId: cfg.islandId ? String(cfg.islandId) : undefined,
-        parentId: cfg.islandId ? String(cfg.islandId) : undefined,
-        assetId: String(pump.id || assetId),
+        x: port.x,
+        y: port.y,
+        w: port.w,
+        h: port.h,
+        label: friendlyNozzleName(nozzle, index),
+        status: String(nozzle.inferredStatus || nozzle.status || pump.inferredStatus || 'UNKNOWN'),
+        product: (nozzle.product || pump.product) as string | undefined,
+        islandId: parentId,
+        parentId,
+        assetId: String(nozzle.id),
         raw: {
-          ...pump,
+          ...nozzle,
           assetRole: 'NOZZLE',
-          parentPumpId: String(cfg.physicalPumpId || cfg.islandId || pump.id || assetId),
+          parentPumpId: String(pump.id),
+          parentPumpName: String(pump.name || pump.pumpCode || 'Pump'),
         },
       })
     } else if (assetType === 'NOZZLE') {
-      const pump = pumps.find((p) =>
-        (p.nozzles || []).some((n: any) => n.id === assetId || n.nozzleCode === assetId),
-      )
-      const nozzle =
-        (pump?.nozzles || []).find((n: any) => n.id === assetId || n.nozzleCode === assetId) || {
-          id: assetId,
-        }
+      const resolved = resolveSavedPumpNozzle(assetId, item as Record<string, any>, pumps, claimedNozzles)
+      if (!resolved) continue
+      claimedNozzles.add(String(resolved.nozzle.id))
+      const { nozzle, pump, index } = resolved
+      const parentId = String(cfg.islandId || cfg.physicalPumpId || `shell-${pump.id}`)
+      const islandBox = nodes.find((n) => n.id === parentId && n.kind === 'ISLAND')
+      const port = islandBox
+        ? nozzlePortBox(islandBox, index, Math.max(2, index + 1))
+        : { x, y, w: PIPE_PORT_SIZE, h: PIPE_PORT_SIZE }
       nodes.push({
-        id: String(nozzle.id || assetId),
+        id: String(nozzle.id),
         kind: 'PUMP',
-        x,
-        y,
-        w: PUMP_NODE_WIDTH,
-        h: Math.max(h, metrics.pumpH),
-        label: String(nozzle.name || item.label || `Nozzle`),
+        x: port.x,
+        y: port.y,
+        w: port.w,
+        h: port.h,
+        label: friendlyNozzleName(nozzle, index),
         status: String(nozzle.inferredStatus || nozzle.status || 'UNKNOWN'),
-        product: nozzle.product as string | undefined,
-        islandId: cfg.islandId || cfg.physicalPumpId ? String(cfg.islandId || cfg.physicalPumpId) : undefined,
-        parentId: cfg.islandId || cfg.physicalPumpId ? String(cfg.islandId || cfg.physicalPumpId) : undefined,
-        assetId: String(nozzle.id || assetId),
-        raw: { ...nozzle, assetRole: 'NOZZLE' },
+        product: (nozzle.product || pump.product) as string | undefined,
+        islandId: parentId,
+        parentId,
+        assetId: String(nozzle.id),
+        raw: {
+          ...nozzle,
+          assetRole: 'NOZZLE',
+          parentPumpId: String(pump.id),
+          parentPumpName: String(pump.name || pump.pumpCode || 'Pump'),
+        },
       })
     } else if (assetType === 'ISLAND') {
       const rawLabel = String(item.label || 'Pump')
@@ -376,8 +464,8 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
         kind: 'ISLAND',
         x,
         y,
-        w: Math.max(w, isle.w),
-        h: Math.max(h, isle.h),
+        w: isle.w,
+        h: isle.h,
         label,
         status: 'STATIC',
         raw: { ...cfg, assetRole: 'PHYSICAL_PUMP' },
@@ -396,12 +484,109 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
       })
     }
   }
-  return nodes
+  return snapNozzlePorts(nodes)
+}
+
+type SavedPoint = { x: number; y: number; kind: string; id: string; cfg: Record<string, any> }
+
+function savedItemPoint(item: Record<string, any>): SavedPoint | null {
+  const kind = String(item.assetType || item.asset_type || '').toUpperCase()
+  if (!kind || kind === 'DEVICE' || kind === 'FORECOURT' || kind === 'LABEL' || kind === 'PUMP' || kind === 'NOZZLE') {
+    return null
+  }
+  if (isDecorativeLayoutKind(kind)) return null
+  const id = String(item.assetId || item.asset_id || item.id || '')
+  if (!id || isDecorativeLayoutNode({ kind, id, label: String(item.label || '') })) return null
+  return {
+    id,
+    kind,
+    x: Number(item.x ?? item.x_position ?? 0),
+    y: Number(item.y ?? item.y_position ?? 0),
+    cfg: (item.configuration || item.configuration_json || {}) as Record<string, any>,
+  }
+}
+
+export function applySavedLayoutPositions(
+  canonical: SchematicNode[],
+  state?: TwinLiveState,
+): SchematicNode[] {
+  const points = (state?.layout?.items || [])
+    .map((item) => savedItemPoint(item as Record<string, any>))
+    .filter((p): p is SavedPoint => Boolean(p))
+  const byKey = new Map<string, SavedPoint>()
+  for (const point of points) {
+    byKey.set(`${point.kind}:${point.id}`, point)
+    byKey.set(point.id, point)
+    const phys = String(point.cfg.physicalPumpId || '')
+    if (phys) byKey.set(`ISLAND:${phys}`, point)
+  }
+  const stationId = String(state?.station?.mqttStationId || state?.station?.stationCode || state?.station?.id || '')
+  const savedIslands = points.filter((p) => p.kind === 'ISLAND')
+  const usedIslands = new Set<string>()
+  const physicalCount = catalogPumps(state).length
+
+  return canonical.map((node) => {
+    if (node.kind === 'PUMP') return node
+    const keys = [node.id, node.assetId || '', `${node.kind}:${node.id}`, `${node.kind}:${node.assetId || ''}`]
+    if (node.kind === 'ISLAND') {
+      keys.push(...physicalPumpIdAliases(String(node.assetId || node.raw?.id || ''), stationId))
+      keys.push(`ISLAND:${node.assetId || ''}`, `ISLAND:${node.id}`)
+      const isleNum = node.raw?.islandNumber
+      if (isleNum != null && isleNum !== '') {
+        keys.push(`island-${isleNum}`, `ISLAND:island-${isleNum}`)
+      }
+    }
+    for (const key of keys.filter(Boolean)) {
+      const hit = byKey.get(key)
+      if (!hit) continue
+      if (hit.kind === 'ISLAND') usedIslands.add(hit.id)
+      return { ...node, x: hit.x, y: hit.y }
+    }
+    if (node.kind === 'ISLAND' && physicalCount === 1 && savedIslands.length === 1 && !usedIslands.has(savedIslands[0].id)) {
+      usedIslands.add(savedIslands[0].id)
+      return { ...node, x: savedIslands[0].x, y: savedIslands[0].y }
+    }
+    return node
+  })
+}
+
+export function dedupePhysicalPumpNodes(nodes: SchematicNode[]): SchematicNode[] {
+  const islands = nodes.filter((n) => n.kind === 'ISLAND')
+  const keep = new Map<string, SchematicNode>()
+  const drop = new Set<string>()
+  for (const isle of islands) {
+    const key = String(isle.assetId || isle.raw?.id || isle.id)
+    const prev = keep.get(key)
+    if (!prev) {
+      keep.set(key, isle)
+      continue
+    }
+    const preferCurrent = isle.id.startsWith('shell-') || Number(isle.raw?.nozzleCount || 0) > 0
+    const winner = preferCurrent ? isle : prev
+    const loser = winner === isle ? prev : isle
+    drop.add(loser.id)
+    keep.set(key, winner)
+  }
+  if (!drop.size) return nodes
+  return nodes.filter((n) => !drop.has(n.id) && !(n.kind === 'PUMP' && drop.has(String(n.parentId || n.islandId || ''))))
+}
+
+function snapNozzlePorts(nodes: SchematicNode[]): SchematicNode[] {
+  const islands = nodes.filter((n) => n.kind === 'ISLAND')
+  const kids = nodes.filter((n) => n.kind === 'PUMP' && (n.parentId || n.islandId))
+  return nodes.map((n) => {
+    if (n.kind !== 'PUMP' || !(n.parentId || n.islandId)) return n
+    const island = islands.find((i) => i.id === n.parentId || i.id === n.islandId)
+    if (!island) return n
+    const siblings = kids.filter((p) => p.parentId === island.id || p.islandId === island.id)
+    const index = Math.max(0, siblings.findIndex((p) => p.id === n.id))
+    return { ...n, ...nozzlePortBox(island, index, Math.max(siblings.length, 1)) }
+  })
 }
 
 function nudgeOffEquipment(node: SchematicNode, others: SchematicNode[]): SchematicNode {
   const placed = { ...node }
-  const blockers = others.filter((n) => ['TANK', 'PUMP', 'OFFICE', 'ISLAND'].includes(n.kind))
+  const blockers = others.filter((n) => n.kind === 'TANK' || n.kind === 'ISLAND')
   for (let i = 0; i < 32; i++) {
     const hit = blockers.find((b) => rectsOverlap(placed, b, MIN_NODE_GAP))
     if (!hit) break
@@ -422,17 +607,16 @@ function attachMissingEquipment(
   const auto = buildAutoForecourtLayout(state, opts).nodes
   const extras = auto.filter((n) => {
     if (n.kind !== 'TANK' && n.kind !== 'PUMP') return false
-    if (existing.some((e) => e.id === n.id)) return false
+    if (existing.some((e) => e.id === n.id || e.assetId === n.id)) return false
     if (n.kind === 'PUMP') {
+      const nozzleId = String(n.id)
       const parent = String(n.raw?.parentPumpId || '')
-      const covered = existing.some(
-        (e) =>
-          e.kind === 'PUMP' &&
-          (e.id === parent ||
-            String(e.raw?.parentPumpId || '') === parent ||
-            e.assetId === parent ||
-            e.id === String(n.assetId || '')),
-      )
+      const synthetic = nozzleId.endsWith('::nozzle')
+      const covered = existing.some((e) => {
+        if (e.kind !== 'PUMP') return false
+        if (e.id === nozzleId || e.assetId === nozzleId) return true
+        return synthetic && (e.id === parent || e.assetId === parent)
+      })
       if (covered) return false
     }
     return true
@@ -440,7 +624,22 @@ function attachMissingEquipment(
   if (!extras.length) return existing
   const next = [...existing]
   for (const extra of extras) {
-    const placed = extra.kind === 'PUMP' || extra.kind === 'TANK' ? nudgeOffEquipment(extra, next) : extra
+    let placed = extra
+    if (extra.kind === 'PUMP' && extra.parentId) {
+      const savedIsland = next.find((n) => n.id === extra.parentId)
+      const autoIsland = auto.find((n) => n.id === extra.parentId)
+      if (savedIsland && autoIsland) {
+        placed = {
+          ...extra,
+          x: savedIsland.x + (extra.x - autoIsland.x),
+          y: savedIsland.y + (extra.y - autoIsland.y),
+        }
+      } else {
+        placed = nudgeOffEquipment(extra, next.filter((n) => n.id !== extra.parentId))
+      }
+    } else if (extra.kind === 'TANK' || extra.kind === 'PUMP') {
+      placed = nudgeOffEquipment(extra, next)
+    }
     if (extra.kind === 'PUMP' && extra.parentId && !next.some((n) => n.id === extra.parentId)) {
       const island = auto.find((n) => n.id === extra.parentId)
       if (island) {
@@ -467,16 +666,12 @@ export function buildForecourtNodes(
   const metrics = opts.metrics || DEFAULT_METRICS
   const mode = String(state?.layout?.mode || 'AUTO').toUpperCase()
   if (mode !== 'CUSTOM' || !state?.layout?.items?.length) {
-    return buildAutoForecourtLayout(state, opts).nodes
+    return stripDecorativeLayoutNodes(buildAutoForecourtLayout(state, opts).nodes)
   }
-  let merged = parseSavedItems(state, metrics)
-  merged = attachMissingEquipment(merged, state, opts)
-  const hasDecor = merged.some((n) => n.kind === 'OFFICE' || n.kind === 'ENTRANCE')
-  if (!hasDecor) {
-    const auto = buildAutoForecourtLayout(state, opts).nodes
-    merged = [...auto.filter((n) => !['TANK', 'PUMP', 'ISLAND'].includes(n.kind)), ...merged]
-  }
-  return merged
+  const canonical = buildAutoForecourtLayout(state, opts).nodes
+  return stripDecorativeLayoutNodes(
+    snapNozzlePorts(dedupePhysicalPumpNodes(applySavedLayoutPositions(canonical, state))),
+  )
 }
 
 export function autoArrangeNodes(
@@ -501,7 +696,7 @@ export function topologyKey(state?: TwinLiveState): string {
 }
 
 export function canvasSizeFromNodes(nodes: SchematicNode[]): { width: number; height: number } {
-  const content = nodes.filter((n) => n.kind !== 'FORECOURT')
+  const content = equipmentBoxes(stripDecorativeLayoutNodes(nodes))
   if (!content.length) return { width: MIN_CANVAS_W, height: MIN_CANVAS_H }
   const width = Math.max(
     MIN_CANVAS_W,
@@ -515,11 +710,11 @@ export function canvasSizeFromNodes(nodes: SchematicNode[]): { width: number; he
 }
 
 export function layoutItemsFromNodes(nodes: SchematicNode[]): LayoutPersistItem[] {
-  return nodes
-    .filter((n) => n.kind !== 'FORECOURT' && n.kind !== 'LABEL')
+  return stripDecorativeLayoutNodes(nodes)
+    .filter((n) => n.kind !== 'FORECOURT' && n.kind !== 'LABEL' && !(n.kind === 'PUMP' && n.parentId))
     .map((n, idx) => ({
       asset_type: n.kind,
-      asset_id: n.kind === 'TANK' || n.kind === 'PUMP' ? n.id : n.assetId || n.id,
+      asset_id: n.kind === 'TANK' || n.kind === 'PUMP' || n.kind === 'ISLAND' ? n.id : n.assetId || n.id,
       label: n.label,
       x_position: n.x,
       y_position: n.y,
@@ -529,9 +724,17 @@ export function layoutItemsFromNodes(nodes: SchematicNode[]): LayoutPersistItem[
       z_index: idx,
       configuration_json:
         n.kind === 'PUMP'
-          ? { islandId: n.islandId || n.parentId || null, product: n.product || null }
+          ? {
+              islandId: n.islandId || n.parentId || null,
+              physicalPumpId: n.raw?.parentPumpId || null,
+              product: n.product || null,
+            }
           : n.kind === 'ISLAND'
-            ? { pumpIds: n.raw?.pumpIds || [] }
+            ? {
+                pumpIds: n.raw?.pumpIds || [],
+                physicalPumpId: n.assetId || n.raw?.id || null,
+                role: 'PHYSICAL_PUMP',
+              }
             : null,
     }))
 }
@@ -540,6 +743,7 @@ export function toLayoutPersist(nodes: SchematicNode[], name = 'Custom'): Layout
   const { width, height } = canvasSizeFromNodes(nodes)
   return {
     name,
+    layout_version: LAYOUT_SCHEMA_VERSION,
     canvas_width: width,
     canvas_height: height,
     items: layoutItemsFromNodes(nodes),
@@ -547,7 +751,7 @@ export function toLayoutPersist(nodes: SchematicNode[], name = 'Custom'): Layout
 }
 
 export function equipmentBoxes(nodes: SchematicNode[]) {
-  return nodes.filter((n) => ['TANK', 'PUMP', 'OFFICE', 'ENTRANCE', 'EXIT'].includes(n.kind))
+  return nodes.filter((n) => n.kind === 'TANK' || n.kind === 'ISLAND')
 }
 
 export function metricsFromMeasured(
@@ -559,9 +763,16 @@ export function metricsFromMeasured(
     const w = Number(n.width)
     const h = Number(n.height)
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue
-    if (n.type === 'pump') {
-      next.pumpW = Math.max(next.pumpW, Math.ceil(w))
-      next.pumpH = Math.max(next.pumpH, Math.ceil(h))
+    if (n.type === 'island' || n.type === 'dispenser') {
+      next.pumpW = Math.max(next.pumpW, Math.ceil(w - HOSE_OVERHANG * 2))
+      const contentH = Math.ceil(h)
+      // Hoses hang outside the cabinet and must not reintroduce empty card height.
+      if (contentH >= DISPENSER_HEIGHT + LCD_EXTRA_ROW_H - 20) {
+        next.pumpH = Math.max(
+          next.pumpH,
+          Math.min(contentH, DISPENSER_HEIGHT + LCD_EXTRA_ROW_H * 2),
+        )
+      }
     }
     if (n.type === 'tank') {
       next.tankW = Math.max(next.tankW, Math.ceil(w))
@@ -607,7 +818,7 @@ export function pumpCardsConflict(
   minHorizontal = PUMP_HORIZONTAL_GAP,
   minVertical = PUMP_VERTICAL_GAP,
 ): boolean {
-  const pumps = nodes.filter((n) => n.kind === 'PUMP')
+  const pumps = nodes.filter((n) => n.kind === 'ISLAND')
   for (let i = 0; i < pumps.length; i++) {
     for (let j = i + 1; j < pumps.length; j++) {
       const a = pumps[i]

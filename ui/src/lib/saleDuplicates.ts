@@ -11,6 +11,13 @@ export function isHangupDuplicateSale(
 ): boolean {
   if (existing.transactionId === incoming.transactionId) return false
   if (canonicalPumpId(existing.pumpId) !== canonicalPumpId(incoming.pumpId)) return false
+  // US Lab: both hoses share pump-1 — hangup twins must match the same nozzle.
+  const existingNozzle = String(existing.nozzleId || '').trim().toLowerCase()
+  const incomingNozzle = String(incoming.nozzleId || '').trim().toLowerCase()
+  if (existingNozzle && incomingNozzle && existingNozzle !== incomingNozzle) return false
+  const existingSource = String(existing.sourceIdentifier || '').trim().toLowerCase()
+  const incomingSource = String(incoming.sourceIdentifier || '').trim().toLowerCase()
+  if (existingSource && incomingSource && existingSource !== incomingSource) return false
   if (Number(existing.amount) !== Number(incoming.amount)) return false
   if (Number(existing.volumeLiters) !== Number(incoming.volumeLiters)) return false
   const a = Date.parse(existing.receivedAt)

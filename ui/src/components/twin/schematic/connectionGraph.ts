@@ -130,7 +130,7 @@ export function buildConnectionGraph(
     if (!product) {
       warnings.push({
         code: 'PRODUCT_NOT_MAPPED',
-        message: `${pump.label} has no product mapping.`,
+        message: `${pump.label}: Product not mapped.`,
         pumpId: pump.id,
       })
     }
@@ -187,11 +187,29 @@ export function relatedEquipment(
       }
     }
   } else if (selection.pipeId) {
-    const e = edges.find((x) => x.id === selection.pipeId)
-    if (e) {
-      tanks.add(e.tankId)
-      pumps.add(e.pumpId)
-      pipes.add(e.id)
+    const pipeId = selection.pipeId
+    if (pipeId.startsWith('trunk:')) {
+      const tankId = pipeId.slice('trunk:'.length)
+      for (const e of edges) {
+        if (e.tankId === tankId) {
+          tanks.add(e.tankId)
+          pumps.add(e.pumpId)
+          const phys = String(e.raw?.physicalPumpId || '')
+          if (phys) pumps.add(phys)
+          pipes.add(e.id)
+          pipes.add(pipeId)
+        }
+      }
+    } else {
+      const e = edges.find(
+        (x) => x.id === pipeId || (pipeId.startsWith('branch:') && pipeId.startsWith(`branch:${x.id}:`)),
+      )
+      if (e) {
+        tanks.add(e.tankId)
+        pumps.add(e.pumpId)
+        pipes.add(e.id)
+        pipes.add(pipeId)
+      }
     }
   }
   return { tanks, pumps, pipes, active: tanks.size + pumps.size + pipes.size > 0 }

@@ -181,8 +181,12 @@ def test_classify_phase9_topics_and_events():
     assert classify_phase9_message(STATUS_TOPIC, PHASE9_ONLINE) == KIND_DEVICE_STATUS
     filling = {**PHASE9_SALE, "eventType": "FILLING_UPDATED"}
     assert classify_phase9_message(TX_TOPIC, filling) == KIND_TRANSACTION
+    dispensing = {**PHASE9_SALE, "eventType": "DISPENSING_UPDATE"}
+    assert classify_phase9_message(TX_TOPIC, dispensing) == KIND_TRANSACTION
     started = {**PHASE9_SALE, "eventType": "TRANSACTION_STARTED"}
-    assert classify_phase9_message(TX_TOPIC, started) == KIND_IGNORED
+    assert classify_phase9_message(TX_TOPIC, started) == KIND_TRANSACTION
+    filling_done = {**PHASE9_SALE, "eventType": "FILLING_COMPLETED"}
+    assert classify_phase9_message(TX_TOPIC, filling_done) == KIND_TRANSACTION
 
 
 def test_extract_phase9_device_id():
@@ -253,6 +257,7 @@ def test_handle_message_persists_phase9_sale():
             None,
             None,
             None,
+            None,  # deduplication_key lookup
             ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",),
             None,
         ]
@@ -272,6 +277,87 @@ def test_handle_message_persists_phase9_sale():
     assert params[3] == "pump-1"
     assert params[6] == Decimal("12.500")
     assert params[7] == Decimal("146.88")
+    assert params[-1] == PHASE9_SALE["deduplicationKey"]
+
+
+def test_duplicate_deduplication_key_different_transaction_id_ignored():
+    """Restart minting a new UUID with the same dedupe key must not insert."""
+    db, cur = _mock_db(
+        fetchone_side_effect=[
+            None,
+            None,
+            None,  # station resolve
+            None,  # hangup absorb
+            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "COMPLETED"),  # existing dedupe key
+        ]
+    )
+    service = TransactionService(db)
+    payload = dict(PHASE9_SALE)
+    payload["transactionId"] = "ffffffff-1111-2222-3333-444444444444"
+    payload["payload"] = dict(PHASE9_SALE["payload"])
+    payload["payload"]["transaction_uuid"] = payload["transactionId"]
+    tx, err = normalize_transaction(payload, source_topic=TX_TOPIC)
+    assert err is None
+    status = service.process_message(
+        topic=TX_TOPIC,
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+    assert all(
+        "INSERT INTO pump_transactions" not in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+
+
+def test_two_legitimate_sales_same_amount_distinct_dedupe_keys_both_insert():
+    """Identical ₦200 / 0.17 L faces with distinct sale identities both persist."""
+
+    def _run(tx_id: str, dedupe: str) -> str:
+        db, cur = _mock_db()
+
+        def _execute(sql, params=None):
+            sql_s = str(sql)
+            if "INSERT INTO pump_transactions" in sql_s:
+                cur._last_fetch = (params[0],)
+            else:
+                cur._last_fetch = None
+            return None
+
+        cur.execute.side_effect = _execute
+        cur.fetchone.side_effect = lambda: getattr(cur, "_last_fetch", None)
+        service = TransactionService(db)
+        payload = dict(PHASE9_SALE)
+        payload["transactionId"] = tx_id
+        payload["deduplicationKey"] = dedupe
+        payload["payload"] = dict(PHASE9_SALE["payload"])
+        payload["payload"]["transaction_uuid"] = tx_id
+        payload["payload"]["raw_volume"] = 170
+        payload["payload"]["raw_amount"] = 20000
+        tx, err = normalize_transaction(payload, source_topic=TX_TOPIC)
+        assert err is None
+        status = service.process_message(
+            topic=TX_TOPIC,
+            raw_payload=json.dumps(payload).encode(),
+            qos=1,
+            retained=False,
+            payload=payload,
+            transaction=tx,
+            validation_error=None,
+        )
+        inserts = [
+            c
+            for c in cur.execute.call_args_list
+            if "INSERT INTO pump_transactions" in str(c.args[0])
+        ]
+        assert len(inserts) == 1
+        return status
+
+    assert _run("sale-1", "tx-completed:complete:sale-1") == "processed"
+    assert _run("sale-2", "tx-completed:complete:sale-2") == "processed"
 
 
 def test_handle_message_persists_filling_updates():
@@ -299,6 +385,32 @@ def test_handle_message_persists_filling_updates():
     _sql, params = inserts[0].args
     assert "ON CONFLICT (id) DO UPDATE" in _sql
     assert params[0] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert params[11] == "DISPENSING"
+
+
+def test_handle_message_persists_dispensing_update_alias():
+    db, cur = _mock_db(
+        fetchone_side_effect=[
+            None,
+            None,
+            None,
+            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",),
+            None,
+        ]
+    )
+    app = _app(db)
+    filling = dict(PHASE9_SALE)
+    filling["eventType"] = "DISPENSING_UPDATE"
+    filling["payload"] = dict(PHASE9_SALE["payload"])
+    filling["payload"]["final_status"] = "DISPENSING"
+    app.handle_message(TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False)
+    inserts = [
+        c
+        for c in cur.execute.call_args_list
+        if "INSERT INTO pump_transactions" in str(c.args[0])
+    ]
+    assert inserts
+    _sql, params = inserts[0].args
     assert params[11] == "DISPENSING"
 
 

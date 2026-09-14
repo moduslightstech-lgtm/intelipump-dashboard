@@ -12,6 +12,13 @@ from sqlalchemy.orm import Session
 
 from app.models import PumpTransaction
 from app.services.identity import resolve_pump_by_mqtt_external_id, station_query_keys
+from app.services.nozzle_identity import (
+    CanonicalIdentity,
+    NozzleCatalogEntry,
+    canonicalize_sale_row,
+    live_debug_enabled,
+    nozzle_catalog_for_station,
+)
 
 
 def _as_float(value: Decimal | float | int | None) -> Optional[float]:
@@ -20,13 +27,48 @@ def _as_float(value: Decimal | float | int | None) -> Optional[float]:
     return float(value)
 
 
-def serialize_sale(row: PumpTransaction) -> dict[str, Any]:
+def serialize_sale(
+    row: PumpTransaction,
+    catalog: list[NozzleCatalogEntry] | None = None,
+    identity: CanonicalIdentity | None = None,
+) -> dict[str, Any]:
     received = row.received_at or row.transaction_completed_at or row.device_timestamp
+    raw = getattr(row, "raw_payload", None) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    inner = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+    sequence = raw.get("sequence")
+    if sequence is None:
+        sequence = inner.get("sessionSequence") or inner.get("sequence")
+    started = getattr(row, "transaction_started_at", None)
+    completed = getattr(row, "transaction_completed_at", None)
+    event_type = raw.get("eventType") or raw.get("event_type")
+    ident = identity or canonicalize_sale_row(row, catalog)
+    source = getattr(row, "source_identifier", None) or ident.source_identifier
+    if live_debug_enabled():
+        import logging
+
+        logging.getLogger(__name__).info(
+            "live_sale_identity received_pump=%s received_nozzle=%s "
+            "normalized_pump=%s normalized_nozzle=%s transaction_id=%s "
+            "sequence=%s status=%s mapped=%s warning=%s",
+            ident.received_pump_id,
+            ident.received_nozzle_id,
+            ident.pump_id,
+            ident.nozzle_id,
+            row.id,
+            sequence,
+            row.status,
+            ident.mapped,
+            ident.warning,
+        )
     return {
         "transactionId": row.id,
         "stationId": row.station_id,
-        "pumpId": row.pump_id,
-        "nozzleId": row.nozzle_id,
+        "pumpId": ident.pump_id or row.pump_id,
+        "nozzleId": ident.nozzle_id,
+        "sourceIdentifier": source,
+        "mappingWarning": ident.warning,
         "product": row.product,
         "volumeLiters": _as_float(row.volume_liters),
         "amount": _as_float(row.amount),
@@ -35,7 +77,69 @@ def serialize_sale(row: PumpTransaction) -> dict[str, Any]:
         "status": row.status,
         "sourceTopic": row.source_topic,
         "receivedAt": received.isoformat() if received else None,
+        "sequence": int(sequence) if str(sequence).isdigit() or isinstance(sequence, int) else sequence,
+        "eventType": event_type,
+        "startedAt": started.isoformat() if started else inner.get("started_at") or inner.get("startedAt"),
+        "completedAt": completed.isoformat() if completed else inner.get("completed_at") or inner.get("completedAt"),
     }
+
+
+def nozzle_state_event(sale: dict[str, Any]) -> dict[str, Any]:
+    status = str(sale.get("status") or "").upper()
+    state = (
+        "DISPENSING"
+        if status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+        else "COMPLETED"
+        if status in {"COMPLETED", "COMPLETE"}
+        else status or "IDLE"
+    )
+    return {
+        "type": "nozzle_state_changed",
+        "stationId": sale.get("stationId"),
+        "pumpId": sale.get("pumpId"),
+        "nozzleId": sale.get("nozzleId"),
+        "transactionId": sale.get("transactionId"),
+        "state": state,
+        "amount": sale.get("amount"),
+        "volumeLiters": sale.get("volumeLiters"),
+        "pricePerLiter": sale.get("pricePerLiter"),
+        "product": sale.get("product"),
+        "sequence": sale.get("sequence"),
+        "occurredAt": sale.get("receivedAt") or sale.get("completedAt") or sale.get("startedAt"),
+        "startedAt": sale.get("startedAt"),
+        "completedAt": sale.get("completedAt"),
+        "status": sale.get("status"),
+        "eventType": sale.get("eventType"),
+        "sourceIdentifier": sale.get("sourceIdentifier"),
+        "mappingWarning": sale.get("mappingWarning"),
+    }
+
+
+def live_sales_snapshot(
+    db: Session,
+    *,
+    station_id: str,
+    pump_id: Optional[str] = None,
+    limit: int = 80,
+) -> list[PumpTransaction]:
+    """Authoritative live + last-completed rows for SSE reconnect."""
+    rows = recent_sales(db, station_id=station_id, pump_id=pump_id, limit=limit)
+    catalog = nozzle_catalog_for_station(db, station_id)
+    chosen: dict[tuple[str, str], PumpTransaction] = {}
+    for row in rows:
+        ident = canonicalize_sale_row(row, catalog)
+        key = (str(ident.pump_id or row.pump_id or ""), str(ident.nozzle_id or "unknown"))
+        if key in chosen:
+            current = chosen[key]
+            current_live = str(current.status or "").upper() in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+            incoming_live = str(row.status or "").upper() in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+            if current_live and not incoming_live:
+                continue
+            if incoming_live and not current_live:
+                chosen[key] = row
+            continue
+        chosen[key] = row
+    return list(chosen.values())
 
 
 def _station_match(keys: list[str], station_uuid: UUID | None):

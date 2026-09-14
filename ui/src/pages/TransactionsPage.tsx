@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import {
   exportTransactionsUrl,
   fmtLiters,
@@ -7,12 +8,23 @@ import {
   fmtTime,
   getStations,
   getTransactions,
-  humanizeEnum,
   stationLabel,
   type Transaction,
 } from '../api/client'
+import { CompactInput, CompactSelect } from '../components/forms/CompactFields'
 import { useAuth } from '../context/AuthContext'
-import { stationDayEndIso, stationDayStartIso, stationToday } from '../lib/salesDateFilter'
+import { formatStatusLabel } from '../lib/enumPresentation'
+import {
+  stationRangeToUtcIso,
+  stationToday,
+  validateMoneyRange,
+} from '../lib/salesDateFilter'
+import {
+  formatClockLabel,
+  formatSalesRangeHeading,
+  NIGERIA_TZ,
+  timezonePlainLabel,
+} from '../lib/timezoneDisplay'
 
 const PAGE_SIZES = [10, 20, 50, 100]
 
@@ -25,18 +37,51 @@ function statusBadge(status?: string | null) {
   return 'badge-info'
 }
 
+function readParam(sp: URLSearchParams, key: string, fallback = '') {
+  return sp.get(key) ?? fallback
+}
+
 export default function TransactionsPage() {
   const { token } = useAuth()
-  const [stationId, setStationId] = useState('')
-  const [pumpId, setPumpId] = useState('')
-  const [product, setProduct] = useState('')
-  const [status, setStatus] = useState('')
-  const [q, setQ] = useState('')
-  const [dateFrom, setDateFrom] = useState(() => stationToday())
-  const [dateTo, setDateTo] = useState(() => stationToday())
-  const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(20)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [moreFilters, setMoreFilters] = useState(false)
   const [selected, setSelected] = useState<Transaction | null>(null)
+  const [filterError, setFilterError] = useState<string | null>(null)
+
+  const today = stationToday(NIGERIA_TZ)
+
+  // Draft filter fields (applied on Apply / Enter)
+  const [stationId, setStationId] = useState(() => readParam(searchParams, 'station'))
+  const [dateFrom, setDateFrom] = useState(() => readParam(searchParams, 'from', today))
+  const [dateTo, setDateTo] = useState(() => readParam(searchParams, 'to', today))
+  const [fromTime, setFromTime] = useState(() => readParam(searchParams, 'fromTime'))
+  const [toTime, setToTime] = useState(() => readParam(searchParams, 'toTime'))
+  const [status, setStatus] = useState(() => readParam(searchParams, 'status'))
+  const [q, setQ] = useState(() => readParam(searchParams, 'q'))
+  const [minAmount, setMinAmount] = useState(() => readParam(searchParams, 'minAmount'))
+  const [maxAmount, setMaxAmount] = useState(() => readParam(searchParams, 'maxAmount'))
+  const [minUnitPrice, setMinUnitPrice] = useState(() => readParam(searchParams, 'minUnitPrice'))
+  const [maxUnitPrice, setMaxUnitPrice] = useState(() => readParam(searchParams, 'maxUnitPrice'))
+  const [page, setPage] = useState(() => Math.max(1, Number(readParam(searchParams, 'page', '1')) || 1))
+  const [pageSize, setPageSize] = useState(() => {
+    const n = Number(readParam(searchParams, 'size', '20'))
+    return PAGE_SIZES.includes(n) ? n : 20
+  })
+
+  // Applied snapshot used for queries
+  const [applied, setApplied] = useState(() => ({
+    stationId: readParam(searchParams, 'station'),
+    dateFrom: readParam(searchParams, 'from', today),
+    dateTo: readParam(searchParams, 'to', today),
+    fromTime: readParam(searchParams, 'fromTime'),
+    toTime: readParam(searchParams, 'toTime'),
+    status: readParam(searchParams, 'status'),
+    q: readParam(searchParams, 'q'),
+    minAmount: readParam(searchParams, 'minAmount'),
+    maxAmount: readParam(searchParams, 'maxAmount'),
+    minUnitPrice: readParam(searchParams, 'minUnitPrice'),
+    maxUnitPrice: readParam(searchParams, 'maxUnitPrice'),
+  }))
 
   const stationsQ = useQuery({
     queryKey: ['stations'],
@@ -45,48 +90,196 @@ export default function TransactionsPage() {
 
   const catalogStations = stationsQ.data || []
   const selectedStation = useMemo(
-    () => catalogStations.find((s) => s.station_code === stationId || s.id === stationId) || catalogStations[0],
-    [catalogStations, stationId],
+    () =>
+      catalogStations.find(
+        (s) =>
+          s.station_code === (applied.stationId || stationId) ||
+          s.id === (applied.stationId || stationId),
+      ) || catalogStations[0],
+    [catalogStations, applied.stationId, stationId],
   )
-  const stationFilter = stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
-  const tz = selectedStation?.timezone || 'Africa/Lagos'
+  const stationFilter =
+    applied.stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
+  const tz = selectedStation?.timezone || NIGERIA_TZ
 
-  const params = useMemo(
-    () => ({
+  const moneyAmt = validateMoneyRange(applied.minAmount, applied.maxAmount, 'Sale amount')
+  const moneyPrice = validateMoneyRange(applied.minUnitPrice, applied.maxUnitPrice, 'Unit price')
+  const range = stationRangeToUtcIso({
+    dateFrom: applied.dateFrom,
+    dateTo: applied.dateTo,
+    fromTime: applied.fromTime,
+    toTime: applied.toTime,
+    timeZone: tz,
+  })
+
+  const params = useMemo(() => {
+    const err = moneyAmt.error || moneyPrice.error || range.error
+    if (err) return null
+    return {
       page,
       size: pageSize,
       sort: 'received_at,desc',
       station_id: stationFilter || undefined,
-      pump_id: pumpId || undefined,
-      product: product || undefined,
-      status: status || undefined,
-      q: q || undefined,
-      start: dateFrom ? stationDayStartIso(dateFrom, tz) : undefined,
-      end: dateTo ? stationDayEndIso(dateTo, tz) : undefined,
-    }),
-    [page, pageSize, stationFilter, pumpId, product, status, q, dateFrom, dateTo, tz],
-  )
+      status: applied.status || undefined,
+      q: applied.q || undefined,
+      date_from: applied.dateFrom || undefined,
+      date_to: applied.dateTo || undefined,
+      from_time: applied.fromTime || undefined,
+      to_time: applied.toTime || undefined,
+      timezone: tz,
+      min_amount: moneyAmt.min != null ? String(moneyAmt.min) : undefined,
+      max_amount: moneyAmt.max != null ? String(moneyAmt.max) : undefined,
+      min_unit_price: moneyPrice.min != null ? String(moneyPrice.min) : undefined,
+      max_unit_price: moneyPrice.max != null ? String(moneyPrice.max) : undefined,
+    }
+  }, [
+    page,
+    pageSize,
+    stationFilter,
+    applied,
+    tz,
+    moneyAmt.error,
+    moneyAmt.min,
+    moneyAmt.max,
+    moneyPrice.error,
+    moneyPrice.min,
+    moneyPrice.max,
+    range.error,
+  ])
 
   const txQ = useQuery({
     queryKey: ['transactions', params],
-    queryFn: async () => (await getTransactions(params)).data,
+    queryFn: async () => (await getTransactions(params || {})).data,
+    enabled: Boolean(params),
   })
+
+  const syncUrl = useCallback(
+    (next: typeof applied, nextPage: number, nextSize: number) => {
+      const sp = new URLSearchParams()
+      if (next.stationId) sp.set('station', next.stationId)
+      if (next.dateFrom) sp.set('from', next.dateFrom)
+      if (next.dateTo) sp.set('to', next.dateTo)
+      if (next.fromTime) sp.set('fromTime', next.fromTime)
+      if (next.toTime) sp.set('toTime', next.toTime)
+      if (next.status) sp.set('status', next.status)
+      if (next.q) sp.set('q', next.q)
+      if (next.minAmount) sp.set('minAmount', next.minAmount)
+      if (next.maxAmount) sp.set('maxAmount', next.maxAmount)
+      if (next.minUnitPrice) sp.set('minUnitPrice', next.minUnitPrice)
+      if (next.maxUnitPrice) sp.set('maxUnitPrice', next.maxUnitPrice)
+      if (nextPage > 1) sp.set('page', String(nextPage))
+      if (nextSize !== 20) sp.set('size', String(nextSize))
+      setSearchParams(sp, { replace: true })
+    },
+    [setSearchParams],
+  )
+
+  const applyFilters = (opts?: { page?: number }) => {
+    const draft = {
+      stationId: stationId || selectedStation?.station_code || '',
+      dateFrom,
+      dateTo,
+      fromTime,
+      toTime,
+      status,
+      q: q.trim(),
+      minAmount: minAmount.trim(),
+      maxAmount: maxAmount.trim(),
+      minUnitPrice: minUnitPrice.trim(),
+      maxUnitPrice: maxUnitPrice.trim(),
+    }
+    const amt = validateMoneyRange(draft.minAmount, draft.maxAmount, 'Sale amount')
+    const price = validateMoneyRange(draft.minUnitPrice, draft.maxUnitPrice, 'Unit price')
+    const win = stationRangeToUtcIso({
+      dateFrom: draft.dateFrom,
+      dateTo: draft.dateTo,
+      fromTime: draft.fromTime,
+      toTime: draft.toTime,
+      timeZone: selectedStation?.timezone || NIGERIA_TZ,
+    })
+    const err = amt.error || price.error || win.error || null
+    setFilterError(err)
+    if (err) return
+    const nextPage = opts?.page ?? 1
+    setApplied(draft)
+    setPage(nextPage)
+    syncUrl(draft, nextPage, pageSize)
+  }
+
+  const clearFilters = () => {
+    const day = stationToday(selectedStation?.timezone || NIGERIA_TZ)
+    setStationId(selectedStation?.station_code || '')
+    setDateFrom(day)
+    setDateTo(day)
+    setFromTime('')
+    setToTime('')
+    setStatus('')
+    setQ('')
+    setMinAmount('')
+    setMaxAmount('')
+    setMinUnitPrice('')
+    setMaxUnitPrice('')
+    setFilterError(null)
+    const draft = {
+      stationId: selectedStation?.station_code || '',
+      dateFrom: day,
+      dateTo: day,
+      fromTime: '',
+      toTime: '',
+      status: '',
+      q: '',
+      minAmount: '',
+      maxAmount: '',
+      minUnitPrice: '',
+      maxUnitPrice: '',
+    }
+    setApplied(draft)
+    setPage(1)
+    syncUrl(draft, 1, pageSize)
+  }
+
+  const previousDay = () => {
+    if (!applied.dateFrom) return
+    const d = new Date(`${applied.dateFrom}T12:00:00Z`)
+    d.setUTCDate(d.getUTCDate() - 1)
+    const ymd = d.toISOString().slice(0, 10)
+    setDateFrom(ymd)
+    setDateTo(ymd)
+    const draft = { ...applied, dateFrom: ymd, dateTo: ymd }
+    setApplied(draft)
+    setPage(1)
+    syncUrl(draft, 1, pageSize)
+  }
+
+  useEffect(() => {
+    if (catalogStations.length && !applied.stationId && selectedStation?.station_code) {
+      setStationId(selectedStation.station_code)
+      setApplied((prev) => ({ ...prev, stationId: selectedStation.station_code }))
+    }
+  }, [catalogStations.length, applied.stationId, selectedStation?.station_code])
 
   const total = txQ.data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const items = txQ.data?.items || []
 
-  const resetPage = () => setPage(1)
-
   const downloadCsv = () => {
+    if (!params) {
+      setFilterError(filterError || 'Fix filter validation before exporting.')
+      return
+    }
     const url = exportTransactionsUrl({
-      station_id: stationFilter || undefined,
-      pump_id: pumpId || undefined,
-      product: product || undefined,
-      status: status || undefined,
-      q: q || undefined,
-      start: dateFrom ? stationDayStartIso(dateFrom, tz) : undefined,
-      end: dateTo ? stationDayEndIso(dateTo, tz) : undefined,
+      station_id: params.station_id,
+      status: params.status,
+      q: params.q,
+      date_from: params.date_from,
+      date_to: params.date_to,
+      from_time: params.from_time,
+      to_time: params.to_time,
+      timezone: params.timezone,
+      min_amount: params.min_amount,
+      max_amount: params.max_amount,
+      min_unit_price: params.min_unit_price,
+      max_unit_price: params.max_unit_price,
     })
     const a = document.createElement('a')
     a.setAttribute('download', 'transactions.csv')
@@ -101,131 +294,237 @@ export default function TransactionsPage() {
       .catch(() => alert('Export failed'))
   }
 
-  const rangeLabel =
-    dateFrom || dateTo
-      ? `${dateFrom || '…'} → ${dateTo || '…'} (${tz})`
-      : `All dates (${tz})`
+  const chips: { key: string; label: string; clear: () => void }[] = []
+  if (applied.fromTime || applied.toTime) {
+    chips.push({
+      key: 'time',
+      label: `${formatClockLabel(applied.fromTime || '00:00')}–${formatClockLabel(applied.toTime || '23:59')}`,
+      clear: () => {
+        setFromTime('')
+        setToTime('')
+        const draft = { ...applied, fromTime: '', toTime: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
+  if (applied.minAmount || applied.maxAmount) {
+    chips.push({
+      key: 'amount',
+      label: `Amount: ₦${applied.minAmount || '…'}–₦${applied.maxAmount || '…'}`,
+      clear: () => {
+        setMinAmount('')
+        setMaxAmount('')
+        const draft = { ...applied, minAmount: '', maxAmount: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
+  if (applied.minUnitPrice || applied.maxUnitPrice) {
+    chips.push({
+      key: 'price',
+      label: `Unit price: ₦${applied.minUnitPrice || '…'}–₦${applied.maxUnitPrice || '…'}/L`,
+      clear: () => {
+        setMinUnitPrice('')
+        setMaxUnitPrice('')
+        const draft = { ...applied, minUnitPrice: '', maxUnitPrice: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
+  if (applied.status) {
+    chips.push({
+      key: 'status',
+      label: formatStatusLabel(applied.status),
+      clear: () => {
+        setStatus('')
+        const draft = { ...applied, status: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
+
+  const onFilterKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      applyFilters()
+    }
+  }
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-[1600px]">
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="section-title">Transactions</h1>
+          <h1 className="section-title">Sales</h1>
           <p className="text-slate-400 text-sm mt-1">
-            Sales for the selected date range and station timezone. KPI cards use the same filters as the table.
+            Sales for {formatSalesRangeHeading(applied.dateFrom, applied.dateTo)} · Times shown in{' '}
+            {timezonePlainLabel(tz)}
           </p>
         </div>
-        <button type="button" className="btn-secondary" onClick={downloadCsv}>
+        <button type="button" className="btn-secondary btn-compact" onClick={downloadCsv}>
           Export CSV
         </button>
       </div>
 
-      <div className="card grid md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-3 sticky top-0 z-10 bg-slate-800">
-        <select
-          className="input"
-          value={selectedStation?.station_code || ''}
-          onChange={(e) => {
-            setStationId(e.target.value)
-            resetPage()
-          }}
-          aria-label="Station"
-        >
-          {catalogStations.length === 0 && <option value="">No stations yet</option>}
-          {catalogStations.map((s) => (
-            <option key={s.id} value={s.station_code}>
-              {stationLabel(s)}
-            </option>
-          ))}
-        </select>
-        <label className="block text-xs text-slate-400">
-          From date
-          <input
+      <form
+        className="card space-y-3 sticky top-0 z-10 bg-slate-800/95 backdrop-blur-sm"
+        onSubmit={(e) => {
+          e.preventDefault()
+          applyFilters()
+        }}
+        onKeyDown={onFilterKeyDown}
+      >
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 items-end">
+          <CompactSelect
+            label="Station"
+            value={selectedStation?.station_code || stationId}
+            onChange={(e) => setStationId(e.target.value)}
+          >
+            {catalogStations.length === 0 && <option value="">No stations yet</option>}
+            {catalogStations.map((s) => (
+              <option key={s.id} value={s.station_code}>
+                {stationLabel(s)}
+              </option>
+            ))}
+          </CompactSelect>
+          <CompactInput
+            label="From date"
             type="date"
-            className="input mt-1 w-full"
             value={dateFrom}
             max={dateTo || undefined}
-            onChange={(e) => {
-              setDateFrom(e.target.value)
-              resetPage()
-            }}
+            onChange={(e) => setDateFrom(e.target.value)}
           />
-        </label>
-        <label className="block text-xs text-slate-400">
-          To date
-          <input
+          <CompactInput
+            label="To date"
             type="date"
-            className="input mt-1 w-full"
             value={dateTo}
             min={dateFrom || undefined}
-            onChange={(e) => {
-              setDateTo(e.target.value)
-              resetPage()
-            }}
+            onChange={(e) => setDateTo(e.target.value)}
           />
-        </label>
-        <input
-          className="input"
-          placeholder="Pump ID"
-          value={pumpId}
-          onChange={(e) => {
-            setPumpId(e.target.value)
-            resetPage()
-          }}
-        />
-        <input
-          className="input"
-          placeholder="Product"
-          value={product}
-          onChange={(e) => {
-            setProduct(e.target.value)
-            resetPage()
-          }}
-        />
-        <select
-          className="input"
-          value={status}
-          onChange={(e) => {
-            setStatus(e.target.value)
-            resetPage()
-          }}
-        >
-          <option value="">All statuses</option>
-          <option value="COMPLETED">Completed</option>
-          <option value="DISPENSING">Dispensing</option>
-          <option value="PENDING">Pending</option>
-          <option value="REJECTED">Rejected</option>
-        </select>
-        <input
-          className="input"
-          placeholder="Search transaction ID"
-          value={q}
-          onChange={(e) => {
-            setQ(e.target.value)
-            resetPage()
-          }}
-        />
-      </div>
+          <CompactSelect label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
+            <option value="">All statuses</option>
+            <option value="COMPLETED">Complete</option>
+            <option value="DISPENSING">Dispensing</option>
+            <option value="PENDING">Pending</option>
+            <option value="REJECTED">Rejected</option>
+          </CompactSelect>
+          <CompactInput
+            label="Transaction ID"
+            placeholder="Search ID"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            className="xl:col-span-1"
+          />
+          <div className="flex gap-2 items-end">
+            <button type="submit" className="btn-primary btn-compact flex-1">
+              Apply filters
+            </button>
+          </div>
+          <div className="flex gap-2 items-end">
+            <button type="button" className="btn-secondary btn-compact flex-1" onClick={clearFilters}>
+              Clear filters
+            </button>
+          </div>
+        </div>
+
+        <div className="flex items-center justify-between gap-2 lg:hidden">
+          <button
+            type="button"
+            className="text-xs text-sky-300 hover:underline"
+            onClick={() => setMoreFilters((v) => !v)}
+            aria-expanded={moreFilters}
+          >
+            {moreFilters ? 'Hide more filters' : 'More filters'}
+          </button>
+        </div>
+
+        <div className={`${moreFilters ? 'grid' : 'hidden'} lg:grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 items-end`}>
+          <CompactInput
+            label="From time"
+            type="time"
+            value={fromTime}
+            onChange={(e) => setFromTime(e.target.value)}
+          />
+          <CompactInput label="To time" type="time" value={toTime} onChange={(e) => setToTime(e.target.value)} />
+          <CompactInput
+            label="Min sale amount (₦)"
+            inputMode="decimal"
+            placeholder="500"
+            value={minAmount}
+            onChange={(e) => setMinAmount(e.target.value)}
+          />
+          <CompactInput
+            label="Max sale amount (₦)"
+            inputMode="decimal"
+            placeholder="5000"
+            value={maxAmount}
+            onChange={(e) => setMaxAmount(e.target.value)}
+          />
+          <CompactInput
+            label="Min unit price (₦/L)"
+            inputMode="decimal"
+            placeholder="1100"
+            value={minUnitPrice}
+            onChange={(e) => setMinUnitPrice(e.target.value)}
+          />
+          <CompactInput
+            label="Max unit price (₦/L)"
+            inputMode="decimal"
+            placeholder="1250"
+            value={maxUnitPrice}
+            onChange={(e) => setMaxUnitPrice(e.target.value)}
+          />
+        </div>
+
+        {filterError ? (
+          <p className="text-sm text-red-300" role="alert">
+            {filterError}
+          </p>
+        ) : null}
+      </form>
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <Kpi label={`Sales (${rangeLabel})`} value={fmtNaira(txQ.data?.total_amount)} />
+        <Kpi label={`Sales · ${formatSalesRangeHeading(applied.dateFrom, applied.dateTo)}`} value={fmtNaira(txQ.data?.total_amount)} />
         <Kpi label="Volume" value={fmtLiters(txQ.data?.total_volume)} />
-        <Kpi label="Transactions" value={String(total)} />
+        <Kpi label="Transactions" value={String(params ? total : 0)} />
         <Kpi label="Average" value={fmtNaira(txQ.data?.average_amount)} />
       </div>
 
       <div className="card overflow-x-auto">
-        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
-          <h2 className="text-white font-semibold text-sm">
-            {stationLabel(selectedStation)} · {rangeLabel}
-          </h2>
+        <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
+          <div>
+            <h2 className="text-white font-semibold text-sm">{stationLabel(selectedStation)}</h2>
+            <p className="text-xs text-slate-400 mt-0.5">{formatSalesRangeHeading(applied.dateFrom, applied.dateTo)}</p>
+            {chips.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5 mt-2">
+                {chips.map((c) => (
+                  <button key={c.key} type="button" className="filter-chip" onClick={c.clear} title="Remove filter">
+                    {c.label}
+                    <span aria-hidden className="text-slate-500">
+                      ×
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <label className="text-xs text-slate-400">
             Page size
             <select
-              className="input ml-2 w-auto"
+              className="input-compact ml-2 w-auto inline-block"
               value={pageSize}
               onChange={(e) => {
-                setPageSize(Number(e.target.value))
-                resetPage()
+                const size = Number(e.target.value)
+                setPageSize(size)
+                setPage(1)
+                syncUrl(applied, 1, size)
               }}
             >
               {PAGE_SIZES.map((n) => (
@@ -244,15 +543,28 @@ export default function TransactionsPage() {
             ))}
           </div>
         ) : txQ.isError ? (
-          <div className="py-10 text-center" role="alert">
+          <div className="py-8 text-center" role="alert">
             <p className="text-red-300 text-sm mb-3">Could not load transactions.</p>
-            <button type="button" className="btn-secondary" onClick={() => txQ.refetch()}>
+            <button type="button" className="btn-secondary btn-compact" onClick={() => txQ.refetch()}>
               Retry
             </button>
           </div>
-        ) : items.length === 0 ? (
-          <div className="py-10 text-center text-slate-500 text-sm">
-            No transactions match this station, date range, and filters.
+        ) : !params || items.length === 0 ? (
+          <div className="py-8 text-center space-y-3" data-testid="sales-empty">
+            <p className="text-white font-medium text-sm">No sales found</p>
+            <p className="text-slate-400 text-sm max-w-md mx-auto">
+              No transactions match the selected filters. Try changing the date, time, price range, or station.
+            </p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              <button type="button" className="btn-secondary btn-compact" onClick={clearFilters}>
+                Clear filters
+              </button>
+              {applied.dateFrom === applied.dateTo ? (
+                <button type="button" className="btn-secondary btn-compact" onClick={previousDay}>
+                  Previous day
+                </button>
+              ) : null}
+            </div>
           </div>
         ) : (
           <table className="w-full text-sm table-fixed min-w-[960px]">
@@ -296,7 +608,7 @@ export default function TransactionsPage() {
                       {fmtNaira(t.amount)}
                     </td>
                     <td className="py-2 pr-3" data-testid="tx-status">
-                      <span className={statusBadge(t.status)}>{humanizeEnum(t.status)}</span>
+                      <span className={statusBadge(t.status)}>{formatStatusLabel(t.status)}</span>
                     </td>
                     <td className="py-2 pr-3">
                       {!mappedProduct || !mappedNozzle ? (
@@ -319,27 +631,42 @@ export default function TransactionsPage() {
           </table>
         )}
 
-        <div className="flex items-center justify-between mt-4 text-sm text-slate-400">
-          <span>
-            {total ? (page - 1) * pageSize + 1 : 0}–{Math.min(page * pageSize, total)} of {total}
-          </span>
-          <div className="flex gap-2">
-            <button type="button" className="btn-secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
-              Previous
-            </button>
-            <span className="px-2 py-2">
-              Page {page} / {totalPages}
+        {params && items.length > 0 ? (
+          <div className="flex items-center justify-between mt-4 text-sm text-slate-400">
+            <span>
+              {total ? (page - 1) * pageSize + 1 : 0}–{Math.min(page * pageSize, total)} of {total}
             </span>
-            <button
-              type="button"
-              className="btn-secondary"
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                disabled={page <= 1}
+                onClick={() => {
+                  const p = page - 1
+                  setPage(p)
+                  syncUrl(applied, p, pageSize)
+                }}
+              >
+                Previous
+              </button>
+              <span className="px-2 py-2">
+                Page {page} / {totalPages}
+              </span>
+              <button
+                type="button"
+                className="btn-secondary btn-compact"
+                disabled={page >= totalPages}
+                onClick={() => {
+                  const p = page + 1
+                  setPage(p)
+                  syncUrl(applied, p, pageSize)
+                }}
+              >
+                Next
+              </button>
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
 
       {selected && (
@@ -353,7 +680,7 @@ export default function TransactionsPage() {
           <p className="font-mono text-xs text-slate-400 break-all">ID {selected.id}</p>
           <p>Nozzle: {selected.nozzle_id || 'Not mapped'}</p>
           <p>Device: {selected.device_id || '—'}</p>
-          <p>MQTT station id: {selected.station_id}</p>
+          <p>Time: {fmtTime(selected.received_at, tz)}</p>
         </div>
       )}
     </div>

@@ -1,4 +1,5 @@
 import { fmtLiters, fmtNaira, type DayCloseRow } from '../../api/client'
+import { formatStatusLabel } from '../../lib/enumPresentation'
 import {
   financialStatus,
   financialVarianceAmount,
@@ -66,27 +67,29 @@ export default function StationReconciliationList({
                     <span className="text-slate-500">Financial</span>
                     <span className={statusBadge(fin).className}>
                       {fin === 'WAITING'
-                        ? 'WAITING'
+                        ? formatStatusLabel('WAITING')
                         : variance == null
-                          ? fin
-                          : `${fin} ${formatFinancialVariance(row)}`}
+                          ? formatStatusLabel(fin)
+                          : `${formatStatusLabel(fin)} ${formatFinancialVariance(row)}`}
                     </span>
                   </div>
                   <div className="flex justify-between gap-2">
-                    <span className="text-slate-500">Integrity</span>
+                    <span className="text-slate-500">Transaction integrity</span>
                     <span className={statusBadge(row.integrity?.status).className}>
-                      {row.integrity?.status || 'WAITING'}
+                      {formatStatusLabel(row.integrity?.status || 'WAITING')}
                     </span>
                   </div>
                   <div className="flex justify-between gap-2">
-                    <span className="text-slate-500">Inventory</span>
+                    <span className="text-slate-500">Tank inventory</span>
                     <span className={statusBadge(row.inventory?.status).className}>
-                      {row.inventory?.status || 'INCOMPLETE'}
+                      {formatStatusLabel(row.inventory?.status || 'INCOMPLETE')}
                     </span>
                   </div>
                 </div>
                 <div className="mt-2">
-                  <span className={statusBadge(workflowStatus(row)).className}>{workflowStatus(row)}</span>
+                  <span className={statusBadge(workflowStatus(row)).className}>
+                    {formatStatusLabel(workflowStatus(row))}
+                  </span>
                 </div>
               </button>
             </li>

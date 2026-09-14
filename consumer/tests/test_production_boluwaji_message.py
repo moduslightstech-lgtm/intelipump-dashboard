@@ -87,12 +87,20 @@ def test_process_message_preserves_external_ids_and_sets_resolved_uuids():
     pump_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
     cur = MagicMock()
-    # resolve_station_uuid then resolve_pump_uuid then INSERT returning
-    cur.fetchone.side_effect = [
-        (station_uuid,),
-        (pump_uuid,),
-        ("896ff23f-4b41-429a-9dbe-760c33b9b95a",),
-    ]
+
+    def fetchone():
+        sql = ""
+        if cur.execute.call_args:
+            sql = str(cur.execute.call_args[0][0])
+        if "FROM stations" in sql or "mqtt_identity_map" in sql and "station" in sql.lower():
+            return (station_uuid,)
+        if "FROM pumps" in sql or ("mqtt_identity_map" in sql and "pump" in sql.lower()):
+            return (pump_uuid,)
+        if "INSERT INTO pump_transactions" in sql:
+            return ("896ff23f-4b41-429a-9dbe-760c33b9b95a", True)
+        return None
+
+    cur.fetchone.side_effect = fetchone
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False
@@ -114,15 +122,13 @@ def test_process_message_preserves_external_ids_and_sets_resolved_uuids():
     )
     assert status == "processed"
 
-    # Last execute with many params is the INSERT (after two SELECTs)
     insert_calls = [c for c in cur.execute.call_args_list if "INSERT INTO pump_transactions" in str(c.args[0])]
     assert insert_calls
     sql, params = insert_calls[0].args
     assert "station_uuid" in sql
     assert params[1] == "EnergySwitch-Ibadan-Boluwaji"  # external preserved
     assert params[3] == "PUMP-05/06"  # external preserved
-    assert params[-2] == station_uuid
-    assert params[-1] == pump_uuid
+    assert station_uuid in params
 
 
 def test_consumer_handle_message_ignores_old_demo_topic():

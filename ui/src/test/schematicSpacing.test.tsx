@@ -8,10 +8,11 @@ import {
   minGap,
   nodesHaveNoOverlap,
   pumpCardsConflict,
-  pumpsInSameIsland,
 } from '../components/twin/schematic/autoLayout'
 import { buildConnectionGraph, relatedEquipment } from '../components/twin/schematic/connectionGraph'
 import {
+  DISPENSER_WIDTH,
+  HOSE_OVERHANG,
   ISLAND_GAP_X,
   ISLAND_GAP_Y,
   MAX_CANVAS_H,
@@ -19,7 +20,6 @@ import {
   MIN_ZOOM,
   PIPE_CLEARANCE,
   PUMP_HORIZONTAL_GAP,
-  PUMP_NODE_WIDTH,
   PUMP_VERTICAL_GAP,
 } from '../components/twin/schematic/constants'
 import { fourTankTwelvePumpState } from '../components/twin/schematic/fourByTwelveFixture'
@@ -85,16 +85,15 @@ function assertPumpSpacing(nodes: SchematicNode[]) {
   const tanks = nodes.filter((n) => n.kind === 'TANK')
   expect(nodesHaveNoOverlap(nodes)).toBe(true)
   expect(pumpCardsConflict(nodes)).toBe(false)
-  expect(pumps.every((p) => p.w >= PUMP_NODE_WIDTH)).toBe(true)
+    expect(islands.every((p) => p.w >= HOSE_OVERHANG * 2)).toBe(true)
 
-  for (let i = 0; i < pumps.length; i++) {
-    for (let j = i + 1; j < pumps.length; j++) {
-      const a = pumps[i]
-      const b = pumps[j]
+  for (let i = 0; i < islands.length; i++) {
+    for (let j = i + 1; j < islands.length; j++) {
+      const a = islands[i]
+      const b = islands[j]
       expect(minGap(a, b)).toBeGreaterThan(0)
-      const sameIsland = pumpsInSameIsland(a, b)
       const sameRow = Math.abs(a.y - b.y) < 4
-      if (sameIsland && sameRow) {
+      if (sameRow) {
         expect(horizontalGap(a, b)).toBeGreaterThanOrEqual(PUMP_HORIZONTAL_GAP)
       }
       if (rectsHorizontallyAligned(a, b) && Math.abs(a.x - b.x) < 4) {
@@ -142,10 +141,10 @@ describe('pump bounding boxes and required spacing', () => {
       viewportWidth: 1440,
       metrics: { pumpW: 220, pumpH: 150, tankW: 248, tankH: 168 },
     })
-    const pumps = nodes.filter((n) => n.kind === 'PUMP').sort((a, b) => a.x - b.x)
-    expect(pumps[0].w).toBe(220)
-    expect(pumps[0].h).toBe(150)
-    expect(horizontalGap(pumps[0], pumps[1])).toBeGreaterThanOrEqual(32)
+    const islands = nodes.filter((n) => n.kind === 'ISLAND').sort((a, b) => a.x - b.x)
+    expect(islands[0].w).toBe(HOSE_OVERHANG * 2 + 220)
+    expect(islands[0].h).toBe(150)
+    expect(horizontalGap(islands[0], islands[1])).toBeGreaterThanOrEqual(PUMP_HORIZONTAL_GAP)
     assertPumpSpacing(nodes)
   })
 })
@@ -155,16 +154,22 @@ describe('pipe handles and clearance', () => {
     const state = nPumpState(2, 1)
     const nodes = buildForecourtNodes(state, 1440)
     const { edges } = buildConnectionGraph(nodes, state.tankPumpConnections)
-    const { routes } = buildManifoldRoutes(nodes, edges)
+    const { routes, trunks } = buildManifoldRoutes(nodes, edges)
     const tank = nodes.find((n) => n.kind === 'TANK')!
     const pumps = nodes.filter((n) => n.kind === 'PUMP')
     expect(getTankOutletAnchor(tank).y).toBe(tank.y + tankOutletOffset(tank.h))
     expect(getTankOutletAnchor(tank).y).toBeLessThan(tank.y + tank.h)
+    expect(trunks).toHaveLength(1)
+    expect(trunks[0].source.y).toBe(getTankOutletAnchor(tank).y)
     for (const r of routes) {
-      const pump = pumps.find((p) => p.id === r.pumpId)!
-      expect(r.source.y).toBe(getTankOutletAnchor(tank).y)
-      expect(r.target.x).toBe(getPumpInletAnchor(pump).x)
-      expect(r.target.y).toBe(pump.y)
+      const target =
+        nodes.find((n) => n.id === r.targetNodeId || n.id === r.pumpId) ||
+        pumps.find((p) => p.id === r.pumpId)
+      expect(target).toBeTruthy()
+      expect(r.segmentType).toBe('PUMP_SUPPLY')
+      expect(r.source.y).toBe(r.manifoldY)
+      expect(r.target.x).toBe(getPumpInletAnchor(target!).x)
+      expect(r.target.y).toBe(target!.y)
       expect(r.manifoldY).toBeGreaterThanOrEqual(tank.y + tank.h + PIPE_CLEARANCE)
     }
   })
@@ -248,29 +253,19 @@ describe('saved overlapping CUSTOM layout', () => {
           { assetType: 'TANK', assetId: 't1', x: 80, y: 48, width: 200, height: 118 },
           {
             assetType: 'ISLAND',
-            assetId: 'island-1',
+            assetId: 'shell-p1',
             x: 188,
             y: 252,
-            width: 370,
-            height: 164,
+            width: 444,
+            height: 296,
           },
           {
-            assetType: 'PUMP',
-            assetId: 'p1',
-            x: 200,
-            y: 280,
-            width: 168,
-            height: 124,
-            configuration: { islandId: 'island-1' },
-          },
-          {
-            assetType: 'PUMP',
-            assetId: 'p2',
-            x: 378,
-            y: 280,
-            width: 168,
-            height: 124,
-            configuration: { islandId: 'island-1' },
+            assetType: 'ISLAND',
+            assetId: 'shell-p2',
+            x: 220,
+            y: 252,
+            width: 444,
+            height: 296,
           },
         ],
       },
@@ -279,24 +274,23 @@ describe('saved overlapping CUSTOM layout', () => {
 
   it('detects overlapping saved pump rectangles', () => {
     const nodes = buildForecourtNodes(overlappingCustom(), 1440)
-    const pumps = nodes.filter((n) => n.kind === 'PUMP').sort((a, b) => a.x - b.x)
-    expect(pumps).toHaveLength(2)
-    expect(pumps[0].w).toBe(PUMP_NODE_WIDTH)
-    expect(pumps[1].w).toBe(PUMP_NODE_WIDTH)
+    const islands = nodes.filter((n) => n.kind === 'ISLAND').sort((a, b) => a.x - b.x)
+    expect(islands).toHaveLength(2)
+    expect(islands[0].w).toBe(HOSE_OVERHANG * 2 + DISPENSER_WIDTH)
+    expect(islands[1].w).toBe(HOSE_OVERHANG * 2 + DISPENSER_WIDTH)
     expect(detectOverlappingEquipment(nodes)).toBe(true)
     expect(pumpCardsConflict(nodes)).toBe(true)
-    expect(horizontalGap(pumps[0], pumps[1])).toBeLessThan(PUMP_HORIZONTAL_GAP)
+    expect(horizontalGap(islands[0], islands[1])).toBeLessThan(PUMP_HORIZONTAL_GAP)
   })
 
   it('auto arrange corrects overlapping coordinates without needing a save first', () => {
     const arranged = autoArrangeNodes(overlappingCustom(), 1440)
     expect(detectOverlappingEquipment(arranged)).toBe(false)
     assertPumpSpacing(arranged)
+    const islands = arranged.filter((n) => n.kind === 'ISLAND').sort((a, b) => a.x - b.x)
     const pumps = arranged.filter((n) => n.kind === 'PUMP').sort((a, b) => a.x - b.x)
     expect(getPumpInletAnchor(pumps[0]).x).toBe(pumps[0].x + pumps[0].w / 2)
     expect(getPumpInletAnchor(pumps[1]).x).toBe(pumps[1].x + pumps[1].w / 2)
-    expect(getPumpInletAnchor(pumps[1]).x - getPumpInletAnchor(pumps[0]).x).toBeGreaterThanOrEqual(
-      PUMP_NODE_WIDTH + PUMP_HORIZONTAL_GAP,
-    )
+    expect(islands[1].x - (islands[0].x + islands[0].w)).toBeGreaterThanOrEqual(PUMP_HORIZONTAL_GAP)
   })
 })

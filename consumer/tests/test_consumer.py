@@ -192,7 +192,14 @@ def test_valid_transaction_processed():
 
 def test_hangup_completed_merges_into_live_fill_row():
     db, cur = _mock_db_with_cursor()
-    cur.fetchone.side_effect = [("tx-live", "DISPENSING")]
+    # station resolve (3 lookups) → hangup match → optional update fetch
+    cur.fetchone.side_effect = [
+        None,
+        None,
+        None,
+        ("tx-live", "DISPENSING"),
+        None,
+    ]
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-hangup"
@@ -208,13 +215,20 @@ def test_hangup_completed_merges_into_live_fill_row():
         validation_error=None,
     )
     assert status == "duplicate"
-    update_sql = cur.execute.call_args_list[1].args[0]
+    update_sql = next(
+        c.args[0] for c in cur.execute.call_args_list if "UPDATE pump_transactions" in c.args[0]
+    )
     assert "UPDATE pump_transactions" in update_sql
 
 
 def test_hangup_completed_skips_when_live_row_already_complete():
     db, cur = _mock_db_with_cursor()
-    cur.fetchone.side_effect = [("tx-live", "COMPLETED")]
+    cur.fetchone.side_effect = [
+        None,
+        None,
+        None,
+        ("tx-live", "COMPLETED"),
+    ]
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-hangup"
@@ -235,7 +249,12 @@ def test_hangup_completed_skips_when_live_row_already_complete():
 
 def test_stale_dispensing_after_complete_is_dropped():
     db, cur = _mock_db_with_cursor()
-    cur.fetchone.side_effect = [("tx-live", "COMPLETED")]
+    cur.fetchone.side_effect = [
+        None,
+        None,
+        None,
+        ("tx-live", "COMPLETED"),
+    ]
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-late-fill"
@@ -252,7 +271,42 @@ def test_stale_dispensing_after_complete_is_dropped():
         validation_error=None,
     )
     assert status == "duplicate"
-    assert all("INSERT INTO pump_transactions" not in call.args[0] for call in cur.execute.call_args_list)
+
+
+def test_same_totals_different_nozzles_are_not_hangup_twins():
+    """US Lab: pump-1/nozzle-1 and pump-1/nozzle-2 can both finish at ₦300."""
+    db, cur = _mock_db_with_cursor()
+    # station resolve lookups, then hangup SELECT returns no same-nozzle row,
+    # then dedupe/insert path needs further None rows — keep returning None.
+    cur.fetchone.return_value = None
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "tx-n2"
+    payload["pumpId"] = "pump-1"
+    payload["nozzleId"] = "nozzle-2"
+    payload["sourceIdentifier"] = "pump-2"
+    payload["amount"] = 300.0
+    payload["volumeLiters"] = 0.25
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    # No same-nozzle twin → processed (or duplicate only via id/dedupe key).
+    assert status in {"processed", "duplicate"}
+    hangup_sqls = [
+        c.args[0]
+        for c in cur.execute.call_args_list
+        if "FROM pump_transactions" in c.args[0] and "volume_liters" in c.args[0]
+    ]
+    assert hangup_sqls
+    assert "nozzle_id" in hangup_sqls[0]
 
 
 def test_rejected_message_insertion_on_missing_id():

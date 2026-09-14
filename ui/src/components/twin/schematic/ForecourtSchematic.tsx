@@ -20,7 +20,6 @@ import {
   buildForecourtNodes,
   canvasSizeFromNodes,
   detectOverlappingEquipment,
-  islandInteriorFitsPumps,
   metricsFromMeasured,
   metricsGrew,
   schematicViewportHeight,
@@ -33,8 +32,7 @@ import {
   GRID_SIZE,
   MAX_ZOOM,
   MIN_ZOOM,
-  PUMP_NODE_HEIGHT,
-  PUMP_NODE_WIDTH,
+  PUMP_SUPPLY_HANDLE_ID,
   type LayoutMetrics,
 } from './constants'
 import { displayPumpStatus } from './display'
@@ -43,12 +41,11 @@ import { snapToGrid } from './geometry'
 import { createHistory } from './layoutHistory'
 import MobileSchematicList from './MobileSchematicList'
 import IslandSchematicNode from './nodes/IslandSchematicNode'
-import MarkerSchematicNode from './nodes/MarkerSchematicNode'
 import PumpSchematicNode from './nodes/PumpSchematicNode'
 import TankSchematicNode from './nodes/TankSchematicNode'
 import PipeEdge from './edges/PipeEdge'
 import { isSchematicPipeFlowing } from './pipeFlow'
-import { buildManifoldRoutes } from './orthogonalRouting'
+import { buildManifoldRoutes, pipeSegmentsForRender } from './orthogonalRouting'
 import SchematicLegend from './SchematicLegend'
 import type { LayoutPersist, SchematicNode, SchematicSelection } from './types'
 
@@ -56,7 +53,6 @@ const nodeTypes: NodeTypes = {
   tank: TankSchematicNode,
   pump: PumpSchematicNode,
   island: IslandSchematicNode,
-  marker: MarkerSchematicNode,
 }
 
 const edgeTypes: EdgeTypes = {
@@ -87,6 +83,11 @@ function statusById(state?: TwinLiveState) {
   }
   for (const p of state?.pumps || []) {
     map.set(String(p.id), {
+      status: displayPumpStatus(p.inferredStatus || p.status),
+      raw: p,
+      product: p.product,
+    })
+    map.set(`shell-${p.id}`, {
       status: displayPumpStatus(p.inferredStatus || p.status),
       raw: p,
       product: p.product,
@@ -164,12 +165,33 @@ function ForecourtSchematicInner({
     )
   }, [state?.tanks, state?.pumps, state?.lastUpdatedAt])
 
+  const positionKey = useMemo(
+    () => boxes.map((n) => `${n.id}:${n.x}:${n.y}:${n.w}:${n.h}:${n.parentId || ''}`).join('|'),
+    [boxes],
+  )
   const connections = useMemo(() => getConnections(state), [state])
+  const graphKey = useMemo(
+    () =>
+      `${positionKey}|${includeInactive}|${(connections || [])
+        .map((c) => `${c.id}:${c.tankId}:${c.pumpId}:${c.active}:${c.isPrimary}:${c.nozzleId || ''}`)
+        .join('|')}`,
+    [positionKey, includeInactive, connections],
+  )
   const graph = useMemo(
     () => buildConnectionGraph(boxes, connections, { includeInactive }),
-    [boxes, connections, includeInactive],
+    [graphKey],
   )
-  const routes = useMemo(() => buildManifoldRoutes(boxes, graph.edges).routes, [boxes, graph.edges])
+  const stationId = String(
+    state?.station?.mqttStationId || state?.station?.stationCode || state?.station?.id || '',
+  )
+  const { routes: branchRoutes, trunks } = useMemo(
+    () => buildManifoldRoutes(boxes, graph.edges, { stationId }),
+    [graphKey, stationId, graph.edges],
+  )
+  const routes = useMemo(
+    () => pipeSegmentsForRender(branchRoutes, trunks),
+    [branchRoutes, trunks],
+  )
   const size = canvasSizeFromNodes(boxes)
 
   useEffect(() => {
@@ -219,31 +241,51 @@ function ForecourtSchematicInner({
   const rfNodes: Node[] = useMemo(() => {
     const islands = boxes.filter((n) => n.kind === 'ISLAND')
     const pumps = boxes.filter((n) => n.kind === 'PUMP')
-    const nestable = new Set(
-      islands.filter((island) => islandInteriorFitsPumps(island, pumps)).map((i) => i.id),
-    )
     const out: Node[] = []
     for (const island of islands) {
       const islandPumps = pumps.filter((p) => p.parentId === island.id || p.islandId === island.id)
-      const dim = related.active && !islandPumps.some((p) => related.pumps.has(p.id))
+      const dim = related.active && !islandPumps.some((p) => related.pumps.has(p.id) || related.pumps.has(island.id))
+      const selectedNozzleId =
+        selection?.kind === 'PUMP' && selection.node.raw?.assetRole !== 'PHYSICAL_PUMP'
+          ? selection.node.id
+          : null
+      const physicalSelected =
+        selection?.kind === 'PUMP' &&
+        (selection.node.id === island.id ||
+          (selection.node.raw?.assetRole === 'PHYSICAL_PUMP' &&
+            String(selection.node.assetId || selection.node.raw?.id || '') ===
+              String(island.assetId || island.raw?.id || '')))
       out.push({
         id: island.id,
         type: 'island',
         position: { x: island.x, y: island.y },
+        width: island.w,
+        height: island.h,
         style: { width: island.w, height: island.h },
-        data: { label: island.label, dimmed: dim, status: island.status },
+        data: {
+          label: island.label,
+          dimmed: dim,
+          status: island.status,
+          node: island,
+          nozzles: islandPumps,
+          highlighted: related.pumps.has(island.id) || islandPumps.some((p) => related.pumps.has(p.id)),
+          selectedNozzleId,
+          highlightedNozzleIds: physicalSelected
+            ? islandPumps.map((p) => p.id)
+            : islandPumps.filter((p) => related.pumps.has(p.id)).map((p) => p.id),
+          unconnectedIds: islandPumps.filter((p) => unconnected.has(p.id)).map((p) => p.id),
+          productMissingIds: islandPumps.filter((p) => unmapped.has(p.id)).map((p) => p.id),
+          warning: islandPumps.some((p) => unconnected.has(p.id) || unmapped.has(p.id)),
+          onSelectNozzle: (nozzle: SchematicNode) => onSelect?.({ kind: 'PUMP', node: nozzle }),
+        },
         draggable: editMode && canEdit,
         selectable: true,
         zIndex: 1,
       })
     }
     for (const n of boxes) {
-      if (n.kind === 'FORECOURT' || n.kind === 'LABEL' || n.kind === 'ISLAND') continue
-      const nest = Boolean(n.parentId && nestable.has(n.parentId))
-      const parent = nest ? boxes.find((b) => b.id === n.parentId) : null
-      const pos = parent
-        ? { x: n.x - parent.x, y: n.y - parent.y }
-        : { x: n.x, y: n.y }
+      if (n.kind === 'FORECOURT' || n.kind === 'LABEL' || n.kind === 'ISLAND' || n.kind === 'PUMP') continue
+      const pos = { x: n.x, y: n.y }
       if (n.kind === 'TANK') {
         out.push({
           id: n.id,
@@ -258,63 +300,38 @@ function ForecourtSchematicInner({
           draggable: editMode && canEdit,
           zIndex: 3,
         })
-      } else if (n.kind === 'PUMP') {
-        const w = PUMP_NODE_WIDTH
-        const h = Math.max(n.h, PUMP_NODE_HEIGHT)
-        out.push({
-          id: n.id,
-          type: 'pump',
-          position: pos,
-          parentId: nest ? n.parentId : undefined,
-          width: w,
-          height: h,
-          style: { width: w, height: h, minWidth: w, boxSizing: 'border-box' },
-          data: {
-            node: { ...n, w, h },
-            dimmed: related.active && !related.pumps.has(n.id),
-            highlighted:
-              related.pumps.has(n.id) ||
-              Boolean(
-                activeByPump[n.id] ||
-                  activeByPump[n.raw?.mqttPumpId] ||
-                  activeByPump[n.raw?.sourceIdentifier],
-              ),
-            unconnected: unconnected.has(n.id),
-            productMissing: unmapped.has(n.id),
-          },
-          draggable: false,
-          zIndex: 4,
-        })
-      } else {
-        out.push({
-          id: n.id,
-          type: 'marker',
-          position: pos,
-          style: { width: n.w, height: n.h },
-          data: {
-            kind: n.kind,
-            label: n.label,
-            dimmed: related.active,
-          },
-          draggable: editMode && canEdit,
-          zIndex: 2,
-        })
       }
+      // Decorative markers (control room / entrance / exit) are never rendered.
     }
     return out
-  }, [boxes, editMode, canEdit, related, activeByPump, unconnected, unmapped])
+  }, [boxes, editMode, canEdit, related, unconnected, unmapped, selection, onSelect])
 
   const rfEdges: Edge[] = useMemo(
     () =>
       routes.map((r) => {
         const pump = boxes.find((n) => n.kind === 'PUMP' && n.id === r.pumpId)
-        const flowing = isSchematicPipeFlowing(r, pump, activeByPump)
+        const islandId = pump?.parentId || pump?.islandId
+        const flowing = isSchematicPipeFlowing(r, pump, activeByPump, { branches: branchRoutes })
+        if (typeof localStorage !== 'undefined' && localStorage.getItem('INTELIPUMP_DEBUG_LIVE') === '1' && flowing) {
+          // eslint-disable-next-line no-console
+          console.debug('[intelipump-live] flowing-edge', r.id, r.segmentType, r.nozzleId || r.tankId)
+        }
+        const pipeRelated =
+          related.pipes.has(r.id) ||
+          (r.connectionId ? related.pipes.has(r.connectionId) : false) ||
+          (r.segmentType === 'TANK_TRUNK' && related.tanks.has(r.tankId)) ||
+          (r.segmentType === 'PUMP_SUPPLY' &&
+            (related.pumps.has(String(r.physicalPumpId || '')) || related.pumps.has(String(r.pumpId || ''))))
+        const islandTarget =
+          r.segmentType === 'PUMP_SUPPLY'
+            ? r.targetNodeId || islandId || r.pumpId
+            : islandId || r.targetNodeId || r.pumpId
         return {
           id: r.id,
           source: r.tankId,
-          target: r.pumpId,
+          target: islandTarget,
           sourceHandle: 'out',
-          targetHandle: 'in',
+          targetHandle: PUMP_SUPPLY_HANDLE_ID,
           type: 'pipe',
           selectable: true,
           zIndex: flowing ? 1 : 0,
@@ -322,22 +339,28 @@ function ForecourtSchematicInner({
             path: r.path,
             product: r.product,
             role: r.mappingSource,
-            dimmed: related.active && !related.pipes.has(r.id) && !flowing,
-            highlighted: related.pipes.has(r.id) || flowing,
+            dimmed: related.active && !pipeRelated && !flowing,
+            highlighted: pipeRelated || flowing,
             flowing,
+            isFlowing: flowing,
+            segmentType: r.segmentType || 'PUMP_SUPPLY',
+            nozzleId: r.nozzleId,
+            tankId: r.tankId,
+            pumpId: r.physicalPumpId || r.pumpId,
+            stationId: r.stationId,
             label: `${r.product || 'Fuel'} · ${r.mappingSource}`,
           },
         }
       }),
-    [routes, related, boxes, activeByPump],
+    [routes, branchRoutes, related, boxes, activeByPump],
   )
 
   const applyMeasuredLayout = useCallback(() => {
     const rf = flow.getNodes()
-    const pumpNodes = rf.filter((n) => n.type === 'pump')
+    const islandNodes = rf.filter((n) => n.type === 'island')
     const tankNodes = rf.filter((n) => n.type === 'tank')
     const dimsReady =
-      (pumpNodes.length === 0 || pumpNodes.every((n) => (n.measured?.width || 0) > 0 && (n.measured?.height || 0) > 0)) &&
+      (islandNodes.length === 0 || islandNodes.every((n) => (n.measured?.width || 0) > 0 && (n.measured?.height || 0) > 0)) &&
       (tankNodes.length === 0 || tankNodes.every((n) => (n.measured?.width || 0) > 0 && (n.measured?.height || 0) > 0))
     if (!dimsReady) return false
     const measured = metricsFromMeasured(
@@ -357,7 +380,14 @@ function ForecourtSchematicInner({
 
   const fitAll = useCallback(
     (padding: number | { top: number; right: number; bottom: number; left: number } = 0.14) => {
-      flow.fitView({ padding, minZoom: MIN_ZOOM, maxZoom: 1.05, duration: 0 })
+      const equipment = flow.getNodes().filter((n) => n.type === 'tank' || n.type === 'island')
+      flow.fitView({
+        nodes: equipment.length ? equipment : undefined,
+        padding,
+        minZoom: MIN_ZOOM,
+        maxZoom: 1.05,
+        duration: 0,
+      })
     },
     [flow],
   )
@@ -365,7 +395,7 @@ function ForecourtSchematicInner({
   useEffect(() => {
     let cancelled = false
     const frame = window.requestAnimationFrame(() => {
-      rfNodes.forEach((n) => updateNodeInternals(n.id))
+      flow.getNodes().forEach((n) => updateNodeInternals(n.id))
       window.requestAnimationFrame(() => {
         if (cancelled) return
         const ready = applyMeasuredLayout()
@@ -379,7 +409,7 @@ function ForecourtSchematicInner({
       cancelled = true
       window.cancelAnimationFrame(frame)
     }
-  }, [applyMeasuredLayout, fitAll, rfNodes, topo, updateNodeInternals, boxes])
+  }, [applyMeasuredLayout, fitAll, flow, topo, updateNodeInternals, positionKey])
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -403,9 +433,6 @@ function ForecourtSchematicInner({
         })
       }
       else if (box.kind === 'PUMP') onSelect?.({ kind: 'PUMP', node: box })
-      else if (box.kind === 'OFFICE' || box.kind === 'ENTRANCE' || box.kind === 'EXIT') {
-        onSelect?.({ kind: box.kind, node: box })
-      }
     },
     [boxes, onSelect],
   )
@@ -501,7 +528,7 @@ function ForecourtSchematicInner({
     canvasHeight: size.height,
     viewportHeight: typeof window === 'undefined' ? 900 : window.innerHeight,
   })
-  const showMini = size.width > viewportWidth || boxes.filter((n) => n.kind === 'PUMP').length > 8
+  const showMini = size.width > viewportWidth || boxes.filter((n) => n.kind === 'ISLAND').length > 8
   const products = Array.from(new Set(boxes.filter((n) => n.kind === 'TANK').map((n) => String(n.product || ''))))
   const configWarnings = graph.warnings.filter((w) =>
     ['MISSING_REF', 'DUAL_PRIMARY'].includes(w.code),
@@ -511,17 +538,19 @@ function ForecourtSchematicInner({
     <div className="space-y-3" data-testid="forecourt-map" data-edit-mode={editMode ? 'true' : 'false'}>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
         <span>
-          Forecourt schematic · Layout{' '}
-          <span className="text-slate-200">
-            {previewAuto ? 'AUTO preview' : state?.layout?.mode || 'AUTO'}
+          Tank and pump schematic
+          <span
+            className="ml-2 text-slate-500"
+            title={`Layout ${previewAuto ? 'AUTO preview' : state?.layout?.mode || 'AUTO'}${
+              editMode ? ' · Editing' : ' · Read-only'
+            }`}
+          >
+            {editMode ? (
+              <span className="rounded border border-amber-700 bg-amber-950/50 px-2 py-0.5 text-amber-200">
+                Editing layout
+              </span>
+            ) : null}
           </span>
-          {editMode ? (
-            <span className="ml-2 rounded border border-amber-700 bg-amber-950/50 px-2 py-0.5 text-amber-200">
-              Editing layout
-            </span>
-          ) : (
-            <span className="ml-2 text-slate-500">Read-only map</span>
-          )}
         </span>
         <div className="flex flex-wrap gap-2">
           <button type="button" className="btn-secondary px-2 py-1 text-xs" onClick={() => flow.zoomIn()}>
@@ -598,6 +627,14 @@ function ForecourtSchematicInner({
           style={{ height: paneH }}
           data-testid="schematic-canvas"
         >
+          {!boxes.some((n) => n.kind === 'TANK' || n.kind === 'ISLAND') ? (
+            <div
+              className="flex h-full items-center justify-center px-6 text-center text-sm text-slate-400"
+              data-testid="schematic-empty"
+            >
+              No tanks or pumps have been configured for this station.
+            </div>
+          ) : (
           <ReactFlow
             nodes={rfNodes}
             edges={rfEdges}
@@ -625,11 +662,13 @@ function ForecourtSchematicInner({
             <Controls showInteractive={false} />
             {showMini ? <MiniMap pannable zoomable maskColor="rgba(2,6,23,0.7)" /> : null}
           </ReactFlow>
+          )}
         </div>
         <EquipmentDrawer
           selection={selection}
           connections={graph.edges}
           nodes={boxes}
+          stationId={state?.station?.id ? String(state.station.id) : undefined}
           onClose={() => onSelect?.(null)}
         />
       </div>

@@ -91,6 +91,11 @@ function TankSchematicNode({ data, selected }: NodeProps) {
       <div className="flex items-start justify-between gap-6 px-2 pt-1 text-[10px] text-slate-300">
         <span data-testid="tank-volume-label">
           {missing ? 'No reading' : `${fmtLiters(tank.reportedLiters)} / ${fmtLiters(tank.capacityLiters)}`}
+          {tank.quantityLabel ? (
+            <span className="ml-1 text-[10px] uppercase tracking-wide text-slate-400">
+              ({tank.quantityLabel})
+            </span>
+          ) : null}
         </span>
         <span>{missing ? '' : `${fill.toFixed(0)}% full`}</span>
       </div>

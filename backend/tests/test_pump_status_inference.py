@@ -56,7 +56,7 @@ def test_in_progress_sale_is_dispensing():
     )
 
 
-def test_stale_in_progress_becomes_idle():
+def test_in_progress_sale_stays_dispensing_across_polling_gap():
     assert (
         infer_catalog_pump_status(
             now=NOW,
@@ -68,7 +68,23 @@ def test_stale_in_progress_becomes_idle():
             station_conn="ONLINE",
             edge_online=True,
         )
-        == "IDLE"
+        == "DISPENSING"
+    )
+
+
+def test_stale_in_progress_becomes_interrupted():
+    assert (
+        infer_catalog_pump_status(
+            now=NOW,
+            last_tx_at=NOW - timedelta(seconds=121),
+            last_tx_status="DISPENSING",
+            db_status="UNKNOWN",
+            op_state="IDLE",
+            station_op="OPEN",
+            station_conn="ONLINE",
+            edge_online=True,
+        )
+        == "INTERRUPTED"
     )
 
 

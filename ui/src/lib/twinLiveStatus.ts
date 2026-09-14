@@ -19,18 +19,20 @@ export function applyLiveStationStatus(
     },
     pumps: (state.pumps || []).map((p) => {
       const status = String(p.inferredStatus || '').toUpperCase()
+      const withStatus = (next: string) => ({
+        ...p,
+        inferredStatus: next,
+        nozzles: Array.isArray(p.nozzles)
+          ? p.nozzles.map((n: Record<string, unknown>) => ({ ...n, inferredStatus: next }))
+          : p.nozzles,
+      })
       if (closed) {
-        return { ...p, inferredStatus: 'POWERED_OFF' }
+        return withStatus('POWERED_OFF')
       }
-      const liveOnline = ['ONLINE', 'DELAYED'].includes(
-        String(connectivityStatus || '').toUpperCase(),
-      )
-      // Pi heartbeat is the site link. Do not keep catalog OFFLINE (red) on the map.
-      if (liveOnline && (status === 'OFFLINE' || status === 'DEGRADED' || status === 'UNKNOWN')) {
-        return { ...p, inferredStatus: 'IDLE' }
-      }
+      // Pi heartbeat is station connectivity only. It must not turn an offline
+      // physical pump or its nozzles Idle.
       if (status === 'POWERED_OFF' || status === 'CLOSED') {
-        return { ...p, inferredStatus: 'IDLE' }
+        return withStatus('IDLE')
       }
       return p
     }),

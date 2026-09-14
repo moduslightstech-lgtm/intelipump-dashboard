@@ -21,28 +21,61 @@ export type TwinAnimTx = {
 
 export const PLAYBACK_MS = 3000
 const COMPLETED_HOLD_MS = 1000
-/** Last fill tick with no COMPLETED → treat holster as done. */
-export const HANGUP_IDLE_MS = 5000
+
+/**
+ * @deprecated Hang-up idle timeouts caused Idle↔Dispensing flicker when fill
+ * ticks arrived more than a few seconds apart. Live nozzle sessions are the
+ * source of truth for operational twin; do not reintroduce short timers that
+ * clear DISPENSING between meter updates.
+ */
+export const HANGUP_IDLE_MS = 0
 
 export function playbackProgress(elapsedMs: number, durationMs = PLAYBACK_MS): number {
   const t = Math.min(1, Math.max(0, elapsedMs / durationMs))
   return 1 - (1 - t) * (1 - t)
 }
 
-function resolveConnection(tx: TwinAnimTx, state: any) {
+export function playbackStateKey(pumpId: string, nozzleId?: string | null): string {
+  const pump = String(pumpId || '').trim()
+  const nozzle = String(nozzleId || '').trim()
+  return nozzle ? `${pump}|${nozzle}` : pump
+}
+
+/** Prefer the connection for the exact nozzle; never fall back to an unrelated primary. */
+export function resolveConnection(tx: TwinAnimTx, state: any) {
   const connections = (state?.connections || state?.tankPumpConnections || []) as Record<
     string,
     any
   >[]
   const pumps = (state?.pumps || []) as Record<string, any>[]
   const pump = pumps.find((p) => pumpMatchesId(p, tx.pumpId))
-  const matches = connections.filter(
-    (c) =>
-      (pump && c.pumpId === pump.id) ||
+  const nozzleToken = String(tx.nozzleId || '').trim()
+  const matches = connections.filter((c) => {
+    const pumpMatch =
+      (pump && (c.pumpId === pump.id || c.physicalPumpId === pump.id)) ||
       c.mqttPumpId === tx.pumpId ||
-      c.pumpCode === tx.pumpId,
-  )
-  if (matches.length) {
+      c.pumpCode === tx.pumpId ||
+      c.physicalPumpId === tx.pumpId
+    if (!pumpMatch) return false
+    if (!nozzleToken) return true
+    const nozzleIds = [c.nozzleId, c.mqttNozzleId, c.nozzleCode, c.destinationNozzleId, c.sourceIdentifier]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean)
+    return nozzleIds.includes(nozzleToken)
+  })
+  if (nozzleToken && matches.length) {
+    return matches[0]
+  }
+  if (matches.length && !nozzleToken) {
+    const nozzles = [
+      ...new Set(
+        matches
+          .map((c) => String(c.nozzleId || c.mqttNozzleId || c.nozzleCode || '').trim())
+          .filter(Boolean),
+      ),
+    ]
+    // Ambiguous multi-nozzle pump without nozzleId → do not guess primary.
+    if (nozzles.length > 1) return null
     return (
       matches.find((c) => c.isPrimary) ||
       [...matches].sort((a, b) =>
@@ -53,14 +86,23 @@ function resolveConnection(tx: TwinAnimTx, state: any) {
   if (tx.product) {
     const prod = tx.product.toUpperCase()
     const byProd = connections.filter((c) => (c.product || '').toUpperCase() === prod)
+    if (nozzleToken) {
+      const exact = byProd.filter((c) =>
+        [c.nozzleId, c.mqttNozzleId, c.nozzleCode]
+          .map((v) => String(v || '').trim())
+          .includes(nozzleToken),
+      )
+      return exact[0] || null
+    }
     return byProd.find((c) => c.isPrimary) || byProd[0] || null
   }
   return null
 }
 
 /**
- * Multi-pump completed-event playback.
- * State is keyed by MQTT pumpId (slash-safe).
+ * Optional completed-event playback for legacy map/list chrome.
+ * Operational twin pipes/hoses/LCD must use nozzle sessions — not this hook.
+ * In-progress sales no longer auto-clear via hang-up timeout.
  */
 export function useDispensingPlayback(opts: {
   stationId: string
@@ -72,7 +114,7 @@ export function useDispensingPlayback(opts: {
   const qc = useQueryClient()
   const dedup = useMemo(() => createRecentTransactionDedup(), [])
   const [activeByPump, setActiveByPump] = useState<Record<string, ActiveDispensingState>>({})
-  const [restoredPumpIds, setRestoredPumpIds] = useState<string[]>([])
+  const [restoredPumpIds] = useState<string[]>([])
   const timersRef = useRef<Map<string, number[]>>(new Map())
   const completedLatch = useRef<Map<string, { amount: number; volume: number; at: number }>>(
     new Map(),
@@ -94,7 +136,6 @@ export function useDispensingPlayback(opts: {
     [opts.stationId, opts.mqttStationId, opts.stationCode],
   )
 
-  // Shared rAF loop updates all active count-ups from elapsed time (no drift).
   useEffect(() => {
     const tick = () => {
       setActiveByPump((prev) => {
@@ -130,7 +171,8 @@ export function useDispensingPlayback(opts: {
       if (!tx.pumpId) return
 
       const txId = tx.transactionId || `${tx.pumpId}:${tx.timestamp}:${tx.amount}`
-      const pumpKey = String(tx.pumpId)
+      const nozzleId = tx.nozzleId ? String(tx.nozzleId).trim() : undefined
+      const stateKey = playbackStateKey(String(tx.pumpId), nozzleId)
       const status = String(tx.status || '').toUpperCase()
       const inProgress =
         status === 'DISPENSING' || status === 'IN_PROGRESS' || status === 'ACTIVE'
@@ -138,7 +180,7 @@ export function useDispensingPlayback(opts: {
 
       const finalVol = Number(tx.volumeLiters || 0)
       const finalAmt = Number(tx.amount || 0)
-      const latch = completedLatch.current.get(pumpKey)
+      const latch = completedLatch.current.get(stateKey)
       const staleAfterComplete = Boolean(
         inProgress &&
           latch &&
@@ -155,50 +197,25 @@ export function useDispensingPlayback(opts: {
         const conn = resolveConnection(tx, old)
         tankId = conn?.tankId ? String(conn.tankId) : ''
         connectionId = conn?.id ? String(conn.id) : ''
-        if (!inProgress) return old
-        return {
-          ...old,
-          pumps: (old.pumps || []).map((p: any) =>
-            pumpMatchesId(p, tx.pumpId)
-              ? {
-                  ...p,
-                  inferredStatus: 'DISPENSING',
-                  lastTransactionAmount: tx.amount ?? p.lastTransactionAmount,
-                  lastTransactionVolume: tx.volumeLiters ?? p.lastTransactionVolume,
-                  lastTransactionAt: tx.timestamp || new Date().toISOString(),
-                  product: tx.product || p.product,
-                }
-              : p,
-          ),
-          lastUpdatedAt: new Date().toISOString(),
-        }
+        // Do not mutate pump-level inferredStatus — that flickered Idle↔Dispensing
+        // for the whole cabinet and mis-marked sibling nozzles.
+        return old
       })
 
       const finishPump = (markCompleted: boolean) => {
         if (markCompleted) {
-          completedLatch.current.set(pumpKey, {
+          completedLatch.current.set(stateKey, {
             amount: finalAmt,
             volume: finalVol,
             at: Date.now(),
           })
-          qc.setQueriesData({ queryKey: ['twin', 'live-state', opts.stationId] }, (old: any) => {
-            if (!old) return old
-            return {
-              ...old,
-              pumps: (old.pumps || []).map((p: any) =>
-                pumpMatchesId(p, tx.pumpId)
-                  ? { ...p, inferredStatus: 'COMPLETED' }
-                  : p,
-              ),
-            }
-          })
         }
         setActiveByPump((prev) => {
-          const cur = prev[pumpKey]
+          const cur = prev[stateKey]
           if (!cur) return prev
           return {
             ...prev,
-            [pumpKey]: {
+            [stateKey]: {
               ...cur,
               phase: 'COMPLETED',
               currentVolume: cur.finalVolume,
@@ -206,21 +223,23 @@ export function useDispensingPlayback(opts: {
             },
           }
         })
-        clearPumpTimers(pumpKey)
+        clearPumpTimers(stateKey)
         const t2 = window.setTimeout(() => {
           setActiveByPump((prev) => {
             const next = { ...prev }
-            delete next[pumpKey]
+            delete next[stateKey]
             return next
           })
         }, COMPLETED_HOLD_MS)
-        timersRef.current.set(pumpKey, [t2])
+        timersRef.current.set(stateKey, [t2])
       }
 
       if (inProgress) {
-        clearPumpTimers(pumpKey)
+        // Persist DISPENSING until an explicit COMPLETED event — never auto-clear
+        // between irregular meter ticks.
+        clearPumpTimers(stateKey)
         setActiveByPump((prev) => {
-          const cur = prev[pumpKey]
+          const cur = prev[stateKey]
           if (
             cur &&
             cur.transactionId !== txId &&
@@ -229,26 +248,31 @@ export function useDispensingPlayback(opts: {
           ) {
             return prev
           }
+          // Refuse pump-scoped in-progress when nozzle is unknown on multi-nozzle pumps
+          if (!nozzleId && !connectionId) {
+            return prev
+          }
           return {
             ...prev,
-            [pumpKey]: {
+            [stateKey]: {
               transactionId: txId,
-              pumpId: pumpKey,
+              pumpId: String(tx.pumpId),
+              nozzleId,
+              stationId: tx.stationId,
               tankId: tankId || cur?.tankId || '',
               finalVolume: finalVol,
               finalAmount: finalAmt,
               currentVolume: finalVol,
               currentAmount: finalAmt,
               phase: 'DISPENSING',
-              startedAt: performance.now(),
+              startedAt: cur?.transactionId === txId ? cur.startedAt : performance.now(),
               durationMs: 1,
               product: tx.product,
               connectionId: connectionId || cur?.connectionId,
+              mappingWarning: nozzleId ? undefined : 'Missing tank/nozzle mapping',
             },
           }
         })
-        const idle = window.setTimeout(() => finishPump(true), HANGUP_IDLE_MS)
-        timersRef.current.set(pumpKey, [idle])
         return
       }
 
@@ -305,7 +329,6 @@ export function useDispensingPlayback(opts: {
     }
   }, [opts.enabled, opts.mqttStationId, opts.stationCode, opts.stationId, trigger])
 
-  // Compatibility helpers for existing ForecourtMap props
   const entries = Object.values(activeByPump)
   const primary = entries[0] || null
 
@@ -314,7 +337,6 @@ export function useDispensingPlayback(opts: {
     activePumpIds: entries.map((e) => e.pumpId),
     activeTankIds: entries.map((e) => e.tankId).filter(Boolean),
     activeConnectionIds: entries.map((e) => e.connectionId).filter(Boolean) as string[],
-    // legacy single-active fields (first active)
     activePumpId: primary?.pumpId ?? null,
     activeTankId: primary?.tankId ?? null,
     activeConnectionId: primary?.connectionId ?? null,

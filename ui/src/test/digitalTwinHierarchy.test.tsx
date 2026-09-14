@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TwinLiveState } from '../api/client'
 import PumpCard from '../components/twin/PumpCard'
 import { schematicViewportHeight } from '../components/twin/schematic/autoLayout'
-import { aggregatePhysicalPumpStatus } from '../components/twin/schematic/physicalPump'
+import { aggregatePhysicalPumpStatus, friendlyNozzleName } from '../components/twin/schematic/physicalPump'
 
 vi.mock('../hooks/useDeviceStatus', () => ({
   useStationEdgeDevices: () => ({
@@ -25,7 +25,13 @@ vi.mock('../hooks/useStationLiveSales', () => ({
 }))
 
 vi.mock('../components/twin/ForecourtMap', () => ({
-  default: () => <div data-testid="forecourt-map" />,
+  default: () => (
+    <div data-testid="forecourt-map">
+      <span>Tank and pump schematic</span>
+      <span>Pump 1 · Nozzle 1</span>
+      <span>Pump 1 · Nozzle 2</span>
+    </div>
+  ),
 }))
 
 const onePumpTwoNozzles: TwinLiveState = {
@@ -81,10 +87,19 @@ describe('physical pump aggregate status', () => {
   })
 })
 
+describe('nozzle display names', () => {
+  it('does not keep Pump 1 / pump-1 as a nozzle title', () => {
+    expect(friendlyNozzleName({ name: 'Pump 1' }, 0)).toBe('Nozzle 1')
+    expect(friendlyNozzleName({ name: 'pump-2', nozzleNumber: 2 }, 1)).toBe('Nozzle 2')
+    expect(friendlyNozzleName({ name: 'Nozzle 1' }, 0)).toBe('Nozzle 1')
+  })
+})
+
 describe('schematic viewport height', () => {
-  it('uses a compact height for 1–2 physical pumps', () => {
-    expect(schematicViewportHeight({ physicalPumpCount: 1, canvasHeight: 400, viewportHeight: 900 })).toBeGreaterThanOrEqual(560)
-    expect(schematicViewportHeight({ physicalPumpCount: 1, canvasHeight: 400, viewportHeight: 900 })).toBeLessThanOrEqual(620)
+  it('uses a tall viewport for 1–2 physical pumps', () => {
+    const h = schematicViewportHeight({ physicalPumpCount: 1, canvasHeight: 400, viewportHeight: 900 })
+    expect(h).toBeGreaterThanOrEqual(640)
+    expect(h).toBeLessThanOrEqual(720)
   })
 
   it('expands for twelve physical pumps without a second page scrollbar height', () => {
@@ -105,9 +120,11 @@ describe('Digital Twin page sections', () => {
     )
   })
 
-  it('shows tank list and a single physical pump list', () => {
-    expect(screen.getByText(/Tank list \(1\)/)).toBeInTheDocument()
-    expect(screen.getByText(/Pump list \(1\)/)).toBeInTheDocument()
+  it('shows the tank and pump schematic without list widgets', () => {
+    expect(screen.queryByText(/Tank list/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Pump list/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('pump-list')).not.toBeInTheDocument()
+    expect(screen.getByText(/Tank and pump schematic/i)).toBeInTheDocument()
     expect(screen.getByText('Pump 1 · Nozzle 1')).toBeInTheDocument()
     expect(screen.getByText('Pump 1 · Nozzle 2')).toBeInTheDocument()
   })

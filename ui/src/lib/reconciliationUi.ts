@@ -1,4 +1,5 @@
 import { fmtSignedNaira, type DayCloseRow } from '../api/client'
+import { formatStatusLabel } from './enumPresentation'
 
 export type ReconTab = 'summary' | 'transactions' | 'tanks' | 'audit'
 export type StatusFilter = '' | 'NEEDS_ATTENTION' | 'INCOMPLETE' | 'READY_TO_CLOSE' | 'CLOSED'
@@ -24,9 +25,10 @@ const WARN = new Set([
 
 export function statusBadge(status?: string | null) {
   const key = (status || '').toUpperCase()
-  if (OK.has(key)) return { text: status || 'Match', className: 'badge-ok' }
-  if (WARN.has(key)) return { text: status || 'Incomplete', className: 'badge-warn' }
-  return { text: status || 'Review', className: 'badge-critical' }
+  const text = formatStatusLabel(status)
+  if (OK.has(key)) return { text, className: 'badge-ok' }
+  if (WARN.has(key)) return { text, className: 'badge-warn' }
+  return { text, className: 'badge-critical' }
 }
 
 export function formatBusinessDate(iso?: string | null) {

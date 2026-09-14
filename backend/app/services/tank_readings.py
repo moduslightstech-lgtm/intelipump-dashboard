@@ -28,21 +28,126 @@ from app.services.rbac import assert_station_access, is_admin
 from app.services.tank_lifecycle import operational_tank_clause
 
 ZERO = Decimal("0")
+# Station managers may enter readings for today and up to this many prior calendar
+# days (station-local). Administrators may go further with an audited reason.
+MANAGER_BACKENTRY_DAYS = 7
+LATE_REASON_MAX_LEN = 500
+
+
+def station_zone(station: Station) -> ZoneInfo:
+    tz_name = (station.timezone or "Africa/Lagos").strip() or "Africa/Lagos"
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return ZoneInfo("Africa/Lagos")
 
 
 def station_business_date(station: Station, now: datetime | None = None) -> date:
-    tz_name = station.timezone or "Africa/Lagos"
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = ZoneInfo("UTC")
     now = now or datetime.now(timezone.utc)
-    local = now.astimezone(tz)
-    return local.date()
+    return now.astimezone(station_zone(station)).date()
 
 
 def deadline_local(station: Station) -> time:
     return station.tank_reading_deadline_local or time(22, 30)
+
+
+def deadline_at_utc(station: Station, business_date: date) -> datetime:
+    """Nightly deadline for a business date, as an aware UTC instant."""
+    tz = station_zone(station)
+    local_deadline = datetime.combine(business_date, deadline_local(station), tzinfo=tz)
+    return local_deadline.astimezone(timezone.utc)
+
+
+def compute_late_status(
+    station: Station,
+    business_date: date,
+    submitted_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Late when submission is after the business-date deadline in station TZ.
+
+    Past business dates are late if submitted any time after that day's deadline
+    (including the next morning).
+    """
+    submitted = submitted_at or datetime.now(timezone.utc)
+    if submitted.tzinfo is None:
+        submitted = submitted.replace(tzinfo=timezone.utc)
+    deadline = deadline_at_utc(station, business_date)
+    late_seconds = (submitted - deadline).total_seconds()
+    is_late = late_seconds > 0
+    late_by_minutes = int(late_seconds // 60) if is_late else 0
+    return {
+        "isLate": is_late,
+        "lateByMinutes": late_by_minutes,
+        "deadlineAt": deadline.isoformat(),
+        "timezoneUsed": station.timezone or "Africa/Lagos",
+        "submittedAt": submitted.isoformat(),
+    }
+
+
+def validate_business_date_selection(
+    station: Station,
+    user: User,
+    business_date: date,
+    *,
+    late_or_backdate_reason: str | None = None,
+    now: datetime | None = None,
+) -> None:
+    today = station_business_date(station, now)
+    reason = (late_or_backdate_reason or "").strip()
+    if business_date > today:
+        raise HTTPException(status_code=400, detail="Future business dates are not allowed")
+    created = getattr(station, "created_at", None)
+    if created is not None:
+        created_local = created.astimezone(station_zone(station)).date() if created.tzinfo else created.date()
+        if business_date < created_local:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Business date cannot be before the station was created ({created_local.isoformat()})",
+            )
+    days_back = (today - business_date).days
+    if is_admin(user):
+        if days_back > MANAGER_BACKENTRY_DAYS and not reason:
+            raise HTTPException(
+                status_code=400,
+                detail="A reason is required when entering readings more than 7 days in the past",
+            )
+        return
+    if days_back > MANAGER_BACKENTRY_DAYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Station managers can enter readings up to {MANAGER_BACKENTRY_DAYS} days back. Ask an administrator for older dates.",
+        )
+
+
+def tanks_for_business_date(db: Session, station: Station, business_date: date) -> list[Tank]:
+    """Tanks that existed on the business date (created on/before; not yet deactivated)."""
+    today = station_business_date(station)
+    rows = list(
+        db.scalars(
+            select(Tank).where(Tank.station_id == station.id).order_by(Tank.tank_code)
+        ).all()
+    )
+    out: list[Tank] = []
+    tz = station_zone(station)
+    for tank in rows:
+        created = tank.created_at
+        if created is not None:
+            created_day = created.astimezone(tz).date() if created.tzinfo else created.date()
+            if created_day > business_date:
+                continue
+        deactivated = tank.deactivated_at
+        if deactivated is not None:
+            deactivated_day = (
+                deactivated.astimezone(tz).date() if deactivated.tzinfo else deactivated.date()
+            )
+            if deactivated_day <= business_date:
+                continue
+        if business_date >= today:
+            # Current/future-safe: only operational tanks for today's entry
+            if getattr(tank, "archived", False) or not getattr(tank, "active", True):
+                continue
+        out.append(tank)
+    return out
 
 
 def _tol(db: Session, station: Station, product: str | None = None) -> ReconciliationTolerance:
@@ -166,14 +271,7 @@ def get_or_create_batch(
             TankReadingBatch.business_date == business_date,
         )
     )
-    tanks = list(
-        db.scalars(
-            select(Tank).where(
-                Tank.station_id == station.id,
-                operational_tank_clause(),
-            )
-        ).all()
-    )
+    tanks = tanks_for_business_date(db, station, business_date)
     if batch is None:
         batch = TankReadingBatch(
             id=uuid4(),
@@ -198,17 +296,14 @@ def current_workspace(
 ) -> dict[str, Any]:
     station = assert_station_access(db, user, station_id)
     biz = business_date or station_business_date(station)
+    today = station_business_date(station)
     batch = db.scalar(
         select(TankReadingBatch).where(
             TankReadingBatch.station_id == station.id,
             TankReadingBatch.business_date == biz,
         )
     )
-    tanks = list(
-        db.scalars(
-            select(Tank).where(Tank.station_id == station.id, operational_tank_clause()).order_by(Tank.tank_code)
-        ).all()
-    )
+    tanks = tanks_for_business_date(db, station, biz)
     readings = list(
         db.scalars(
             select(ManualTankReading).where(
@@ -228,6 +323,9 @@ def current_workspace(
         fill = None
         if closing is not None and capacity > 0:
             fill = float((closing / capacity) * Decimal("100"))
+        prev_gap_days = None
+        if prev and prev.business_date:
+            prev_gap_days = (biz - prev.business_date).days
         tank_rows.append(
             {
                 "tankId": str(tank.id),
@@ -241,6 +339,7 @@ def current_workspace(
                     else None
                 ),
                 "previousBusinessDate": prev.business_date.isoformat() if prev else None,
+                "previousClosingGapDays": prev_gap_days,
                 "openingVolumeLiters": (
                     float(reading.opening_volume_liters)
                     if reading and reading.opening_volume_liters is not None
@@ -263,7 +362,6 @@ def current_workspace(
         )
     dl = deadline_local(station)
     display_status = batch.status if batch else "NOT_STARTED"
-    # UI calculated status when no batch / empty draft
     if batch is None:
         display_status = "NOT_STARTED"
     submitted_user = None
@@ -275,17 +373,27 @@ def current_workspace(
                 "email": u.email,
                 "name": " ".join(x for x in [u.first_name, u.last_name] if x).strip() or u.email,
             }
+    late_preview = compute_late_status(station, biz)
+    already_complete = display_status in {"SUBMITTED", "ACCEPTED", "CORRECTED"}
     payload = {
         "station": {
             "id": str(station.id),
             "name": station.name,
             "stationCode": station.station_code,
             "mqttStationId": station.mqtt_station_id,
-            "timezone": station.timezone,
+            "timezone": station.timezone or "Africa/Lagos",
         },
         "businessDate": biz.isoformat(),
+        "todayBusinessDate": today.isoformat(),
         "deadlineLocal": dl.strftime("%H:%M"),
+        "deadlineAt": late_preview["deadlineAt"],
+        "timezoneUsed": late_preview["timezoneUsed"],
+        "isLatePreview": late_preview["isLate"] and not already_complete,
+        "managerBackentryDays": MANAGER_BACKENTRY_DAYS,
+        "minSelectableDate": (today - timedelta(days=MANAGER_BACKENTRY_DAYS if not is_admin(user) else 3650)).isoformat(),
+        "maxSelectableDate": today.isoformat(),
         "uiStatus": display_status,
+        "alreadySubmitted": already_complete,
         "batch": (
             {
                 "id": str(batch.id),
@@ -298,6 +406,14 @@ def current_workspace(
                 "version": getattr(batch, "version", 1) or 1,
                 "correctionReason": getattr(batch, "correction_reason", None),
                 "isLate": bool(getattr(batch, "is_late", False)),
+                "lateReason": getattr(batch, "late_reason", None),
+                "lateByMinutes": getattr(batch, "late_by_minutes", None),
+                "deadlineAt": (
+                    batch.deadline_at.isoformat()
+                    if getattr(batch, "deadline_at", None)
+                    else late_preview["deadlineAt"]
+                ),
+                "timezoneUsed": getattr(batch, "timezone_used", None) or late_preview["timezoneUsed"],
                 "correctedByAdministrator": display_status == "CORRECTED",
                 "correctedAt": (
                     batch.last_modified_at.isoformat()
@@ -320,9 +436,13 @@ def current_workspace(
                 "submittedAt": None,
                 "submittedBy": None,
                 "submittedByUser": None,
-                "version": 0,
+                "version": 1,
                 "correctionReason": None,
                 "isLate": False,
+                "lateReason": None,
+                "lateByMinutes": None,
+                "deadlineAt": late_preview["deadlineAt"],
+                "timezoneUsed": late_preview["timezoneUsed"],
                 "correctedByAdministrator": False,
                 "correctedAt": None,
                 "notes": None,
@@ -336,7 +456,25 @@ def current_workspace(
         "managerLocked": display_status in {"SUBMITTED", "ACCEPTED", "CORRECTED"},
         "adminCanCorrect": display_status in {"SUBMITTED", "ACCEPTED", "CORRECTED"},
     }
+    try:
+        from app.services.fuel_deliveries import inventory_summary_for_tank
+
+        for row in payload["tanks"]:
+            tank_obj = next((t for t in tanks if str(t.id) == row["tankId"]), None)
+            if tank_obj is None:
+                continue
+            actual = (
+                Decimal(str(row["closingVolumeLiters"]))
+                if row.get("closingVolumeLiters") is not None
+                else None
+            )
+            inv = inventory_summary_for_tank(db, station, tank_obj, biz, actual_closing=actual)
+            row["inventory"] = inv
+    except Exception:
+        for row in payload["tanks"]:
+            row.setdefault("inventory", None)
     if not is_admin(user) and payload["batch"]:
+        # Late reason stays on workspace for station assignees; correction reasons are admin-only.
         payload["batch"]["correctionReason"] = None
     return payload
 
@@ -378,6 +516,18 @@ def validate_reading_values(
     return errors
 
 
+def _normalize_reason(value: str | None) -> str | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    if len(text) > LATE_REASON_MAX_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Reason must be at most {LATE_REASON_MAX_LEN} characters",
+        )
+    return text
+
+
 def save_draft(
     db: Session,
     user: User,
@@ -387,14 +537,12 @@ def save_draft(
     readings: list[dict[str, Any]],
     notes: str | None = None,
     backdate_reason: str | None = None,
+    late_reason: str | None = None,
 ) -> dict[str, Any]:
     station = assert_station_access(db, user, station_id)
     biz = business_date or station_business_date(station)
-    today = station_business_date(station)
-    if biz > today + timedelta(days=1):
-        raise HTTPException(status_code=400, detail="Business date cannot be far in the future")
-    if biz < today - timedelta(days=7) and not backdate_reason:
-        raise HTTPException(status_code=400, detail="Backdated submissions require a reason")
+    reason = _normalize_reason(late_reason or backdate_reason)
+    validate_business_date_selection(station, user, biz, late_or_backdate_reason=reason)
 
     batch = get_or_create_batch(db, station, biz, user)
     if batch.status in {"SUBMITTED", "ACCEPTED", "CORRECTED"} and not is_admin(user):
@@ -468,7 +616,7 @@ def save_draft(
         )
         existing.measurement_method = item.get("measurement_method") or existing.measurement_method or "DIP_STICK"
         existing.notes = item.get("notes")
-        existing.backdate_reason = backdate_reason
+        existing.backdate_reason = reason
         existing.entered_by = user.id
         existing.entered_at = datetime.now(timezone.utc)
         existing.batch_id = batch.id
@@ -488,11 +636,17 @@ def save_draft(
             user,
             before=before,
             after=_reading_snapshot(existing),
+            comment=reason,
         )
 
+    late_preview = compute_late_status(station, biz)
     batch.status = "DRAFT"
     batch.notes = notes
     batch.updated_at = datetime.now(timezone.utc)
+    if reason:
+        batch.late_reason = reason
+    batch.deadline_at = deadline_at_utc(station, biz)
+    batch.timezone_used = late_preview["timezoneUsed"]
     write_audit(
         db,
         actor=user,
@@ -500,7 +654,12 @@ def save_draft(
         entity_type="tank_reading_batch",
         entity_id=str(batch.id),
         station_id=station.id,
-        after={"business_date": biz.isoformat(), "count": len(readings)},
+        after={
+            "business_date": biz.isoformat(),
+            "count": len(readings),
+            "late_reason": reason,
+        },
+        comment=reason,
     )
     db.commit()
     result = current_workspace(db, user, station_id, biz)
@@ -516,21 +675,35 @@ def submit_batch(
     business_date: date | None = None,
     confirm: bool = False,
     backdate_reason: str | None = None,
+    late_reason: str | None = None,
 ) -> dict[str, Any]:
     if not confirm:
         raise HTTPException(status_code=400, detail="Submission requires confirm=true")
     station = assert_station_access(db, user, station_id)
     biz = business_date or station_business_date(station)
+    now = datetime.now(timezone.utc)
+    reason = _normalize_reason(late_reason or backdate_reason)
+    late = compute_late_status(station, biz, submitted_at=now)
+    validate_business_date_selection(station, user, biz, late_or_backdate_reason=reason, now=now)
+    if late["isLate"] and not reason:
+        raise HTTPException(
+            status_code=400,
+            detail="Reason for late entry is required when submitting after the deadline",
+        )
+
     batch = get_or_create_batch(db, station, biz, user)
     if batch.status in {"SUBMITTED", "ACCEPTED", "CORRECTED"}:
         raise HTTPException(
             status_code=409,
-            detail="A nightly reading has already been submitted for this station and business date.",
+            detail=(
+                "These readings were submitted by another user. "
+                "Refresh to view the completed submission."
+            ),
         )
 
-    tanks = list(
-        db.scalars(select(Tank).where(Tank.station_id == station.id, operational_tank_clause())).all()
-    )
+    tanks = tanks_for_business_date(db, station, biz)
+    if not tanks:
+        raise HTTPException(status_code=400, detail="No tanks were active on this business date")
     readings = list(
         db.scalars(
             select(ManualTankReading).where(
@@ -561,7 +734,6 @@ def submit_batch(
     if errors:
         raise HTTPException(status_code=400, detail={"message": "Validation failed", "fieldErrors": errors})
 
-    now = datetime.now(timezone.utc)
     for tank in tanks:
         r = by_tank[tank.id]
         before = _reading_snapshot(r)
@@ -569,11 +741,22 @@ def submit_batch(
         r.submitted_by = user.id
         r.submitted_at = now
         r.updated_at = now
+        r.backdate_reason = reason or r.backdate_reason
         if r.opening_volume_liters is None:
             prev = previous_accepted_closing(db, tank.id, biz)
             if prev and prev.closing_volume_liters is not None:
                 r.opening_volume_liters = prev.closing_volume_liters
-        _add_event(db, r, "SUBMITTED", before.get("status"), "SUBMITTED", user, before=before, after=_reading_snapshot(r))
+        _add_event(
+            db,
+            r,
+            "SUBMITTED",
+            before.get("status"),
+            "SUBMITTED",
+            user,
+            before=before,
+            after=_reading_snapshot(r),
+            comment=reason,
+        )
         _upsert_normalized_measurement(db, station, tank, r)
 
     batch.status = "SUBMITTED"
@@ -584,14 +767,11 @@ def submit_batch(
     batch.completed_at = now
     batch.updated_at = now
     batch.version = (getattr(batch, "version", 1) or 1) + 1
-    # Late if submitted after station deadline in local timezone
-    try:
-        tz = ZoneInfo(station.timezone or "Africa/Lagos")
-    except Exception:
-        tz = ZoneInfo("UTC")
-    local_now = now.astimezone(tz)
-    dl = deadline_local(station)
-    batch.is_late = local_now.date() == biz and local_now.time() > dl
+    batch.is_late = bool(late["isLate"])
+    batch.late_by_minutes = late["lateByMinutes"] if late["isLate"] else 0
+    batch.deadline_at = deadline_at_utc(station, biz)
+    batch.timezone_used = late["timezoneUsed"]
+    batch.late_reason = reason if late["isLate"] or reason else batch.late_reason
     write_audit(
         db,
         actor=user,
@@ -599,11 +779,20 @@ def submit_batch(
         entity_type="tank_reading_batch",
         entity_id=str(batch.id),
         station_id=station.id,
-        after={"business_date": biz.isoformat(), "tanks": len(tanks)},
+        after={
+            "business_date": biz.isoformat(),
+            "tanks": len(tanks),
+            "is_late": batch.is_late,
+            "late_by_minutes": batch.late_by_minutes,
+            "deadline_at": late["deadlineAt"],
+            "timezone_used": late["timezoneUsed"],
+            "late_reason": reason,
+        },
+        comment=reason,
     )
     db.commit()
 
-    # Trigger reconciliation (import lazily to avoid cycles)
+    # Trigger reconciliation for the selected business date only
     from app.services.stock_reconciliation import calculate_from_tank_submission
 
     recon = calculate_from_tank_submission(db, station=station, business_date=biz, actor=user)
@@ -767,6 +956,7 @@ def list_reading_history(
     date_from: date | None = None,
     date_to: date | None = None,
     status: str | None = None,
+    lateness: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> dict[str, Any]:
@@ -789,6 +979,12 @@ def list_reading_history(
         q = q.where(TankReadingBatch.business_date <= date_to)
     if status:
         q = q.where(TankReadingBatch.status == status.upper())
+    if lateness:
+        key = lateness.strip().upper()
+        if key in {"LATE", "LATE_SUBMISSION"}:
+            q = q.where(TankReadingBatch.is_late.is_(True))
+        elif key in {"ON_TIME", "ONTIME", "ON-TIME"}:
+            q = q.where(TankReadingBatch.is_late.is_(False))
 
     all_rows = list(db.scalars(q).all())
     total = len(all_rows)
@@ -818,6 +1014,14 @@ def list_reading_history(
                 "expectedTankCount": b.expected_tank_count,
                 "totalClosingVolumeLiters": round(total_vol, 2),
                 "isLate": bool(getattr(b, "is_late", False)),
+                "lateByMinutes": getattr(b, "late_by_minutes", None),
+                "lateReason": (
+                    getattr(b, "late_reason", None) if is_admin(user) else None
+                ),
+                "deadlineAt": (
+                    b.deadline_at.isoformat() if getattr(b, "deadline_at", None) else None
+                ),
+                "timezoneUsed": getattr(b, "timezone_used", None),
                 "correctionReason": (
                     getattr(b, "correction_reason", None) if is_admin(user) else None
                 ),
