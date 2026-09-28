@@ -107,3 +107,32 @@ def test_foreign_reject_does_not_update_or_alert():
     assert result == "ignored_foreign"
     alert.assert_not_called()
     db.connection.assert_not_called()
+
+
+def test_old_correlation_does_not_update_via_station_pump_fallback():
+    """Stale COMMAND_RESULT must not clobber a newer request by station+pump."""
+    db = MagicMock()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    db.connection.return_value.__enter__.return_value = conn
+    cur.rowcount = 0  # correlation id no longer matches (newer request stamped)
+
+    stale = _envelope(
+        correlation="corr-old",
+        pump_id="pump-1",
+        status="PRICE_FAILED",
+        accepted=False,
+        detail="cd5_timeout_or_reject_no_confirmed_price",
+    )
+    with patch("app.services.alert_writer.upsert_alert", return_value="created") as alert:
+        result = handle_command_result(db, topic="t", payload=stale)
+
+    assert "status_failed:0" in result
+    # Alert may still fire for the failure event, but SQL must be correlation-only.
+    sqls = [str(c.args[0]) for c in cur.execute.call_args_list]
+    assert len(sqls) == 1
+    assert "price_command_correlation_id" in sqls[0]
+    assert "mqtt_station_id" not in sqls[0]
+    assert "mqtt_pump_id" not in sqls[0]
+    alert.assert_called_once()

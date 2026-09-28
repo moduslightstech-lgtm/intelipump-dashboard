@@ -236,37 +236,9 @@ def _apply_price_command_status(
                     (mapped, detail, now, correlation),
                 )
                 updated = cur.rowcount or 0
-                if updated == 0:
-                    # Fallback: match station + logical pump when correlation
-                    # was not stamped (older rows) — still keep identity.
-                    station_id = _mqtt_station_id(payload)
-                    pump_id = _mqtt_pump_id(payload)
-                    if station_id and pump_id:
-                        cur.execute(
-                            """
-                            UPDATE pumps p
-                               SET price_command_status = %s,
-                                   price_command_correlation_id = %s,
-                                   price_command_detail = %s,
-                                   updated_at = %s
-                              FROM stations s
-                             WHERE p.station_id = s.id
-                               AND (s.mqtt_station_id = %s OR s.station_code = %s)
-                               AND (p.mqtt_pump_id = %s OR p.pump_code = %s)
-                               AND p.active IS TRUE
-                            """,
-                            (
-                                mapped,
-                                correlation,
-                                detail,
-                                now,
-                                station_id,
-                                station_id,
-                                pump_id,
-                                pump_id,
-                            ),
-                        )
-                        updated = cur.rowcount or 0
+                # No station/pump fallback: an old COMMAND_RESULT must not
+                # overwrite a newer request that already stamped a different
+                # price_command_correlation_id.
         return f"status_{mapped.lower()}:{updated}"
     except Exception:
         logger.exception(
