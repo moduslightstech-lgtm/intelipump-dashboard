@@ -271,3 +271,67 @@ def test_normalize_treats_diesel_as_ago():
     assert _normalize_fuel_product("AGO") == "AGO"
     assert _normalize_fuel_product("diesel") == "AGO"
     assert _normalize_fuel_product("PMS") == "PMS"
+
+
+def test_set_all_prices_marks_each_pump_requested_with_own_correlation():
+    """Set-all must keep per-pump identity (distinct correlation ids + REQUESTED)."""
+    station = SimpleNamespace(
+        id=uuid4(),
+        mqtt_station_id="SAO-Redeemed-Station-1",
+        station_code="SAO-RS-001",
+        commanded_unit_price_raw=None,
+        commanded_unit_price_at=None,
+        commanded_unit_price_by=None,
+    )
+    user = SimpleNamespace(id=uuid4(), email="admin@example.com")
+    pumps = [
+        SimpleNamespace(
+            mqtt_pump_id="pump-1",
+            pump_code="pump-1",
+            product="PMS",
+            display_order=1,
+            created_at=None,
+            commanded_unit_price_raw=None,
+            commanded_unit_price_at=None,
+            commanded_unit_price_by=None,
+            price_command_status=None,
+            price_command_correlation_id=None,
+            price_command_detail=None,
+        ),
+        SimpleNamespace(
+            mqtt_pump_id="pump-2",
+            pump_code="pump-2",
+            product="PMS",
+            display_order=2,
+            created_at=None,
+            commanded_unit_price_raw=None,
+            commanded_unit_price_at=None,
+            commanded_unit_price_by=None,
+            price_command_status=None,
+            price_command_correlation_id=None,
+            price_command_detail=None,
+        ),
+    ]
+    db = MagicMock()
+    db.scalars.return_value.all.return_value = pumps
+    settings = SimpleNamespace(
+        mqtt_command_environment="PRODUCTION",
+        mqtt_command_ttl_seconds=120,
+    )
+
+    with patch("app.services.station_commands.publish_json"):
+        result = publish_set_price(
+            db,
+            station=station,
+            user=user,
+            unit_price_raw=1400,
+            settings=settings,
+        )
+
+    assert result["priceCommandStatus"] == "REQUESTED"
+    assert pumps[0].price_command_status == "REQUESTED"
+    assert pumps[1].price_command_status == "REQUESTED"
+    assert pumps[0].price_command_correlation_id != pumps[1].price_command_correlation_id
+    corr_by_pump = {c["pumpId"]: c["correlationId"] for c in result["commands"]}
+    assert pumps[0].price_command_correlation_id == corr_by_pump["pump-1"]
+    assert pumps[1].price_command_correlation_id == corr_by_pump["pump-2"]

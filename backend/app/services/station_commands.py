@@ -282,12 +282,17 @@ def publish_set_price(
         requested_by,
     )
 
-    # Remember last commanded price per pump so the admin UI does not fall back
-    # to hardcoded 1400/1875 when re-selecting an individual target.
+    # Requested price + pending status — not confirmed until COMMAND_RESULT.
+    by_logical = {p["pumpId"]: p for p in published}
     for pump in _pumps_matching_logical_ids(db, station, targets):
+        logical = (pump.mqtt_pump_id or pump.pump_code or "").strip()
+        cmd_meta = by_logical.get(logical) or {}
         pump.commanded_unit_price_raw = unit_price_raw
         pump.commanded_unit_price_at = now
         pump.commanded_unit_price_by = requested_by
+        pump.price_command_status = "REQUESTED"
+        pump.price_command_correlation_id = cmd_meta.get("correlationId")
+        pump.price_command_detail = "mqtt_published_awaiting_controller"
         db.add(pump)
 
     # Station "last commanded" reflects the PMS site price, not a one-off AGO/single send.
@@ -318,6 +323,7 @@ def publish_set_price(
         "environment": environment,
         "simulatorOnly": False,
         "expiresAt": expires.isoformat(),
+        "priceCommandStatus": "REQUESTED",
         "commandedUnitPriceRaw": station.commanded_unit_price_raw,
         "commandedUnitPriceAt": (
             station.commanded_unit_price_at.isoformat()
@@ -325,8 +331,8 @@ def publish_set_price(
             else None
         ),
         "detail": (
-            f"SET_PRICE ₦{unit_price_raw}/L published to {scope} on {topic}. "
-            "Each Pi applies CD5 when idle; live Twin sale price may lag until "
-            "the next dispense."
+            f"SET_PRICE ₦{unit_price_raw}/L requested for {scope} on {topic}. "
+            "Each Pi confirms via CD5; dashboard shows pending until confirmed "
+            "(or failed). Live Twin sale price may lag until the next dispense."
         ),
     }

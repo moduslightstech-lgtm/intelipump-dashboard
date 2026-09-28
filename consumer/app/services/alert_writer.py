@@ -19,8 +19,29 @@ COMMAND_FAILURE_STATUSES = frozenset(
         "REJECTED",
         "ENQUEUE_FAILED",
         "NOT_EXECUTED",
+        "PRICE_FAILED",
     }
 )
+
+# Foreign Pis reject SET_PRICE for pumps they do not own — not a real failure
+# for the correlation that the owning Pi will still process.
+FOREIGN_DEVICE_REASONS = frozenset(
+    {
+        "set_price_not_for_this_device",
+    }
+)
+
+STATUS_FROM_EXECUTION = {
+    "PENDING_CONTROLLER": "PENDING",
+    "QUEUED": "PENDING",
+    "QUEUED_FOR_CONTROLLER": "PENDING",
+    "PRICE_CONFIRMED": "CONFIRMED",
+    "PRICE_PARTIAL": "PARTIAL",
+    "PRICE_FAILED": "FAILED",
+    "REJECTED": "FAILED",
+    "ENQUEUE_FAILED": "FAILED",
+    "NOT_EXECUTED": "FAILED",
+}
 
 
 def resolve_station_uuid(cur, station_id: str) -> Optional[str]:
@@ -129,21 +150,131 @@ def _mqtt_pump_id(payload: dict[str, Any]) -> Optional[str]:
     return str(raw).strip() if raw else None
 
 
-def command_result_failed(payload: dict[str, Any]) -> bool:
-    """True when COMMAND_RESULT indicates rejection / enqueue failure."""
+def _blocking_reasons(payload: dict[str, Any]) -> list[str]:
     nested = inner_payload(payload)
-    accepted = nested.get("accepted", payload.get("accepted"))
-    status = str(
+    reasons = nested.get("blockingReasons") or nested.get("blocking_reasons") or []
+    if not isinstance(reasons, list):
+        reasons = [reasons]
+    return [str(r) for r in reasons if r]
+
+
+def _execution_status(payload: dict[str, Any]) -> str:
+    nested = inner_payload(payload)
+    return str(
         nested.get("executionStatus")
         or nested.get("execution_status")
         or payload.get("executionStatus")
         or ""
     ).strip().upper()
+
+
+def is_foreign_device_reject(payload: dict[str, Any]) -> bool:
+    """True when another Pi rejected a SET_PRICE it does not own."""
+    reasons = _blocking_reasons(payload)
+    detail = str(
+        inner_payload(payload).get("detail") or payload.get("detail") or ""
+    ).strip()
+    if detail in FOREIGN_DEVICE_REASONS:
+        return True
+    return any(r in FOREIGN_DEVICE_REASONS for r in reasons)
+
+
+def command_result_failed(payload: dict[str, Any]) -> bool:
+    """True when COMMAND_RESULT indicates rejection / enqueue failure."""
+    if is_foreign_device_reject(payload):
+        return False
+    nested = inner_payload(payload)
+    accepted = nested.get("accepted", payload.get("accepted"))
+    status = _execution_status(payload)
+    if status in {"PENDING_CONTROLLER", "PRICE_CONFIRMED", "PRICE_PARTIAL"}:
+        return False
     if accepted is False:
         return True
     if status in COMMAND_FAILURE_STATUSES:
         return True
     return False
+
+
+def _apply_price_command_status(
+    db: Database,
+    *,
+    payload: dict[str, Any],
+) -> str:
+    """Update pumps.price_command_* from COMMAND_RESULT; preserve identity."""
+    if is_foreign_device_reject(payload):
+        return "ignored_foreign"
+    nested = inner_payload(payload)
+    correlation = str(
+        first_present(payload, "correlationId", "correlation_id")
+        or first_present(nested, "correlationId", "correlation_id")
+        or ""
+    ).strip()
+    if not correlation:
+        return "ignored_no_correlation"
+    status = _execution_status(payload)
+    mapped = STATUS_FROM_EXECUTION.get(status)
+    if mapped is None:
+        return "ignored_status"
+    detail = str(nested.get("detail") or "").strip() or None
+    reasons = _blocking_reasons(payload)
+    if reasons and mapped == "FAILED":
+        detail = ", ".join(reasons)
+    elif detail is None:
+        detail = status.lower()
+    now = datetime.now(timezone.utc)
+    try:
+        with db.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE pumps
+                       SET price_command_status = %s,
+                           price_command_detail = %s,
+                           updated_at = %s
+                     WHERE price_command_correlation_id = %s
+                    """,
+                    (mapped, detail, now, correlation),
+                )
+                updated = cur.rowcount or 0
+                if updated == 0:
+                    # Fallback: match station + logical pump when correlation
+                    # was not stamped (older rows) — still keep identity.
+                    station_id = _mqtt_station_id(payload)
+                    pump_id = _mqtt_pump_id(payload)
+                    if station_id and pump_id:
+                        cur.execute(
+                            """
+                            UPDATE pumps p
+                               SET price_command_status = %s,
+                                   price_command_correlation_id = %s,
+                                   price_command_detail = %s,
+                                   updated_at = %s
+                              FROM stations s
+                             WHERE p.station_id = s.id
+                               AND (s.mqtt_station_id = %s OR s.station_code = %s)
+                               AND (p.mqtt_pump_id = %s OR p.pump_code = %s)
+                               AND p.active IS TRUE
+                            """,
+                            (
+                                mapped,
+                                correlation,
+                                detail,
+                                now,
+                                station_id,
+                                station_id,
+                                pump_id,
+                                pump_id,
+                            ),
+                        )
+                        updated = cur.rowcount or 0
+        return f"status_{mapped.lower()}:{updated}"
+    except Exception:
+        logger.exception(
+            "Failed to apply price command status correlation=%s status=%s",
+            correlation,
+            mapped,
+        )
+        return "status_error"
 
 
 def handle_command_result(
@@ -152,13 +283,18 @@ def handle_command_result(
     topic: str,
     payload: dict[str, Any],
 ) -> str:
-    """Create SET_PRICE_FAILED when a command result is rejected.
+    """Track SET_PRICE outcome per pump; alert only on real failures.
 
     Phase-9 COMMAND_RESULT payloads omit commandType; production admin downlink
-    is SET_PRICE, so failed results map to SET_PRICE_FAILED.
+    is SET_PRICE, so failed results map to SET_PRICE_FAILED — except foreign-Pi
+    rejects (set_price_not_for_this_device) which must not clobber the owning
+    pump's pending/confirmed status.
     """
+    status_result = _apply_price_command_status(db, payload=payload)
+    if is_foreign_device_reject(payload):
+        return "ignored_foreign"
     if not command_result_failed(payload):
-        return "ignored_ok"
+        return status_result if status_result.startswith("status_") else "ignored_ok"
     nested = inner_payload(payload)
     station_id = _mqtt_station_id(payload)
     pump_id = _mqtt_pump_id(payload)
@@ -167,20 +303,16 @@ def handle_command_result(
         or first_present(nested, "correlationId", "correlation_id")
         or ""
     ).strip()
-    status = str(
-        nested.get("executionStatus") or nested.get("execution_status") or "FAILED"
-    ).strip().upper()
-    reasons = nested.get("blockingReasons") or nested.get("blocking_reasons") or []
-    if not isinstance(reasons, list):
-        reasons = [reasons]
-    reason_text = ", ".join(str(r) for r in reasons if r) or status
+    status = _execution_status(payload) or "FAILED"
+    reasons = _blocking_reasons(payload)
+    reason_text = ", ".join(reasons) or status
     pump_label = pump_id or "unknown-pump"
     station_label = station_id or "unknown-station"
     dedup = f"SET_PRICE_FAILED:{station_label}:{pump_label}:{correlation or status}"
     message = (
         f"SET_PRICE command failed for pump {pump_label} at {station_label}: {reason_text}"
     )
-    return upsert_alert(
+    alert_result = upsert_alert(
         db,
         alert_type="SET_PRICE_FAILED",
         severity="HIGH",
@@ -197,8 +329,10 @@ def handle_command_result(
             "blockingReasons": reasons,
             "accepted": nested.get("accepted", payload.get("accepted")),
             "deviceId": payload.get("deviceId"),
+            "priceStatusUpdate": status_result,
         },
     )
+    return f"{alert_result};{status_result}"
 
 
 def handle_pump_alert(

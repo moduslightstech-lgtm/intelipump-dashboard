@@ -408,25 +408,56 @@ export default function AdminStationEditPage() {
         <p className="text-sm text-slate-400">
           <strong className="font-semibold text-slate-300">All PMS pumps</strong> sends one
           price to every active PMS Pi and skips AGO. Pick a single pump to set that Pi only
-          (AGO e.g. Pump 8 for diesel). Controllers keep the last sale on the pump face until
-          the next lift; a queued price applies on the next idle/RESET (no Pi restart). Use
-          raw integers (1400 PMS / 1875 AGO).
+          (AGO e.g. Pump 8 for diesel). Controllers queue CD5 while busy or awaiting hang-up
+          after a sale; status moves requested → pending → confirmed (or failed). Use raw
+          integers (1400 PMS / 1875 AGO).
         </p>
         {priceTarget === PRICE_TARGET_ALL_PMS && station?.commanded_unit_price_raw != null && (
-          <p className="text-sm text-emerald-300/90">
-            Last PMS station price: ₦{station.commanded_unit_price_raw}/L
+          <p className="text-sm text-slate-300/90">
+            Last requested PMS station price: ₦{station.commanded_unit_price_raw}/L
             {station.commanded_unit_price_at
               ? ` at ${new Date(station.commanded_unit_price_at).toLocaleString()}`
               : ''}
+            {' '}(per-pump confirm status below)
           </p>
         )}
         {priceTarget !== PRICE_TARGET_ALL_PMS && selectedPump?.commanded_unit_price_raw != null && (
-          <p className="text-sm text-emerald-300/90">
-            Last price for this pump: ₦{selectedPump.commanded_unit_price_raw}/L
+          <p className="text-sm text-slate-300/90">
+            Last requested for this pump: ₦{selectedPump.commanded_unit_price_raw}/L
             {selectedPump.commanded_unit_price_at
               ? ` at ${new Date(selectedPump.commanded_unit_price_at).toLocaleString()}`
               : ''}
+            {selectedPump.price_command_status
+              ? ` · ${selectedPump.price_command_status}`
+              : ''}
           </p>
+        )}
+        {activePumps.some((p) => p.price_command_status) && (
+          <ul className="text-sm space-y-1 text-slate-300">
+            {activePumps
+              .filter((p) => p.price_command_status)
+              .map((p) => {
+                const id = String(p.mqtt_pump_id || p.pump_code || '')
+                const status = String(p.price_command_status || '').toUpperCase()
+                const tone =
+                  status === 'CONFIRMED'
+                    ? 'text-emerald-300'
+                    : status === 'FAILED'
+                      ? 'text-rose-300'
+                      : status === 'PENDING' || status === 'REQUESTED'
+                        ? 'text-amber-200'
+                        : 'text-slate-300'
+                return (
+                  <li key={id} className={tone}>
+                    {p.name || id}: {status}
+                    {p.commanded_unit_price_raw != null
+                      ? ` · ₦${p.commanded_unit_price_raw}/L`
+                      : ''}
+                    {p.price_command_detail ? ` · ${p.price_command_detail}` : ''}
+                  </li>
+                )
+              })}
+          </ul>
         )}
         <form
           className="flex flex-wrap items-end gap-3"

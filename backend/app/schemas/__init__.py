@@ -311,6 +311,9 @@ class PumpOut(BaseModel):
     commanded_unit_price_raw: Optional[int] = None
     commanded_unit_price_at: Optional[datetime] = None
     commanded_unit_price_by: Optional[str] = None
+    price_command_status: Optional[str] = None
+    price_command_correlation_id: Optional[str] = None
+    price_command_detail: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

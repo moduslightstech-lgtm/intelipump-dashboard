@@ -448,6 +448,9 @@ export type Pump = {
   commanded_unit_price_raw?: number | null
   commanded_unit_price_at?: string | null
   commanded_unit_price_by?: string | null
+  price_command_status?: string | null
+  price_command_correlation_id?: string | null
+  price_command_detail?: string | null
   created_at: string
   updated_at: string
 }
