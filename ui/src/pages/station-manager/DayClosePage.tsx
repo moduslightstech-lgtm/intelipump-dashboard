@@ -9,7 +9,7 @@ import {
 } from '../../api/client'
 import { apiErrorMessage } from '../../lib/apiError'
 import { useAuth } from '../../context/AuthContext'
-import { normalizeRole } from '../../lib/roles'
+import { isAdmin as roleIsAdmin } from '../../lib/roles'
 import HowReconciliationWorks from '../../components/reconciliation/HowReconciliationWorks'
 import ReconciliationWorkspace from '../../components/reconciliation/ReconciliationWorkspace'
 
@@ -18,7 +18,7 @@ export default function DayClosePage() {
   const location = useLocation()
   const navigate = useNavigate()
   const { user } = useAuth()
-  const isAdmin = normalizeRole(user?.normalizedRole || user?.role) === 'ADMIN'
+  const isAdmin = roleIsAdmin(user?.normalizedRole || user?.role)
   const [params, setParams] = useSearchParams()
   const stationFromUrl = params.get('station')?.trim() || ''
   const dateFromUrl = params.get('date')?.trim() || ''

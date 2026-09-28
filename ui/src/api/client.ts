@@ -271,6 +271,9 @@ export type Station = {
   last_heartbeat_at?: string | null
   status_source?: string | null
   status_reason?: string | null
+  commanded_unit_price_raw?: number | null
+  commanded_unit_price_at?: string | null
+  commanded_unit_price_by?: string | null
   created_at: string
   updated_at: string
   pump_count?: number
@@ -323,6 +326,13 @@ export type EdgeDeviceStatus = {
   mqttConnected?: boolean | null
   mqttStatus?: string
   deviceName?: string | null
+  serialPort?: string | null
+  serialPortOpen?: boolean | null
+  lastSerialDataAt?: string | null
+  lastTransactionAt?: string | null
+  pumpCommunicationStatus?: string | null
+  pumpCommunicationLabel?: string | null
+  rs485Healthy?: boolean | null
 }
 
 export type EdgeDevice = EdgeDeviceStatus & {
@@ -435,6 +445,9 @@ export type Pump = {
   product?: string | null
   has_transactions?: boolean
   can_hard_delete?: boolean
+  commanded_unit_price_raw?: number | null
+  commanded_unit_price_at?: string | null
+  commanded_unit_price_by?: string | null
   created_at: string
   updated_at: string
 }
@@ -676,8 +689,12 @@ export const getExecutiveTankInventory = () => api.get<any[]>('/api/v1/executive
 export const getExecutiveAlertsSummary = () => api.get<any>('/api/v1/executive/alerts-summary')
 
 export const getAdminUsers = () => api.get<any[]>('/api/v1/admin/users')
+export const getOrganizations = () =>
+  api.get<{ id: string; code: string; name: string }[]>('/api/v1/organizations')
 export const createAdminUser = (body: Record<string, unknown>) =>
   api.post<any>('/api/v1/admin/users', body)
+export const updateAdminUser = (id: string, body: Record<string, unknown>) =>
+  api.put<any>(`/api/v1/admin/users/${id}`, body)
 export const assignUserRole = (id: string, role: string) =>
   api.post<any>(`/api/v1/admin/users/${id}/roles`, { role })
 export const assignUserStations = (id: string, station_ids: string[]) =>
@@ -689,6 +706,29 @@ export const getAdminStation = (stationId: string) =>
   api.get<Station>(`/api/v1/admin/stations/${stationId}`)
 export const updateAdminStation = (stationId: string, body: Partial<Station>) =>
   api.put<Station>(`/api/v1/admin/stations/${stationId}`, body)
+
+export type SetStationPriceResponse = {
+  accepted: boolean
+  topic: string
+  stationId: string
+  pumpId: string
+  pumpIds?: string[]
+  commands?: Array<{ pumpId: string; correlationId: string; commandId: string }>
+  commandType: string
+  unitPriceRaw: number
+  correlationId: string
+  commandId: string
+  environment: string
+  expiresAt: string
+  commandedUnitPriceRaw?: number | null
+  commandedUnitPriceAt?: string | null
+  detail: string
+}
+
+export const setAdminStationPrice = (
+  stationId: string,
+  body: { unit_price_raw: number; pump_id?: string },
+) => api.post<SetStationPriceResponse>(`/api/v1/admin/stations/${stationId}/commands/set-price`, body)
 
 export const getAdminStationDevices = (stationId: string) =>
   api.get<Device[]>(`/api/v1/admin/stations/${stationId}/devices`)
@@ -898,6 +938,41 @@ export const getAlertSummary = () => api.get<AlertSummary>('/api/v1/alerts/summa
 export const dismissAlert = (id: string) => api.post<Alert>(`/api/v1/alerts/${id}/dismiss`)
 export const reopenAlert = (id: string, comment?: string) =>
   api.post<Alert>(`/api/v1/alerts/${id}/reopen`, comment ? { comment } : undefined)
+
+export type AlertNotificationSettings = {
+  id: string
+  station_id: string | null
+  organization_id?: string | null
+  emails: string[]
+  notify_device_offline: boolean
+  notify_set_price_failed: boolean
+  notify_pump_closed_stuck: boolean
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type AlertNotificationSettingsUpdate = {
+  emails?: string[]
+  emails_csv?: string
+  notify_device_offline?: boolean
+  notify_set_price_failed?: boolean
+  notify_pump_closed_stuck?: boolean
+  enabled?: boolean
+}
+
+export const getAlertNotificationSettings = (stationId?: string) =>
+  api.get<AlertNotificationSettings>('/api/v1/alerts/notification-settings', {
+    params: stationId ? { stationId } : {},
+  })
+
+export const updateAlertNotificationSettings = (
+  body: AlertNotificationSettingsUpdate,
+  stationId?: string,
+) =>
+  api.put<AlertNotificationSettings>('/api/v1/alerts/notification-settings', body, {
+    params: stationId ? { stationId } : {},
+  })
 
 export type AlertSummary = {
   total: number
@@ -1141,7 +1216,7 @@ export const getReconciliationItems = (id: string) =>
   api.get<ReconciliationItem[]>(`/api/v1/reconciliations/${id}/items`)
 
 export const getTwinLiveState = (stationId: string, opts?: { touch?: boolean; includeInactive?: boolean }) =>
-  api.get<TwinLiveState>(`/api/v1/digital-twin/stations/${stationId}/live-state`, {
+  api.get<TwinLiveState>(`/api/v1/digital-twin/stations/${encodeURIComponent(stationId)}/live-state`, {
     params: {
       touch: opts?.touch || undefined,
       include_inactive: opts?.includeInactive || undefined,

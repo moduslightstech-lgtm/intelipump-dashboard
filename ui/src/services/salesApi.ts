@@ -1,4 +1,4 @@
-import { apiUrls } from '../config/api'
+import { apiUrls, jsonRequestHeaders } from '../config/api'
 import {
   parseRecentSales,
   parseSalesSummary,
@@ -18,7 +18,7 @@ export class SalesApiError extends Error {
 async function getJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const res = await fetch(url, {
     signal,
-    headers: { Accept: 'application/json' },
+    headers: jsonRequestHeaders(),
   })
   if (!res.ok) {
     throw new SalesApiError(`Sales API ${res.status}`, res.status)

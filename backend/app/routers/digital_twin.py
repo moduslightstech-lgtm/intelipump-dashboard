@@ -15,14 +15,22 @@ from app.models import Station, StationLayout, StationLayoutItem, User
 from app.schemas import StationLayoutOut, StationLayoutPut
 from app.security import get_current_user
 from app.services.digital_twin import get_station_live_state, resolve_station
+from app.services.rbac import assert_station_access, is_admin
 from app.services.station_search import record_station_view
 
 router = APIRouter(prefix="/digital-twin", tags=["digital-twin"])
 
 
 def _require_admin(user: User) -> None:
-    if (user.role or "").upper() not in {"ADMIN", "SUPERADMIN", "OPS"}:
+    if not is_admin(user):
         raise HTTPException(status_code=403, detail="Administrator role required")
+
+
+def _accessible_twin_station(db: Session, user: User, station_id: str):
+    station = resolve_station(db, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    return assert_station_access(db, user, station.id)
 
 
 @router.get("/stations/{station_id}")
@@ -33,13 +41,12 @@ def get_twin_station(
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Full Digital Twin aggregate (same payload as /live-state)."""
+    station = _accessible_twin_station(db, user, station_id)
     try:
         payload = get_station_live_state(db, station_id, include_inactive=include_inactive)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    station = resolve_station(db, station_id)
-    if station is not None:
-        record_station_view(db, user, station)
+    record_station_view(db, user, station)
     return payload
 
 
@@ -51,14 +58,13 @@ def live_state(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    station = _accessible_twin_station(db, user, station_id)
     try:
         payload = get_station_live_state(db, station_id, include_inactive=include_inactive)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if touch:
-        station = resolve_station(db, station_id)
-        if station is not None:
-            record_station_view(db, user, station)
+        record_station_view(db, user, station)
     return payload
 
 
@@ -92,11 +98,9 @@ def _layout_out(db: Session, layout: StationLayout) -> StationLayoutOut:
 def get_layout(
     station_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> StationLayoutOut:
-    station = resolve_station(db, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
+    station = _accessible_twin_station(db, user, station_id)
     layout = db.scalar(
         select(StationLayout)
         .where(StationLayout.station_id == station.id, StationLayout.is_active.is_(True))
@@ -116,9 +120,7 @@ def put_layout(
     user: User = Depends(get_current_user),
 ) -> StationLayoutOut:
     _require_admin(user)
-    station = resolve_station(db, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
+    station = _accessible_twin_station(db, user, station_id)
 
     existing = list(
         db.scalars(
@@ -169,9 +171,7 @@ def reset_layout(
 ) -> dict[str, Any]:
     """Deactivate custom layouts so AUTO layout is used."""
     _require_admin(user)
-    station = resolve_station(db, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
+    station = _accessible_twin_station(db, user, station_id)
     existing = list(
         db.scalars(
             select(StationLayout).where(

@@ -1,19 +1,26 @@
-export type AppRole = 'ADMIN' | 'EXECUTIVE' | 'STATION_MANAGER'
+export type AppRole = 'SUPER_ADMIN' | 'ADMIN' | 'EXECUTIVE' | 'STATION_MANAGER'
 
-const ADMIN_ALIASES = new Set(['ADMIN', 'SUPERADMIN', 'OPS', 'SUPER_ADMIN', 'ORGANIZATION_ADMIN'])
+const SUPER_ADMIN_ALIASES = new Set(['SUPER_ADMIN', 'SUPERADMIN', 'PLATFORM_ADMIN'])
+const ADMIN_ALIASES = new Set(['ADMIN', 'OPS', 'ORGANIZATION_ADMIN'])
 const EXEC_ALIASES = new Set(['EXECUTIVE', 'VIEWER', 'FINANCE', 'OWNER'])
 const MGR_ALIASES = new Set(['STATION_MANAGER'])
 
 export function normalizeRole(role?: string | null): AppRole {
-  const text = (role || '').trim().toUpperCase()
+  const text = (role || '').trim().toUpperCase().replace(/[-\s]/g, '_')
+  if (SUPER_ADMIN_ALIASES.has(text)) return 'SUPER_ADMIN'
   if (ADMIN_ALIASES.has(text) || text === 'ADMIN') return 'ADMIN'
   if (MGR_ALIASES.has(text)) return 'STATION_MANAGER'
   if (EXEC_ALIASES.has(text) || text === 'EXECUTIVE') return 'EXECUTIVE'
   return 'EXECUTIVE'
 }
 
+export function isSuperAdmin(role?: string | null): boolean {
+  return normalizeRole(role) === 'SUPER_ADMIN'
+}
+
 export function isAdmin(role?: string | null): boolean {
-  return normalizeRole(role) === 'ADMIN'
+  const r = normalizeRole(role)
+  return r === 'ADMIN' || r === 'SUPER_ADMIN'
 }
 
 export function landingPath(role?: string | null): string {
@@ -24,7 +31,7 @@ export function landingPath(role?: string | null): string {
 }
 
 export function canAccessPath(role: AppRole, path: string): boolean {
-  if (role === 'ADMIN') return true
+  if (role === 'ADMIN' || role === 'SUPER_ADMIN') return true
   if (role === 'EXECUTIVE') {
     if (path.startsWith('/settings') || path.startsWith('/users') || path.startsWith('/mqtt')) return false
     if (path.startsWith('/devices') || path.startsWith('/tanks')) return false

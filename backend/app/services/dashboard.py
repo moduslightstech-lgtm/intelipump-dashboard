@@ -53,13 +53,25 @@ def _day_bounds_for(db: Session, settings: Settings, station_id: str | None) -> 
     return start, end, tz_name
 
 
-def get_summary(db: Session, settings: Settings, station_id: str | None = None) -> DashboardSummary:
-    start, end, tz_name = _day_bounds_for(db, settings, station_id)
-    time_col = _tx_time_col()
-    filters = [time_col >= start, time_col < end]
+def _apply_station_scope(db: Session, filters: list, station_id: str | None, extra_where=None):
+    if extra_where is not None:
+        filters.append(extra_where)
+        return
     clause = _station_filter(db, station_id)
     if clause is not None:
         filters.append(clause)
+
+
+def get_summary(
+    db: Session,
+    settings: Settings,
+    station_id: str | None = None,
+    extra_where=None,
+) -> DashboardSummary:
+    start, end, tz_name = _day_bounds_for(db, settings, station_id)
+    time_col = _tx_time_col()
+    filters = [time_col >= start, time_col < end]
+    _apply_station_scope(db, filters, station_id, extra_where)
 
     amount = db.scalar(
         select(func.coalesce(func.sum(PumpTransaction.amount), 0)).where(*filters)
@@ -116,15 +128,13 @@ def get_summary(db: Session, settings: Settings, station_id: str | None = None) 
 
 
 def hourly_sales(
-    db: Session, settings: Settings, station_id: str | None = None
+    db: Session, settings: Settings, station_id: str | None = None, extra_where=None
 ) -> list[HourlySalesPoint]:
     start, end, _tz = _day_bounds_for(db, settings, station_id)
     time_col = _tx_time_col()
     hour = func.date_trunc("hour", time_col)
     filters = [time_col >= start, time_col < end]
-    clause = _station_filter(db, station_id)
-    if clause is not None:
-        filters.append(clause)
+    _apply_station_scope(db, filters, station_id, extra_where)
     stmt = (
         select(
             hour.label("hour"),
@@ -150,15 +160,13 @@ def hourly_sales(
 
 
 def product_breakdown(
-    db: Session, settings: Settings, station_id: str | None = None
+    db: Session, settings: Settings, station_id: str | None = None, extra_where=None
 ) -> list[ProductBreakdownItem]:
     start, end, _tz = _day_bounds_for(db, settings, station_id)
     time_col = _tx_time_col()
     product = func.coalesce(PumpTransaction.product, "Not mapped")
     filters = [time_col >= start, time_col < end]
-    clause = _station_filter(db, station_id)
-    if clause is not None:
-        filters.append(clause)
+    _apply_station_scope(db, filters, station_id, extra_where)
     stmt = (
         select(
             product,
@@ -182,9 +190,14 @@ def product_breakdown(
     ]
 
 
-def station_performance(db: Session, settings: Settings) -> list[StationPerformanceItem]:
+def station_performance(
+    db: Session, settings: Settings, extra_where=None, stations: list | None = None
+) -> list[StationPerformanceItem]:
     start, end = _day_bounds(settings.default_timezone)
     time_col = _tx_time_col()
+    filters = [time_col >= start, time_col < end]
+    if extra_where is not None:
+        filters.append(extra_where)
     rows = db.execute(
         select(
             PumpTransaction.station_id,
@@ -192,14 +205,14 @@ def station_performance(db: Session, settings: Settings) -> list[StationPerforma
             func.coalesce(func.sum(PumpTransaction.volume_liters), 0),
             func.count(),
         )
-        .where(time_col >= start, time_col < end)
+        .where(*filters)
         .group_by(PumpTransaction.station_id)
         .order_by(func.sum(PumpTransaction.amount).desc())
     ).all()
 
-    stations = list(db.scalars(select(Station)).all())
+    catalog = list(stations) if stations is not None else list(db.scalars(select(Station)).all())
     names: dict[str, str] = {}
-    for st in stations:
+    for st in catalog:
         names[st.station_code] = st.name
         for extra in mqtt_external_ids_for_station(st):
             names[extra] = st.name

@@ -219,6 +219,38 @@ def test_normalize_phase9_sale():
     assert tx.transaction_completed_at is not None
 
 
+def test_sao_face_naira_price_without_decimals():
+    """SAO SET_PRICE raw 1400 with omitted price_decimals must stay ₦1400/L."""
+    payload = {
+        "eventType": "TRANSACTION_COMPLETED",
+        "schemaVersion": "1.0",
+        "stationId": "SAO-Redeemed-Station-1",
+        "pumpId": "pump-1",
+        "transactionId": "sao-tx-price-1",
+        "occurredAt": "2026-09-17T15:42:00+00:00",
+        "deduplicationKey": "tx-completed:sao-tx-price-1",
+        "payload": {
+            "transaction_uuid": "sao-tx-price-1",
+            "station_id": "SAO-Redeemed-Station-1",
+            "pump_id": "pump-1",
+            "raw_unit_price": 1400,
+            "raw_volume": 3571,
+            "volume_decimals": 2,
+            "raw_amount": 5000000,
+            "amount_decimals": 2,
+            "final_status": "COMPLETED",
+        },
+    }
+    tx, err = normalize_transaction(
+        payload, source_topic="intelipump/prod/stations/SAO-Redeemed-Station-1/transactions"
+    )
+    assert err is None
+    assert tx is not None
+    assert tx.price_per_liter == Decimal("1400")
+    assert tx.volume_liters == Decimal("35.71")
+    assert tx.amount == Decimal("50000.00")
+
+
 def test_phase9_refuses_to_invent_transaction_id():
     payload = dict(PHASE9_SALE)
     payload["transactionId"] = None
@@ -248,6 +280,24 @@ def test_flatten_heartbeat_exposes_envelope_identity():
     assert flat["hostname"] == "intelipump-lab"
     assert flat["status"] == "ONLINE"
     assert flat["agentVersion"] == "0.1.0"
+    assert flat["mqttConnected"] is True
+
+
+def test_flatten_maps_transport_open_to_serial_port_open():
+    payload = {
+        "deviceId": "InteliPump-SAO-RS1-pi-001",
+        "stationId": "SAO-Redeemed-Station-1",
+        "eventType": "HEARTBEAT",
+        "payload": {
+            "transportOpen": False,
+            "transportKind": "serial",
+            "mqttConnectionStatus": "CONNECTED",
+            "softwareVersion": "1.2.3",
+        },
+    }
+    flat = flatten_device_fields(payload)
+    assert flat["serialPortOpen"] is False
+    assert flat["serialPort"] == "serial"
     assert flat["mqttConnected"] is True
 
 
@@ -465,3 +515,55 @@ def test_old_demo_topic_is_ignored():
         if "INSERT INTO pump_transactions" in str(c.args[0])
     ]
     assert inserts == []
+
+
+def test_extract_phase9_pump_id_from_events_topic():
+    from app.phase9 import extract_phase9_pump_id
+
+    assert (
+        extract_phase9_pump_id(
+            "intelipump/prod/stations/SAO-Redeemed-Station-1/pumps/pump-1/events"
+        )
+        == "pump-1"
+    )
+
+
+def test_transaction_started_without_pump_id_is_not_rejected():
+    started = {
+        "messageId": "start-1",
+        "eventType": "TRANSACTION_STARTED",
+        "schemaVersion": "1.0",
+        "stationId": "SAO-Redeemed-Station-1",
+        "transactionId": "tx-started-1",
+        "payload": {
+            "transaction_uuid": "tx-started-1",
+            "station_id": "SAO-Redeemed-Station-1",
+        },
+    }
+    db, cur = _mock_db()
+    app = _app(db)
+    app.handle_message(TX_TOPIC, json.dumps(started).encode(), qos=1, retained=False)
+    rejected = [
+        c for c in cur.execute.call_args_list if "rejected_messages" in str(c.args[0])
+    ]
+    sales = [
+        c
+        for c in cur.execute.call_args_list
+        if "INSERT INTO pump_transactions" in str(c.args[0])
+    ]
+    assert rejected == []
+    assert sales == []
+
+
+def test_transaction_started_with_pump_id_is_dispensing():
+    started = dict(PHASE9_SALE)
+    started["eventType"] = "TRANSACTION_STARTED"
+    started["payload"] = dict(PHASE9_SALE["payload"])
+    started["payload"]["raw_volume"] = 0
+    started["payload"]["raw_amount"] = 0
+    tx, err = normalize_transaction(started, source_topic=TX_TOPIC)
+    assert err is None
+    assert tx is not None
+    assert tx.status == "DISPENSING"
+    assert tx.pump_id == "pump-1"
+    assert tx.volume_liters == Decimal("0.000")

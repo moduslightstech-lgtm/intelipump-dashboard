@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     Time,
     func,
+    ARRAY,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -64,6 +65,16 @@ class PumpTransaction(Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+class Organization(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Station(Base):
     __tablename__ = "stations"
 
@@ -93,6 +104,11 @@ class Station(Base):
     pump_power_detected: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     serial_connected: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     mqtt_connected: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    commanded_unit_price_raw: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    commanded_unit_price_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    commanded_unit_price_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     tank_reading_deadline_local: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -176,6 +192,11 @@ class Pump(Base):
     state_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     state_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     last_state_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    commanded_unit_price_raw: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    commanded_unit_price_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    commanded_unit_price_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -327,6 +348,25 @@ class AlertRule(Base):
     threshold_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     comparison_operator: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     configuration_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AlertNotificationSettings(Base):
+    """Dashboard-configured alert email recipients (global or per-station)."""
+
+    __tablename__ = "alert_notification_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    station_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("stations.id", ondelete="CASCADE"), nullable=True
+    )
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    emails: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False, default=list)
+    notify_device_offline: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_set_price_failed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_pump_closed_stuck: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -885,6 +925,7 @@ class StationLayoutItem(Base):
 
 __all__ = [
     "PumpTransaction",
+    "Organization",
     "Station",
     "Device",
     "EdgeDevice",
@@ -897,6 +938,7 @@ __all__ = [
     "Alert",
     "AlertEvent",
     "AlertRule",
+    "AlertNotificationSettings",
     "Tank",
     "TankPumpConnection",
     "Nozzle",

@@ -1,30 +1,60 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   assignUserRole,
   assignUserStations,
   createAdminUser,
   getAdminUsers,
+  getOrganizations,
   getStations,
+  updateAdminUser,
 } from '../api/client'
 import { apiErrorMessage } from '../lib/apiError'
+import { useAuth } from '../context/AuthContext'
+import { isSuperAdmin } from '../lib/roles'
 
 const MIN_PASSWORD_LENGTH = 8
+const COMPANY_ROLES = ['ADMIN', 'EXECUTIVE', 'STATION_MANAGER'] as const
+
+function roleOptions(actorIsSuper: boolean, current?: string | null) {
+  const options: string[] = actorIsSuper ? ['SUPER_ADMIN', ...COMPANY_ROLES] : [...COMPANY_ROLES]
+  if (current && !options.includes(current)) options.unshift(current)
+  return options
+}
 
 export default function UsersPage() {
   const qc = useQueryClient()
+  const { user: actor } = useAuth()
+  const actorIsSuper = isSuperAdmin(actor?.normalizedRole || actor?.role)
   const usersQ = useQuery({ queryKey: ['admin', 'users'], queryFn: async () => (await getAdminUsers()).data })
   const stationsQ = useQuery({ queryKey: ['stations'], queryFn: async () => (await getStations()).data })
+  const orgsQ = useQuery({ queryKey: ['organizations'], queryFn: async () => (await getOrganizations()).data })
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('STATION_MANAGER')
+  const [organizationId, setOrganizationId] = useState('')
   const [assignUserId, setAssignUserId] = useState('')
   const [selectedStations, setSelectedStations] = useState<string[]>([])
   const [formError, setFormError] = useState<string | null>(null)
 
+  const organizations = orgsQ.data || []
+
+  useEffect(() => {
+    if (!organizationId && organizations.length === 1) {
+      setOrganizationId(organizations[0].id)
+    }
+  }, [organizationId, organizations])
+
   const createMut = useMutation({
     mutationFn: async () =>
-      (await createAdminUser({ email, password, role })).data,
+      (
+        await createAdminUser({
+          email,
+          password,
+          role,
+          ...(role === 'SUPER_ADMIN' || !organizationId ? {} : { organization_id: organizationId }),
+        })
+      ).data,
     onSuccess: () => {
       setEmail('')
       setPassword('')
@@ -54,6 +84,12 @@ export default function UsersPage() {
   const roleMut = useMutation({
     mutationFn: async ({ id, role }: { id: string; role: string }) =>
       (await assignUserRole(id, role)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'users'] }),
+  })
+
+  const orgMut = useMutation({
+    mutationFn: async ({ id, organization_id }: { id: string; organization_id: string | null }) =>
+      (await updateAdminUser(id, { organization_id })).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['admin', 'users'] }),
   })
 
@@ -97,11 +133,39 @@ export default function UsersPage() {
             Must be at least {MIN_PASSWORD_LENGTH} characters.
           </p>
         </div>
-        <select className="input w-full" value={role} onChange={(e) => setRole(e.target.value)}>
-          <option value="ADMIN">ADMIN</option>
-          <option value="EXECUTIVE">EXECUTIVE</option>
-          <option value="STATION_MANAGER">STATION_MANAGER</option>
+        <select
+          className="input w-full"
+          value={role}
+          aria-label="Role"
+          onChange={(e) => {
+            const next = e.target.value
+            setRole(next)
+            if (next === 'SUPER_ADMIN') setOrganizationId('')
+          }}
+        >
+          {roleOptions(actorIsSuper).map((r) => (
+            <option key={r} value={r}>
+              {r === 'SUPER_ADMIN' ? 'SUPER_ADMIN (all companies)' : r}
+            </option>
+          ))}
         </select>
+        {organizations.length > 0 && role !== 'SUPER_ADMIN' ? (
+          <select
+            className="input w-full"
+            value={organizationId}
+            onChange={(e) => setOrganizationId(e.target.value)}
+            aria-label="Company"
+          >
+            <option value="">
+              {organizations.length > 1 ? 'Platform operator (all companies)' : 'Select company'}
+            </option>
+            {organizations.map((org) => (
+              <option key={org.id} value={org.id}>
+                {org.name}
+              </option>
+            ))}
+          </select>
+        ) : null}
         {createError ? (
           <p id="create-user-error" className="text-sm text-red-400" role="alert">
             {createError}
@@ -118,6 +182,7 @@ export default function UsersPage() {
             <tr className="text-left text-slate-400 border-b border-slate-700">
               <th className="pb-2">Email</th>
               <th className="pb-2">Role</th>
+              <th className="pb-2">Company</th>
               <th className="pb-2">Stations</th>
               <th className="pb-2">Actions</th>
             </tr>
@@ -129,12 +194,40 @@ export default function UsersPage() {
                 <td className="py-2">
                   <select
                     className="input text-xs"
+                    aria-label={`Role for ${u.email}`}
                     value={u.normalizedRole || u.role}
+                    disabled={!actorIsSuper && (u.normalizedRole || u.role) === 'SUPER_ADMIN'}
                     onChange={(e) => roleMut.mutate({ id: u.id, role: e.target.value })}
                   >
-                    <option value="ADMIN">ADMIN</option>
-                    <option value="EXECUTIVE">EXECUTIVE</option>
-                    <option value="STATION_MANAGER">STATION_MANAGER</option>
+                    {roleOptions(actorIsSuper, u.normalizedRole || u.role).map((r) => (
+                      <option key={r} value={r}>
+                        {r}
+                      </option>
+                    ))}
+                  </select>
+                </td>
+                <td className="py-2">
+                  <select
+                    className="input text-xs"
+                    aria-label={`Company for ${u.email}`}
+                    value={u.organizationId || ''}
+                    disabled={
+                      (u.normalizedRole || u.role) === 'SUPER_ADMIN' ||
+                      (!actorIsSuper && Boolean(actor?.organizationId))
+                    }
+                    onChange={(e) =>
+                      orgMut.mutate({
+                        id: u.id,
+                        organization_id: e.target.value || null,
+                      })
+                    }
+                  >
+                    <option value="">All companies</option>
+                    {organizations.map((org) => (
+                      <option key={org.id} value={org.id}>
+                        {org.name}
+                      </option>
+                    ))}
                   </select>
                 </td>
                 <td className="py-2 text-xs font-mono text-slate-400">

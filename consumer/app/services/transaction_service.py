@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from psycopg2.extras import Json
@@ -104,6 +105,7 @@ class TransactionService:
             )
             return "processed_incident"
         try:
+            self._apply_admin_unit_price(transaction)
             inserted = self._insert_transaction(transaction, received_at)
             # deviceId is optional on the Pi payload; only touch devices when present
             if transaction.device_id:
@@ -147,6 +149,72 @@ class TransactionService:
                 received_at=received_at,
             )
             return "error"
+
+    def _lookup_commanded_unit_price(self, cur, mqtt_station_id: str) -> Optional[Decimal]:
+        """Admin SET_PRICE face naira (1400 = ₦1400/L)."""
+        text = (mqtt_station_id or "").strip()
+        if not text:
+            return None
+        cur.execute(
+            """
+            SELECT commanded_unit_price_raw FROM stations
+            WHERE mqtt_station_id = %s AND commanded_unit_price_raw IS NOT NULL
+            LIMIT 1
+            """,
+            (text,),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return Decimal(int(row[0]))
+        cur.execute(
+            """
+            SELECT s.commanded_unit_price_raw
+            FROM mqtt_identity_map m
+            JOIN stations s ON s.id = m.internal_id
+            WHERE m.entity_type = 'station'
+              AND m.mqtt_external_id = %s
+              AND s.commanded_unit_price_raw IS NOT NULL
+            LIMIT 1
+            """,
+            (text,),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return Decimal(int(row[0]))
+        cur.execute(
+            """
+            SELECT commanded_unit_price_raw FROM stations
+            WHERE station_code = %s AND commanded_unit_price_raw IS NOT NULL
+            LIMIT 1
+            """,
+            (text,),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return Decimal(int(row[0]))
+        return None
+
+    def _apply_admin_unit_price(self, tx: NormalizedTransaction) -> None:
+        """Fill missing unit price from admin SET_PRICE — never amount÷volume."""
+        if tx.price_per_liter is not None and tx.price_per_liter > 0:
+            return
+        try:
+            with self._db.connection() as conn:
+                with conn.cursor() as cur:
+                    commanded = self._lookup_commanded_unit_price(cur, tx.station_id)
+        except Exception:
+            logger.exception(
+                "Failed looking up commanded unit price station=%s", tx.station_id
+            )
+            return
+        if commanded is not None and commanded > 0:
+            tx.price_per_liter = commanded
+            logger.info(
+                "Applied admin unit price ₦%s/L station=%s tx=%s",
+                commanded,
+                tx.station_id,
+                tx.transaction_id,
+            )
 
     def _insert_transaction(self, tx: NormalizedTransaction, received_at: datetime) -> bool:
         """Insert transaction. Returns True if a new row was inserted.

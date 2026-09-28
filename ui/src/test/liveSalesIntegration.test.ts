@@ -222,3 +222,43 @@ describe('EventSource mock listeners', () => {
     expect(MockEventSource.instances).toHaveLength(1)
   })
 })
+
+describe('sales REST sends the login token', () => {
+  const originalFetch = globalThis.fetch
+  const store: Record<string, string> = {}
+
+  beforeEach(() => {
+    Object.keys(store).forEach((k) => delete store[k])
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store[key] ?? null,
+      setItem: (key: string, value: string) => {
+        store[key] = value
+      },
+      removeItem: (key: string) => {
+        delete store[key]
+      },
+      clear: () => {
+        Object.keys(store).forEach((k) => delete store[k])
+      },
+    })
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    vi.unstubAllGlobals()
+  })
+
+  it('attaches Authorization on /sales/recent', async () => {
+    localStorage.setItem('intelipump_access_token', 'test-jwt')
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ count: 0, sales: [] }),
+    }))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const { fetchRecentSales } = await import('../services/salesApi')
+    await fetchRecentSales('SAO-Redeemed-Station-1')
+    expect(fetchMock).toHaveBeenCalled()
+    const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer test-jwt')
+  })
+})

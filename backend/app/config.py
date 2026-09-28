@@ -42,6 +42,29 @@ class Settings(BaseSettings):
     )
     edge_pump_active_seconds: int = Field(default=600, alias="EDGE_PUMP_ACTIVE_SECONDS")
 
+    # Dashboard → Mosquitto command publisher (SET_PRICE). Optional; endpoint
+    # returns 502 if MQTT_HOST is unset when a command is requested.
+    mqtt_host: Optional[str] = Field(default=None, alias="MQTT_HOST")
+    mqtt_port: int = Field(default=1883, alias="MQTT_PORT")
+    mqtt_username: Optional[str] = Field(default=None, alias="MQTT_USERNAME")
+    mqtt_password: Optional[str] = Field(default=None, alias="MQTT_PASSWORD")
+    mqtt_publisher_client_id: Optional[str] = Field(
+        default="intelipump-api-commands", alias="MQTT_PUBLISHER_CLIENT_ID"
+    )
+    # LAB or PRODUCTION — empty means infer from station mqtt id.
+    mqtt_command_environment: Optional[str] = Field(
+        default=None, alias="MQTT_COMMAND_ENVIRONMENT"
+    )
+    mqtt_command_ttl_seconds: int = Field(default=120, alias="MQTT_COMMAND_TTL_SECONDS")
+
+    # Optional SMTP for alert emails (dashboard configures recipients)
+    smtp_host: Optional[str] = Field(default=None, alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_user: Optional[str] = Field(default=None, alias="SMTP_USER")
+    smtp_password: Optional[str] = Field(default=None, alias="SMTP_PASSWORD")
+    smtp_from: Optional[str] = Field(default=None, alias="SMTP_FROM")
+    smtp_use_tls: bool = Field(default=True, alias="SMTP_USE_TLS")
+
     @property
     def database_url(self) -> str:
         user = quote_plus(self.postgres_user)

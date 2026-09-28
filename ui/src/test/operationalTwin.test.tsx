@@ -445,12 +445,14 @@ describe('scene assets from live-state (no WebGL)', () => {
 describe('role-based twin access', () => {
   it('allows admin and executive, blocks station manager', () => {
     expect(canAccessPath(normalizeRole('ADMIN'), '/digital-twin')).toBe(true)
+    expect(canAccessPath(normalizeRole('SUPER_ADMIN'), '/users')).toBe(true)
     expect(canAccessPath(normalizeRole('EXECUTIVE'), '/digital-twin/abc')).toBe(true)
     expect(canAccessPath(normalizeRole('STATION_MANAGER'), '/digital-twin')).toBe(false)
   })
 
   it('hides admin station routes from executive and station manager', () => {
     expect(canAccessPath(normalizeRole('ADMIN'), '/admin/stations')).toBe(true)
+    expect(canAccessPath(normalizeRole('SUPER_ADMIN'), '/admin/stations')).toBe(true)
     expect(canAccessPath(normalizeRole('ADMIN'), '/admin/stations/abc/pumps')).toBe(true)
     expect(canAccessPath(normalizeRole('EXECUTIVE'), '/admin/stations')).toBe(false)
     expect(canAccessPath(normalizeRole('STATION_MANAGER'), '/admin/stations/abc/edit')).toBe(false)

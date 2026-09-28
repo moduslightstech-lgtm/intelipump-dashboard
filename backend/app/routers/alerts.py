@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Alert, AlertEvent, AlertRule, User
+from app.models import Alert, AlertEvent, AlertRule, Station, User
 from app.schemas import (
     AlertAssignRequest,
     AlertCommentRequest,
@@ -21,6 +21,8 @@ from app.schemas import (
     AlertResolveRequest,
     AlertRuleOut,
     AlertSummaryOut,
+    AlertNotificationSettingsOut,
+    AlertNotificationSettingsUpdate,
 )
 from app.security import get_current_user
 from app.services.alert_engine import record_event
@@ -70,6 +72,70 @@ def list_rules(
     _user: User = Depends(get_current_user),
 ) -> list[AlertRule]:
     return list(db.scalars(select(AlertRule).order_by(AlertRule.name)).all())
+
+
+
+@router.get("/notification-settings", response_model=AlertNotificationSettingsOut)
+def get_notification_settings(
+    station_id: Optional[UUID] = Query(None, alias="stationId"),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> object:
+    """Global or per-station alert email settings."""
+    from app.services.email_notify import (
+        get_or_create_global_settings,
+        get_or_create_station_settings,
+    )
+
+    if station_id is None:
+        return get_or_create_global_settings(db)
+    station = db.get(Station, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not found")
+    return get_or_create_station_settings(db, station)
+
+
+@router.put("/notification-settings", response_model=AlertNotificationSettingsOut)
+def put_notification_settings(
+    body: AlertNotificationSettingsUpdate,
+    station_id: Optional[UUID] = Query(None, alias="stationId"),
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+) -> object:
+    from datetime import datetime, timezone
+
+    from app.services.email_notify import (
+        get_or_create_global_settings,
+        get_or_create_station_settings,
+        normalize_emails,
+        parse_emails_csv,
+    )
+
+    if station_id is None:
+        row = get_or_create_global_settings(db)
+    else:
+        station = db.get(Station, station_id)
+        if station is None:
+            raise HTTPException(status_code=404, detail="Station not found")
+        row = get_or_create_station_settings(db, station)
+
+    if body.emails_csv is not None:
+        row.emails = parse_emails_csv(body.emails_csv)
+    elif body.emails is not None:
+        row.emails = normalize_emails(body.emails)
+    if body.notify_device_offline is not None:
+        row.notify_device_offline = body.notify_device_offline
+    if body.notify_set_price_failed is not None:
+        row.notify_set_price_failed = body.notify_set_price_failed
+    if body.notify_pump_closed_stuck is not None:
+        row.notify_pump_closed_stuck = body.notify_pump_closed_stuck
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    row.updated_at = datetime.now(timezone.utc)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
 
 
 @router.get("/{alert_id}", response_model=AlertDetailOut)

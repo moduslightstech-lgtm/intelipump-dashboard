@@ -328,6 +328,12 @@ class StationStatusService:
                     """,
                     (when, str(station_uuid)),
                 )
+                # Keep catalog devices.last_seen in sync so /api/v1/devices
+                # Offline is not stuck until the next sale.
+                if device_id:
+                    self._touch_device(
+                        cur, str(device_id), station_uuid, when, status="ONLINE"
+                    )
         return "processed"
 
     def evaluate_timeouts(self) -> int:

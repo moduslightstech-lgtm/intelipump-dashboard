@@ -487,6 +487,7 @@ export function operationalDisplay(session: NozzleSession | undefined, now = Dat
   if (p === 'DISPENSING') return 'DISPENSING'
   if (p === 'READY') return 'READY'
   if (p === 'SALE_COMPLETED') return 'SALE_COMPLETED'
+  if (p === 'LAST_SALE') return 'LAST_SALE'
   return 'IDLE'
 }
 

@@ -21,6 +21,7 @@ from app.schemas.executive_overview import ExecutiveOverviewOut
 from app.security import get_current_user
 from app.services import dashboard as dashboard_service
 from app.services.executive_overview import get_executive_overview
+from app.services.rbac import scoped_ledger_clause
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -57,9 +58,11 @@ def summary(
     station_id: Optional[str] = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> DashboardSummary:
-    return dashboard_service.get_summary(db, settings, station_id=station_id)
+    return dashboard_service.get_summary(
+        db, settings, station_id=station_id, extra_where=scoped_ledger_clause(db, user, station_id)
+    )
 
 
 @router.get("/hourly-sales", response_model=list[HourlySalesPoint])
@@ -67,9 +70,11 @@ def hourly_sales(
     station_id: Optional[str] = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[HourlySalesPoint]:
-    return dashboard_service.hourly_sales(db, settings, station_id=station_id)
+    return dashboard_service.hourly_sales(
+        db, settings, station_id=station_id, extra_where=scoped_ledger_clause(db, user, station_id)
+    )
 
 
 @router.get("/product-breakdown", response_model=list[ProductBreakdownItem])
@@ -77,15 +82,25 @@ def product_breakdown(
     station_id: Optional[str] = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[ProductBreakdownItem]:
-    return dashboard_service.product_breakdown(db, settings, station_id=station_id)
+    return dashboard_service.product_breakdown(
+        db, settings, station_id=station_id, extra_where=scoped_ledger_clause(db, user, station_id)
+    )
 
 
 @router.get("/station-performance", response_model=list[StationPerformanceItem])
 def station_performance(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[StationPerformanceItem]:
-    return dashboard_service.station_performance(db, settings)
+    from app.services.rbac import accessible_stations
+
+    allowed = accessible_stations(db, user)
+    return dashboard_service.station_performance(
+        db,
+        settings,
+        extra_where=scoped_ledger_clause(db, user, None),
+        stations=allowed,
+    )

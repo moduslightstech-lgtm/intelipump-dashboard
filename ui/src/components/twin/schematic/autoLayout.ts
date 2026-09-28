@@ -349,13 +349,25 @@ export function buildAutoForecourtLayout(
         y: port.y,
         w: port.w,
         h: port.h,
-        label: friendlyNozzleName(pump, pi),
+        label: friendlyNozzleName(
+          {
+            ...pump,
+            parentPumpNumber: physical?.pumpNumber ?? physical?.pump_number ?? pump.parentPumpNumber,
+          },
+          pi,
+        ),
         status: String(pump.inferredStatus || pump.status || 'UNKNOWN'),
         product: pump.product as string | undefined,
         parentId: island.islandId,
         islandId: island.islandId,
         assetId: String(pump.id),
-        raw: { ...pump, assetRole: 'NOZZLE', parentPumpId: String(physical?.id || ''), parentPumpName: pumpName },
+        raw: {
+          ...pump,
+          assetRole: 'NOZZLE',
+          parentPumpId: String(physical?.id || ''),
+          parentPumpName: pumpName,
+          parentPumpNumber: physical?.pumpNumber ?? physical?.pump_number ?? pump.parentPumpNumber,
+        },
       })
     })
   })
@@ -413,7 +425,10 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
         y: port.y,
         w: port.w,
         h: port.h,
-        label: friendlyNozzleName(nozzle, index),
+        label: friendlyNozzleName(
+          { ...nozzle, parentPumpNumber: pump.pumpNumber ?? pump.pump_number ?? nozzle.parentPumpNumber },
+          index,
+        ),
         status: String(nozzle.inferredStatus || nozzle.status || pump.inferredStatus || 'UNKNOWN'),
         product: (nozzle.product || pump.product) as string | undefined,
         islandId: parentId,
@@ -424,6 +439,7 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
           assetRole: 'NOZZLE',
           parentPumpId: String(pump.id),
           parentPumpName: String(pump.name || pump.pumpCode || 'Pump'),
+          parentPumpNumber: pump.pumpNumber ?? pump.pump_number ?? nozzle.parentPumpNumber,
         },
       })
     } else if (assetType === 'NOZZLE') {
@@ -443,7 +459,10 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
         y: port.y,
         w: port.w,
         h: port.h,
-        label: friendlyNozzleName(nozzle, index),
+        label: friendlyNozzleName(
+          { ...nozzle, parentPumpNumber: pump.pumpNumber ?? pump.pump_number ?? nozzle.parentPumpNumber },
+          index,
+        ),
         status: String(nozzle.inferredStatus || nozzle.status || 'UNKNOWN'),
         product: (nozzle.product || pump.product) as string | undefined,
         islandId: parentId,
@@ -454,6 +473,7 @@ function parseSavedItems(state?: TwinLiveState, metrics: LayoutMetrics = DEFAULT
           assetRole: 'NOZZLE',
           parentPumpId: String(pump.id),
           parentPumpName: String(pump.name || pump.pumpCode || 'Pump'),
+          parentPumpNumber: pump.pumpNumber ?? pump.pump_number ?? nozzle.parentPumpNumber,
         },
       })
     } else if (assetType === 'ISLAND') {

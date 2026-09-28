@@ -13,9 +13,22 @@ from fastapi.testclient import TestClient
 from app.config import get_settings
 from app.database import get_db
 from app.main import create_app
+from app.security import get_current_user
 from app.services.identity import mqtt_external_ids_for_station, station_query_keys
 from app.services.sales import serialize_sale
 from app import database
+
+
+def _admin():
+    return SimpleNamespace(
+        id=uuid4(),
+        email="admin@example.com",
+        role="ADMIN",
+        status="ACTIVE",
+        organization_id=None,
+        first_name="Admin",
+        last_name="User",
+    )
 
 
 def _env(monkeypatch) -> None:
@@ -99,10 +112,44 @@ def test_serialize_sale_matches_dashboard_contract():
     assert "completedAt" in sale
 
 
+def test_sales_summary_completed_clause_matches_executive():
+    from app.services.sales import _COMPLETED_STATUSES, _completed_sale_clause
+
+    assert _COMPLETED_STATUSES == ("COMPLETED", "COMPLETE")
+    sql = str(_completed_sale_clause().compile(compile_kwargs={"literal_binds": True})).upper()
+    assert "COMPLETED" in sql
+    assert "COMPLETE" in sql
+    assert "AMOUNT" in sql
+
+
+def test_sales_summary_day_start_uses_station_timezone(monkeypatch):
+    from app.services.sales import _station_today_start_utc
+
+    station = SimpleNamespace(timezone="Africa/Lagos")
+    monkeypatch.setattr("app.services.sales.resolve_station", lambda *_a, **_k: station)
+    start, tz_name = _station_today_start_utc(MagicMock(), "SAO-RS-001")
+    assert tz_name == "Africa/Lagos"
+    # Africa/Lagos is UTC+1 year-round → local midnight is 23:00 previous day UTC
+    assert start.tzinfo is not None
+    assert start.hour == 23
+    assert start.minute == 0
+
+
+def test_sales_summary_empty_when_station_unresolved(monkeypatch):
+    from app.services import sales as sales_svc
+
+    monkeypatch.setattr(sales_svc, "sales_filter", lambda *_a, **_k: None)
+    out = sales_svc.sales_summary(MagicMock(), station_id="missing")
+    assert out["transactionCount"] == 0
+    assert out["totalAmount"] == 0.0
+    assert out["timezone"] == "Africa/Lagos"
+
+
 def test_recent_sales_requires_station_id(monkeypatch):
     _env(monkeypatch)
     app = create_app()
     app.dependency_overrides[get_db] = lambda: MagicMock()
+    app.dependency_overrides[get_current_user] = lambda: _admin()
     client = TestClient(app)
     resp = client.get("/api/v1/sales/recent")
     assert resp.status_code == 422
@@ -140,6 +187,8 @@ def test_recent_sales_returns_generic_station_payload(monkeypatch):
 
     app = create_app()
     app.dependency_overrides[get_db] = lambda: _DB()
+    app.dependency_overrides[get_current_user] = lambda: _admin()
+    monkeypatch.setattr("app.routers.sales._require_sales_station", lambda *_a, **_k: None)
     client = TestClient(app)
     resp = client.get(
         "/api/v1/sales/recent",

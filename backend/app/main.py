@@ -92,6 +92,7 @@ def create_app() -> FastAPI:
     application.include_router(dashboard.router, prefix=prefix)
     application.include_router(transactions.router, prefix=prefix)
     application.include_router(resources.stations_router, prefix=prefix)
+    application.include_router(resources.organizations_router, prefix=prefix)
     application.include_router(resources.devices_router, prefix=prefix)
     application.include_router(resources.pumps_router, prefix=prefix)
     application.include_router(edge_devices.router, prefix=prefix)

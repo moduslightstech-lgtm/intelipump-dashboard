@@ -28,6 +28,7 @@ from app.models import (
 from app.services.auto_layout import build_auto_layout
 from app.services.equipment_status import aggregate_physical_pump_status, friendly_nozzle_name, normalize_equipment_status
 from app.services.identity import (
+    ledger_station_match_clause,
     mqtt_external_ids_for_pump,
     mqtt_external_ids_for_station,
     resolve_station,
@@ -117,12 +118,8 @@ def resolve_station(db: Session, station_id_or_code: str | UUID) -> Station | No
 
 
 def _ledger_station_match(station: Station):
-    """Match pump_transactions rows for this catalog station (MQTT external ≠ station_code)."""
-    clauses = [PumpTransaction.station_uuid == station.id]
-    externals = mqtt_external_ids_for_station(station)
-    if externals:
-        clauses.append(PumpTransaction.station_id.in_(externals))
-    return or_(*clauses)
+    """Match pump_transactions rows for this catalog station (no UUID-only cross-station leaks)."""
+    return ledger_station_match_clause(station)
 
 
 def station_has_live_edge(db: Session, station: Station, now: datetime) -> bool:
@@ -324,6 +321,11 @@ def get_station_live_state(
         PumpTransaction.transaction_completed_at,
         PumpTransaction.device_timestamp,
         PumpTransaction.received_at,
+        PumpTransaction.created_at,
+    )
+    completed_sales = and_(
+        func.upper(func.coalesce(PumpTransaction.status, "")).in_(("COMPLETED", "COMPLETE")),
+        PumpTransaction.amount.is_not(None),
     )
 
     # --- Catalog assets ---
@@ -649,6 +651,7 @@ def get_station_live_state(
                         {
                             "name": getattr(n, "name", None),
                             "nozzleNumber": n.nozzle_number,
+                            "pumpNumber": pump.pump_number,
                         },
                         idx,
                     ),
@@ -658,6 +661,7 @@ def get_station_live_state(
                     "controllerAddress": getattr(n, "controller_address", None),
                     "sideId": getattr(n, "side_id", None),
                     "nozzleNumber": n.nozzle_number,
+                    "parentPumpNumber": pump.pump_number,
                     "pumpId": str(pump.id),
                     "pumpCode": pump.pump_code,
                     "product": n.product or (n_tx.product if n_tx is not None else None),
@@ -1041,6 +1045,7 @@ def get_station_live_state(
     sales_amount = db.scalar(
         select(func.coalesce(func.sum(PumpTransaction.amount), 0)).where(
             ledger_match,
+            completed_sales,
             time_col >= day_start,
             time_col < day_end,
         )
@@ -1048,6 +1053,7 @@ def get_station_live_state(
     sales_volume = db.scalar(
         select(func.coalesce(func.sum(PumpTransaction.volume_liters), 0)).where(
             ledger_match,
+            completed_sales,
             time_col >= day_start,
             time_col < day_end,
         )
@@ -1055,6 +1061,7 @@ def get_station_live_state(
     sales_count = db.scalar(
         select(func.count()).select_from(PumpTransaction).where(
             ledger_match,
+            completed_sales,
             time_col >= day_start,
             time_col < day_end,
         )

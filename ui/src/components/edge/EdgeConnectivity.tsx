@@ -8,6 +8,7 @@ import {
   type AvailabilityTone,
 } from '../../lib/relativeTime'
 import { getDeviceStatus } from '../../services/edgeDeviceApi'
+import { edgeConnectivityLabel, edgeConnectivityTone } from '../../types/edgeDevice'
 
 function toneDot(tone: AvailabilityTone) {
   if (tone === 'green') return 'bg-emerald-400'
@@ -33,21 +34,40 @@ function useNowTick(enabled = true) {
   return now
 }
 
-export function StatusDot({ status, label }: { status?: string | null; label?: string }) {
-  const tone = availabilityTone(status)
-  const text = label || availabilityLabel(status)
+export function StatusDot({
+  status,
+  label,
+  device,
+}: {
+  status?: string | null
+  label?: string
+  device?: {
+    status?: string | null
+    serialPortOpen?: boolean | null
+    pumpCommunicationStatus?: string | null
+  } | null
+}) {
+  const tone = device ? edgeConnectivityTone(device) : availabilityTone(status)
+  const text = label || (device ? edgeConnectivityLabel(device) : availabilityLabel(status))
+  const pump = String(device?.pumpCommunicationStatus || '').toUpperCase()
+  const rs485Down =
+    pump === 'SERIAL_PORT_CLOSED' ||
+    device?.serialPortOpen === false ||
+    pump === 'NO_SERIAL_DATA'
   return (
     <span
       className={`inline-flex items-center gap-1.5 text-sm font-medium ${toneText(tone)}`}
-      data-testid={`status-dot-${(status || 'unknown').toLowerCase()}`}
+      data-testid={`status-dot-${(status || device?.status || 'unknown').toLowerCase()}`}
       title={
-        status === 'ONLINE'
-          ? 'Online means a heartbeat was received recently.'
-          : status === 'OFFLINE'
-            ? 'Offline means no recent heartbeat from the Pi. This does not necessarily mean the pump itself has no power.'
-            : status === 'DELAYED'
-              ? 'Heartbeat is delayed — the Pi may be struggling to reach the broker.'
-              : undefined
+        rs485Down
+          ? 'Pi heartbeat is OK but RS485/serial to the pump is down.'
+          : status === 'ONLINE' || device?.status === 'ONLINE'
+            ? 'Online means a heartbeat was received recently.'
+            : status === 'OFFLINE' || device?.status === 'OFFLINE'
+              ? 'Offline means no recent heartbeat from the Pi. This does not necessarily mean the pump itself has no power.'
+              : status === 'DELAYED' || device?.status === 'DELAYED'
+                ? 'Heartbeat is delayed — the Pi may be struggling to reach the broker.'
+                : undefined
       }
     >
       <span className={`h-2 w-2 rounded-full ${toneDot(tone)}`} aria-hidden />
@@ -103,6 +123,7 @@ export function StationEdgeStatusCard({
   const now = useNowTick()
   const q = useStationEdgeDevices(mqttStationId)
   const device = q.primary
+  const stationStatus = q.stationAvailability || device?.status
   const seconds = liveSeconds(device?.secondsSinceLastHeartbeat, device?.lastSeen, now)
 
   return (
@@ -123,32 +144,55 @@ export function StationEdgeStatusCard({
 
       {!q.hasMapping ? (
         <p className="mt-3 text-sm text-slate-500">No edge device assigned</p>
-      ) : q.isLoading && !device ? (
+      ) : q.isLoading && !device && !stationStatus ? (
         <p className="mt-3 text-sm text-slate-500" data-testid="edge-loading">
           Checking device status...
         </p>
       ) : q.notFound ? (
         <p className="mt-3 text-sm text-slate-500">Edge device is not registered</p>
-      ) : q.isError && !device ? (
+      ) : q.isError && !device && !stationStatus ? (
         <p className="mt-3 text-sm text-amber-400">Device status temporarily unavailable</p>
-      ) : device ? (
+      ) : device || stationStatus ? (
         <div className="mt-3 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs text-slate-500">Edge Device</span>
-            <StatusDot status={device.status} />
+            <span className="text-xs text-slate-500">Station gateway</span>
+            <StatusDot status={stationStatus} device={device} />
           </div>
-          <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
-            <span>Last Heartbeat</span>
-            <span title={formatExactTimestamp(device.lastSeen)}>
-              {device.status === 'NEVER_CONNECTED'
-                ? 'Waiting for first heartbeat'
-                : formatRelativeHeartbeat(seconds, device.lastSeen, { nowMs: now })}
-            </span>
-          </div>
-          <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
-            <span>Device</span>
-            <span className="font-mono text-[11px] text-slate-300">{device.deviceId}</span>
-          </div>
+          {device ? (
+            <>
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+                <span>Last Heartbeat</span>
+                <span title={formatExactTimestamp(device.lastSeen)}>
+                  {device.status === 'NEVER_CONNECTED'
+                    ? 'Waiting for first heartbeat'
+                    : formatRelativeHeartbeat(seconds, device.lastSeen, { nowMs: now })}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+                <span>RS485 / pump</span>
+                <span
+                  className={
+                    device.serialPortOpen === false ||
+                    device.pumpCommunicationStatus === 'SERIAL_PORT_CLOSED' ||
+                    device.pumpCommunicationStatus === 'NO_SERIAL_DATA'
+                      ? 'text-amber-300'
+                      : 'text-slate-300'
+                  }
+                >
+                  {device.pumpCommunicationLabel ||
+                    (device.serialPortOpen === false
+                      ? 'RS485 down'
+                      : device.serialPortOpen === true
+                        ? 'Connected'
+                        : 'Unknown')}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+                <span>Device</span>
+                <span className="font-mono text-[11px] text-slate-300">{device.deviceId}</span>
+              </div>
+            </>
+          ) : null}
           {q.totalCount > 1 && (
             <p className="text-[11px] text-slate-500">
               {q.onlineCount} of {q.totalCount} devices online
@@ -316,16 +360,23 @@ export function EdgeDeviceStatusDetailCard({ stationId }: { stationId: string })
 
       {device && (
         <dl className="space-y-3 text-sm">
-          <DetailRow label="Raspberry Pi" value={<StatusDot status={device.status} />} />
+          <DetailRow label="Raspberry Pi" value={<StatusDot status={device.status} device={device} />} />
           <DetailRow label="Cloud heartbeat" value={cloudHeartbeat} />
           <DetailRow
             label="MQTT status"
             value={availabilityLabel(device.mqttConnectionStatus)}
           />
           <DetailRow
-            label="Pump activity"
-            value="No recent transaction"
-            hint="Pump sales are separate from Pi connectivity. Absence of sales does not mean the Pi is offline."
+            label="RS485 / pump"
+            value={
+              device.pumpCommunicationLabel ||
+              (device.serialPortOpen === false
+                ? 'RS485 down'
+                : device.serialPortOpen === true
+                  ? 'Connected'
+                  : 'Unknown')
+            }
+            hint="Pi can be online while the USB-RS485 link to the pump is down."
           />
           <DetailRow
             label="Last heartbeat"

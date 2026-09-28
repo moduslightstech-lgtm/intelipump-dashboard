@@ -85,7 +85,9 @@ export default function PipeEdge({ id, data, selected }: EdgeProps) {
             className={
               productClass === 'pms'
                 ? `fuel-pipe-flow fuel-pipe-flow--pms schematic-pipe-flow schematic-pipe-flow-fuel`
-                : `fuel-pipe-flow fuel-pipe-flow--${productClass} schematic-pipe-flow`
+                : productClass === 'ago'
+                  ? `fuel-pipe-flow fuel-pipe-flow--ago schematic-pipe-flow schematic-pipe-flow-ago`
+                  : `fuel-pipe-flow fuel-pipe-flow--${productClass} schematic-pipe-flow`
             }
           />
           {[0, 0.28, 0.56].map((begin, i) => (

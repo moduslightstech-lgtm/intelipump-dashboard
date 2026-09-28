@@ -35,7 +35,8 @@ from app.schemas import (
     StationOut,
     StationUpdate,
 )
-from app.services.rbac import require_admin
+from app.services.rbac import accessible_stations, assert_station_access, require_admin
+from app.services.station_commands import publish_set_price
 from app.services.tank_deletion import delete_tank, inspect_tank_dependencies
 from app.services.tank_lifecycle import operational_tank_clause
 
@@ -57,6 +58,13 @@ class AdminStationDetail(StationOut):
     device_count: int = 0
     tank_count: int = 0
     connection_count: int = 0
+
+
+class SetStationPriceBody(BaseModel):
+    """Unit price as raw Wayne integer (e.g. 1400 = ₦1400/L with SAO raw-BCD scale)."""
+
+    unit_price_raw: int
+    pump_id: Optional[str] = None
 
 
 class AdminPumpOut(PumpOut):
@@ -232,11 +240,8 @@ def _resolve_mqtt_nozzle_id(body: NozzleCreate | NozzleUpdate) -> Optional[str]:
     return text or None
 
 
-def _get_station(db: Session, station_id: UUID) -> Station:
-    station = db.get(Station, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
-    return station
+def _get_station(db: Session, station_id: UUID, user: User) -> Station:
+    return assert_station_access(db, user, station_id)
 
 
 def _get_pump(db: Session, pump_id: UUID) -> Pump:
@@ -362,12 +367,32 @@ def _clear_other_primaries(db: Session, station_id: UUID, pump_id: UUID, keep_id
 
 
 def _sync_mqtt_identity(db: Session, pump: Pump) -> None:
-    """Keep primary mqtt_identity_map row in sync when mqtt_pump_id is set."""
-    from app.models import MqttIdentityMap
+    """Keep primary mqtt_identity_map row in sync when mqtt_pump_id is set.
+
+    Never steal a global key already owned by another station's pump. Prefer a
+    station-scoped alias ``{mqtt_station_id}:{mqtt_pump_id}`` on conflict.
+    """
+    from app.models import MqttIdentityMap, Station
 
     mqtt_id = (pump.mqtt_pump_id or "").strip()
     if not mqtt_id:
         return
+
+    station = db.get(Station, pump.station_id) if pump.station_id else None
+    scoped = (
+        f"{station.mqtt_station_id}:{mqtt_id}"
+        if station and (station.mqtt_station_id or "").strip()
+        else mqtt_id
+    )
+
+    def _owned_by_other_station(row: MqttIdentityMap) -> bool:
+        if row.internal_id == pump.id:
+            return False
+        other = db.get(Pump, row.internal_id)
+        if other is None:
+            return False
+        return bool(other.station_id and pump.station_id and other.station_id != pump.station_id)
+
     existing = db.scalar(
         select(MqttIdentityMap).where(
             MqttIdentityMap.entity_type == "pump",
@@ -375,56 +400,70 @@ def _sync_mqtt_identity(db: Session, pump: Pump) -> None:
             MqttIdentityMap.is_primary.is_(True),
         )
     )
-    if existing:
-        if existing.mqtt_external_id != mqtt_id:
-            # Avoid unique conflicts: demote old, upsert new
-            existing.is_primary = False
-            db.add(existing)
-            clash = db.scalar(
-                select(MqttIdentityMap).where(
-                    MqttIdentityMap.entity_type == "pump",
-                    MqttIdentityMap.mqtt_external_id == mqtt_id,
-                )
-            )
-            if clash:
-                clash.internal_id = pump.id
-                clash.is_primary = True
-                db.add(clash)
-            else:
-                db.add(
-                    MqttIdentityMap(
-                        id=uuid4(),
-                        entity_type="pump",
-                        internal_id=pump.id,
-                        mqtt_external_id=mqtt_id,
-                        is_primary=True,
-                    )
-                )
-        return
+    target_external = mqtt_id
     clash = db.scalar(
         select(MqttIdentityMap).where(
             MqttIdentityMap.entity_type == "pump",
             MqttIdentityMap.mqtt_external_id == mqtt_id,
         )
     )
-    if clash:
-        clash.internal_id = pump.id
-        clash.is_primary = True
-        db.add(clash)
-    else:
-        db.add(
-            MqttIdentityMap(
-                id=uuid4(),
-                entity_type="pump",
-                internal_id=pump.id,
-                mqtt_external_id=mqtt_id,
-                is_primary=True,
+    if clash is not None and _owned_by_other_station(clash):
+        target_external = scoped
+        clash = db.scalar(
+            select(MqttIdentityMap).where(
+                MqttIdentityMap.entity_type == "pump",
+                MqttIdentityMap.mqtt_external_id == target_external,
             )
         )
 
+    if existing:
+        if existing.mqtt_external_id != target_external:
+            existing.is_primary = False
+            db.add(existing)
+            if clash and not _owned_by_other_station(clash):
+                clash.internal_id = pump.id
+                clash.is_primary = True
+                db.add(clash)
+            elif clash is None:
+                db.add(
+                    MqttIdentityMap(
+                        id=uuid4(),
+                        entity_type="pump",
+                        internal_id=pump.id,
+                        mqtt_external_id=target_external,
+                        is_primary=True,
+                        notes="Station-scoped pump alias"
+                        if target_external != mqtt_id
+                        else None,
+                    )
+                )
+        return
+
+    if clash is not None and not _owned_by_other_station(clash):
+        clash.internal_id = pump.id
+        clash.is_primary = True
+        db.add(clash)
+        return
+
+    db.add(
+        MqttIdentityMap(
+            id=uuid4(),
+            entity_type="pump",
+            internal_id=pump.id,
+            mqtt_external_id=target_external,
+            is_primary=True,
+            notes="Station-scoped pump alias" if target_external != mqtt_id else None,
+        )
+    )
+
 
 def _sync_nozzle_identity(db: Session, nozzle: Nozzle) -> None:
-    """Map canonical nozzle code and optional source/controller channel to this nozzle."""
+    """Map canonical nozzle ids without stealing another station's global keys."""
+    from app.models import MqttIdentityMap, Station
+
+    station = db.get(Station, nozzle.station_id) if nozzle.station_id else None
+    station_prefix = (station.mqtt_station_id or "").strip() if station else ""
+
     externals: list[tuple[str, bool]] = []
     code = (nozzle.nozzle_code or "").strip()
     if code:
@@ -435,6 +474,7 @@ def _sync_nozzle_identity(db: Session, nozzle: Nozzle) -> None:
     source = (getattr(nozzle, "source_identifier", None) or "").strip()
     if source and source not in {code, mqtt_id}:
         externals.append((source, False))
+
     for external_id, primary in externals:
         clash = db.scalar(
             select(MqttIdentityMap).where(
@@ -442,7 +482,41 @@ def _sync_nozzle_identity(db: Session, nozzle: Nozzle) -> None:
                 MqttIdentityMap.mqtt_external_id == external_id,
             )
         )
-        if clash:
+        if clash is not None:
+            other = db.get(Nozzle, clash.internal_id)
+            if (
+                other is not None
+                and other.station_id
+                and nozzle.station_id
+                and other.station_id != nozzle.station_id
+            ):
+                # Keep foreign ownership; add a scoped alias for this station.
+                if not station_prefix:
+                    continue
+                scoped = f"{station_prefix}:{external_id}"
+                scoped_row = db.scalar(
+                    select(MqttIdentityMap).where(
+                        MqttIdentityMap.entity_type == "nozzle",
+                        MqttIdentityMap.mqtt_external_id == scoped,
+                    )
+                )
+                if scoped_row:
+                    scoped_row.internal_id = nozzle.id
+                    scoped_row.is_primary = primary or scoped_row.is_primary
+                    scoped_row.notes = scoped_row.notes or "Station-scoped nozzle alias"
+                    db.add(scoped_row)
+                else:
+                    db.add(
+                        MqttIdentityMap(
+                            id=uuid4(),
+                            entity_type="nozzle",
+                            internal_id=nozzle.id,
+                            mqtt_external_id=scoped,
+                            is_primary=primary,
+                            notes="Station-scoped nozzle alias",
+                        )
+                    )
+                continue
             clash.internal_id = nozzle.id
             clash.is_primary = primary or clash.is_primary
             clash.notes = clash.notes or "Admin nozzle mapping"
@@ -468,9 +542,9 @@ def _sync_nozzle_identity(db: Session, nozzle: Nozzle) -> None:
 @stations_admin_router.get("", response_model=list[AdminStationDetail])
 def admin_list_stations(
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> list[AdminStationDetail]:
-    stations = list(db.scalars(select(Station).order_by(Station.name)).all())
+    stations = accessible_stations(db, user)
     return [_station_detail(db, s) for s in stations]
 
 
@@ -478,9 +552,9 @@ def admin_list_stations(
 def admin_get_station(
     station_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminStationDetail:
-    return _station_detail(db, _get_station(db, station_id))
+    return _station_detail(db, _get_station(db, station_id, user))
 
 
 @stations_admin_router.get("/{station_id}/tanks/{tank_id}/deletion-preview")
@@ -488,9 +562,9 @@ def admin_tank_deletion_preview(
     station_id: UUID,
     tank_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     tank = db.get(Tank, tank_id)
     if tank is None or tank.station_id != station_id:
         raise HTTPException(status_code=404, detail="Tank not found")
@@ -506,7 +580,7 @@ def admin_delete_tank(
     db: Session = Depends(get_db),
     user: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     tank = db.get(Tank, tank_id)
     if tank is None or tank.station_id != station_id:
         raise HTTPException(status_code=404, detail="Tank not found")
@@ -524,9 +598,9 @@ def admin_update_station(
     station_id: UUID,
     body: StationUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminStationDetail:
-    station = _get_station(db, station_id)
+    station = _get_station(db, station_id, user)
     data = _parse_time_fields(body.model_dump(exclude_unset=True))
     for key, value in data.items():
         setattr(station, key, value)
@@ -537,13 +611,30 @@ def admin_update_station(
     return _station_detail(db, station)
 
 
+@stations_admin_router.post("/{station_id}/commands/set-price")
+def admin_set_station_price(
+    station_id: UUID,
+    body: SetStationPriceBody,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    station = _get_station(db, station_id, user)
+    return publish_set_price(
+        db,
+        station=station,
+        user=user,
+        unit_price_raw=body.unit_price_raw,
+        pump_id=body.pump_id,
+    )
+
+
 @stations_admin_router.get("/{station_id}/devices", response_model=list[DeviceOut])
 def admin_list_station_devices(
     station_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> list[Device]:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     return list(
         db.scalars(select(Device).where(Device.station_id == station_id).order_by(Device.device_code)).all()
     )
@@ -554,9 +645,9 @@ def admin_create_station_device(
     station_id: UUID,
     body: DeviceCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> Device:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     data = body.model_dump()
     data["station_id"] = station_id
     device = Device(**data)
@@ -580,9 +671,9 @@ def admin_list_station_pumps(
     station_id: UUID,
     include_inactive: bool = Query(True),
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> list[AdminPumpOut]:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     q = select(Pump).where(Pump.station_id == station_id)
     if not include_inactive:
         q = q.where(Pump.active.is_(True))
@@ -595,9 +686,9 @@ def admin_create_station_pump(
     station_id: UUID,
     body: AdminPumpCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
-    station = _get_station(db, station_id)
+    station = _get_station(db, station_id, user)
     mqtt_id = _resolve_mqtt_pump_id(body) or body.pump_code
     # Slash is allowed and must be preserved (e.g. PUMP-05/06)
     if "/" in mqtt_id and mqtt_id.count("/") > 2:
@@ -714,7 +805,7 @@ def admin_create_station_pump(
 def admin_get_pump(
     pump_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
     return _admin_pump_out(db, _get_pump(db, pump_id))
 
@@ -724,11 +815,13 @@ def admin_update_pump(
     pump_id: UUID,
     body: PumpUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
     pump = _get_pump(db, pump_id)
     data = body.model_dump(exclude_unset=True)
     data.pop("mqtt_pump_identifier", None)
+    # Product lives on nozzles; cascade when admin changes pump product assignment.
+    product = data.pop("product", None)
     mqtt_id = _resolve_mqtt_pump_id(body)
     if "mqtt_pump_id" in body.model_fields_set or "mqtt_pump_identifier" in body.model_fields_set:
         data["mqtt_pump_id"] = mqtt_id
@@ -738,6 +831,17 @@ def admin_update_pump(
         setattr(pump, key, value)
     if pump.name is None or not str(pump.name).strip():
         pump.name = pump.pump_code
+    if product is not None:
+        product_norm = str(product).strip().upper() or None
+        nozzles = list(
+            db.scalars(
+                select(Nozzle).where(Nozzle.pump_id == pump.id, Nozzle.active.is_(True))
+            ).all()
+        )
+        for nozzle in nozzles:
+            nozzle.product = product_norm
+            nozzle.updated_at = _now()
+            db.add(nozzle)
     pump.updated_at = _now()
     db.add(pump)
     _sync_mqtt_identity(db, pump)
@@ -757,7 +861,7 @@ def admin_update_pump(
 def admin_deactivate_pump(
     pump_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
     pump = _get_pump(db, pump_id)
     pump.active = False
@@ -774,7 +878,7 @@ def admin_deactivate_pump(
 def admin_reactivate_pump(
     pump_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
     pump = _get_pump(db, pump_id)
     pump.active = True
@@ -792,7 +896,7 @@ def admin_reactivate_pump(
 def admin_duplicate_pump(
     pump_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> AdminPumpOut:
     src = _get_pump(db, pump_id)
     if not src.station_id:
@@ -849,7 +953,7 @@ def admin_duplicate_pump(
 def admin_delete_pump(
     pump_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     pump = _get_pump(db, pump_id)
     if _pump_has_transactions(db, pump):
@@ -888,7 +992,7 @@ def admin_list_nozzles(
     pump_id: UUID,
     include_inactive: bool = Query(True),
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> list[Nozzle]:
     _get_pump(db, pump_id)
     q = select(Nozzle).where(Nozzle.pump_id == pump_id)
@@ -902,7 +1006,7 @@ def admin_create_nozzle(
     pump_id: UUID,
     body: NozzleCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> Nozzle:
     pump = _get_pump(db, pump_id)
     mqtt_noz = _resolve_mqtt_nozzle_id(body) or body.nozzle_code
@@ -943,7 +1047,7 @@ def admin_update_nozzle(
     nozzle_id: UUID,
     body: NozzleUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> Nozzle:
     nozzle = db.get(Nozzle, nozzle_id)
     if nozzle is None:
@@ -973,7 +1077,7 @@ def admin_update_nozzle(
 def admin_deactivate_nozzle(
     nozzle_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> Nozzle:
     nozzle = db.get(Nozzle, nozzle_id)
     if nozzle is None:
@@ -997,9 +1101,9 @@ def admin_deactivate_nozzle(
 def admin_list_tank_connections(
     station_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> list[TankConnectionOut]:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     rows = list(
         db.scalars(
             select(TankPumpConnection)
@@ -1017,9 +1121,9 @@ def admin_create_tank_connection(
     station_id: UUID,
     body: TankConnectionCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> TankConnectionOut:
-    _get_station(db, station_id)
+    _get_station(db, station_id, user)
     tank = db.get(Tank, body.tank_id)
     pump = db.get(Pump, body.pump_id)
     if tank is None or tank.station_id != station_id:
@@ -1069,7 +1173,7 @@ def admin_update_tank_connection(
     connection_id: UUID,
     body: TankConnectionUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> TankConnectionOut:
     conn = db.get(TankPumpConnection, connection_id)
     if conn is None:
@@ -1097,7 +1201,7 @@ def admin_update_tank_connection(
 def admin_delete_tank_connection(
     connection_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> dict[str, Any]:
     conn = db.get(TankPumpConnection, connection_id)
     if conn is None:
@@ -1117,7 +1221,7 @@ def admin_update_device(
     device_id: UUID,
     body: DeviceUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(require_admin),
+    user: User = Depends(require_admin),
 ) -> Device:
     device = db.get(Device, device_id)
     if device is None:

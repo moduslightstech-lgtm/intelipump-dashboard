@@ -8,6 +8,8 @@ const DROP_STUB = PIPE_CLEARANCE
 const BRANCH_STUB = 14
 const CORNER_R = 10
 const MIN_BRANCH_GAP = 16
+/** Extra px past the forecourt right/left edge for AGO/diesel runs. */
+const DIESEL_EDGE_PAD = 52
 
 /** Vertical offset from tank top to the visible vessel outlet. */
 export function tankOutletOffset(height: number): number {
@@ -152,6 +154,72 @@ function nearest(value: number, candidates: number[]): number {
   return candidates.reduce((best, x) => (Math.abs(x - value) < Math.abs(best - value) ? x : best), candidates[0])
 }
 
+function isDieselProduct(product?: string | null): boolean {
+  const p = String(product || '').toUpperCase()
+  return p.includes('AGO') || p.includes('DIESEL')
+}
+
+/** Coarse fuel family so PMS tank never draws a pipe to an AGO pump. */
+export function fuelFamily(product?: string | null): 'AGO' | 'PMS' | 'DPK' | 'OTHER' {
+  const p = String(product || '').toUpperCase()
+  if (p.includes('AGO') || p.includes('DIESEL')) return 'AGO'
+  if (p.includes('DPK') || p.includes('KEROSENE')) return 'DPK'
+  if (p.includes('PMS') || p.includes('PETROL') || p.includes('GASOLINE') || !p) return 'PMS'
+  return 'OTHER'
+}
+
+export function productsCompatible(
+  tankProduct?: string | null,
+  pumpOrConnProduct?: string | null,
+): boolean {
+  const tank = fuelFamily(tankProduct)
+  const pump = fuelFamily(pumpOrConnProduct)
+  if (tank === 'OTHER' || pump === 'OTHER') return true
+  return tank === pump
+}
+
+/**
+ * Pick a vertical drop corridor for a tank→pump supply.
+ * AGO/diesel always uses a dedicated outer edge (past the last island) so the
+ * run never shares a PMS column corridor or crosses PMS manifold rails.
+ */
+export function supplyCorridorX(
+  targetX: number,
+  corridors: number[],
+  opts: {
+    product?: string | null
+    tankCenterX: number
+    layoutCenterX: number
+    fallbackRight?: number
+    fallbackLeft?: number
+  },
+): number {
+  const preferRight = opts.tankCenterX >= opts.layoutCenterX
+  if (isDieselProduct(opts.product)) {
+    // Prefer the padded outer edge, not the island corridor (too close to PMS).
+    if (preferRight && opts.fallbackRight != null) return opts.fallbackRight
+    if (!preferRight && opts.fallbackLeft != null) return opts.fallbackLeft
+    if (corridors.length) {
+      return preferRight
+        ? Math.max(...corridors) + DIESEL_EDGE_PAD
+        : Math.min(...corridors) - DIESEL_EDGE_PAD
+    }
+    return targetX
+  }
+  if (!corridors.length) return targetX
+  return nearest(targetX, corridors)
+}
+
+function supplyDisplayRole(
+  conns: ValidatedConnection[],
+): 'PRIMARY' | 'BACKUP' | 'INACTIVE' {
+  const primary = conns.find((c) => c.isPrimary)
+  if (primary) return 'PRIMARY'
+  // Sole feed to this pump from this tank — draw solid (DB often leaves is_primary false).
+  if (conns.length >= 1 && conns.every((c) => c.role !== 'INACTIVE')) return 'PRIMARY'
+  return conns[0]?.role || 'PRIMARY'
+}
+
 function nodeRect(n: { x: number; y: number; w: number; h: number }): Rect {
   return { x: n.x, y: n.y, w: n.w, h: n.h }
 }
@@ -226,9 +294,20 @@ export function buildManifoldRoutes(
     const tank = tankById.get(conn.tankId)
     const pump = pumpById.get(conn.pumpId)
     if (!tank || !pump) continue
+    const tankProduct = String(tank.product || conn.product || '')
+    const pumpProduct = String(pump.product || pump.raw?.product || '')
+    // Never draw PMS↔AGO cross pipes (legacy backup links after product swaps).
+    if (pumpProduct && !productsCompatible(tankProduct, pumpProduct)) continue
+    if (
+      conn.product &&
+      tank.product &&
+      !productsCompatible(String(tank.product), String(conn.product))
+    ) {
+      continue
+    }
     const g = groups.get(tank.id) || {
       tank,
-      product: String(conn.product || tank.product || 'UNKNOWN'),
+      product: tankProduct || String(tank.product || 'UNKNOWN'),
       members: [],
     }
     g.members.push({ pump, conn })
@@ -241,14 +320,26 @@ export function buildManifoldRoutes(
   const usedBranchXs: number[] = []
   const firstPumpY = Math.min(...pumps.map((p) => p.y))
   const corridors = firstRowIslandCorridors(nodes)
+  const layoutLeft = Math.min(...[...pumps, ...islands].map((p) => p.x))
+  const layoutRight = Math.max(...[...pumps, ...islands].map((p) => p.x + p.w))
+  const layoutCenterX = (layoutLeft + layoutRight) / 2
+  // AGO rides a rail slightly ABOVE the PMS manifold so its horizontal never
+  // crosses PMS vertical drops to the island row.
+  const pmsManifoldY = computePipeManifoldY(tankBottom, pumpTop, 0)
+  const dieselManifoldY = Math.max(tankBottom + DROP_STUB + 4, pmsManifoldY - 14)
 
-  ordered.forEach((group, gi) => {
-    const manifoldY = computePipeManifoldY(tankBottom, pumpTop, gi)
+  let pmsLane = 0
+  ordered.forEach((group) => {
+    const diesel = isDieselProduct(group.product)
+    const manifoldY = diesel
+      ? dieselManifoldY
+      : computePipeManifoldY(tankBottom, pumpTop, pmsLane++)
     const members = [...group.members].sort(
       (a, b) => a.pump.x + a.pump.w / 2 - (b.pump.x + b.pump.w / 2),
     )
     const outlet = getTankOutletAnchor(group.tank, 0, 1)
     const split: Point = { x: outlet.x, y: manifoldY }
+    const tankCenterX = group.tank.x + group.tank.w / 2
     const nozzleIds: string[] = []
     const connectionIds: string[] = []
 
@@ -301,9 +392,23 @@ export function buildManifoldRoutes(
         usedBranchXs.push(target.x)
 
         const lowerRow = entry.pump.y > firstPumpY + 24
-        const viaX = lowerRow ? nearest(target.x, corridors) : undefined
-        const localRailY = lowerRow ? entry.pump.y - 18 : undefined
+        // AGO always side-runs on a dedicated outer edge; PMS only when lower row.
+        const needsSideRun = diesel || lowerRow
+        const viaX = needsSideRun
+          ? supplyCorridorX(target.x, corridors, {
+              product: group.product,
+              tankCenterX,
+              layoutCenterX,
+              fallbackRight: layoutRight + DIESEL_EDGE_PAD,
+              fallbackLeft: layoutLeft - DIESEL_EDGE_PAD,
+            })
+          : undefined
+        // Keep AGO low rail further below the PMS island bottoms.
+        const localRailY = needsSideRun
+          ? entry.pump.y - (diesel ? 36 : 18)
+          : undefined
         const path = buildBranchPipePath(split, target, viaX, localRailY)
+        const displayRole = supplyDisplayRole(entry.conns)
         const primary = entry.conns.find((c) => c.isPrimary) || entry.conns[0]
         routes.push({
           id: pumpSupplySegmentId(group.tank.id, physicalPumpId),
@@ -317,7 +422,7 @@ export function buildManifoldRoutes(
           status: 'IDLE',
           connection: primary?.raw || {},
           lineLabel: primary?.lineLabel,
-          mappingSource: primary?.role || 'PRIMARY',
+          mappingSource: displayRole,
           segmentType: 'PUMP_SUPPLY',
           stationId,
           nozzleIds: [...new Set(entry.nozzleIds)],
@@ -325,7 +430,7 @@ export function buildManifoldRoutes(
           connectionId: primary ? String(primary.id) : undefined,
           physicalPumpId,
           active: entry.conns.some((c) => c.active),
-          primary: Boolean(primary?.isPrimary),
+          primary: displayRole === 'PRIMARY',
           targetNodeId: entry.pump.id,
         })
       })

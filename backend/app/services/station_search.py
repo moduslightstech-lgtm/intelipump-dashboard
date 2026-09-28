@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import Alert, Device, Station, User, UserStationFavorite, UserStationRecent
@@ -15,9 +15,19 @@ OPEN_ALERT_STATUSES = ("OPEN", "ACKNOWLEDGED", "IN_PROGRESS")
 CRITICAL = ("CRITICAL", "HIGH")
 
 
+def _visible_station_filter(db: Session, user: User):
+    from app.services.rbac import accessible_stations
+
+    ids = [s.id for s in accessible_stations(db, user)]
+    if not ids:
+        return false()
+    return Station.id.in_(ids)
+
+
 def _org_filter(user: User):
+    """Deprecated: kept for callers; prefer _visible_station_filter."""
     if user.organization_id is None:
-        return True  # no isolation configured yet
+        return True
     return or_(
         Station.organization_id == user.organization_id,
         Station.organization_id.is_(None),
@@ -110,7 +120,7 @@ def search_stations(
         .scalar_subquery()
     )
 
-    filters = [_org_filter(user)]
+    filters = [_visible_station_filter(db, user)]
     if q:
         like = f"%{q.strip().lower()}%"
         filters.append(
@@ -203,7 +213,7 @@ def list_favorite_stations(db: Session, user: User, limit: int = 10) -> list[dic
     rows = db.execute(
         select(Station)
         .join(UserStationFavorite, UserStationFavorite.station_id == Station.id)
-        .where(UserStationFavorite.user_id == user.id, _org_filter(user))
+        .where(UserStationFavorite.user_id == user.id, _visible_station_filter(db, user))
         .order_by(Station.name.asc())
         .limit(limit)
     ).scalars().all()
@@ -225,7 +235,7 @@ def list_recent_stations(db: Session, user: User, limit: int = 8) -> list[dict[s
     rows = db.execute(
         select(Station, UserStationRecent.viewed_at)
         .join(UserStationRecent, UserStationRecent.station_id == Station.id)
-        .where(UserStationRecent.user_id == user.id, _org_filter(user))
+        .where(UserStationRecent.user_id == user.id, _visible_station_filter(db, user))
         .order_by(UserStationRecent.viewed_at.desc())
         .limit(limit)
     ).all()
@@ -256,7 +266,7 @@ def list_critical_alert_stations(db: Session, user: User, limit: int = 8) -> lis
     )
     rows = db.execute(
         select(Station, crit_count.label("critical_count"))
-        .where(_org_filter(user), crit_count > 0)
+        .where(_visible_station_filter(db, user), crit_count > 0)
         .order_by(crit_count.desc(), Station.name.asc())
         .limit(limit)
     ).all()

@@ -111,6 +111,182 @@ describe('buildManifoldRoutes', () => {
     expect(trunks).toHaveLength(2)
     expect(trunks[0].y).not.toBe(trunks[1].y)
   })
+
+  it('routes AGO supply down the right edge instead of through PMS islands', async () => {
+    const { buildManifoldRoutes: routeDirect, supplyCorridorX, productsCompatible } = await import(
+      '../components/twin/schematic/orthogonalRouting'
+    )
+    expect(productsCompatible('PMS', 'AGO')).toBe(false)
+    expect(productsCompatible('AGO', 'AGO')).toBe(true)
+    expect(
+      supplyCorridorX(250, [26, 180, 340, 494], {
+        product: 'AGO',
+        tankCenterX: 410,
+        layoutCenterX: 260,
+        fallbackRight: 480 + 52,
+      }),
+    ).toBe(532)
+    expect(
+      supplyCorridorX(250, [26, 180, 340, 494], {
+        product: 'PMS',
+        tankCenterX: 410,
+        layoutCenterX: 260,
+      }),
+    ).toBe(180)
+
+    const nodes = [
+      {
+        id: 't-pms',
+        kind: 'TANK' as const,
+        x: 80,
+        y: 40,
+        w: 180,
+        h: 64,
+        label: 'PMS',
+        status: 'OK',
+        product: 'PMS',
+        raw: {},
+      },
+      {
+        id: 't-ago',
+        kind: 'TANK' as const,
+        x: 320,
+        y: 40,
+        w: 180,
+        h: 64,
+        label: 'AGO',
+        status: 'OK',
+        product: 'AGO',
+        raw: {},
+      },
+      {
+        id: 'shell-1',
+        kind: 'ISLAND' as const,
+        x: 40,
+        y: 220,
+        w: 120,
+        h: 140,
+        label: 'P1',
+        status: 'IDLE',
+        raw: {},
+      },
+      {
+        id: 'shell-2',
+        kind: 'ISLAND' as const,
+        x: 200,
+        y: 220,
+        w: 120,
+        h: 140,
+        label: 'P2',
+        status: 'IDLE',
+        raw: {},
+      },
+      {
+        id: 'shell-3',
+        kind: 'ISLAND' as const,
+        x: 360,
+        y: 220,
+        w: 120,
+        h: 140,
+        label: 'P3',
+        status: 'IDLE',
+        raw: {},
+      },
+      {
+        id: 'shell-ago',
+        kind: 'ISLAND' as const,
+        x: 180,
+        y: 400,
+        w: 140,
+        h: 150,
+        label: 'Pump 8',
+        status: 'IDLE',
+        assetId: 'pump-8',
+        raw: { id: 'pump-8' },
+      },
+      {
+        id: 'n15',
+        kind: 'PUMP' as const,
+        x: 200,
+        y: 420,
+        w: 88,
+        h: 96,
+        label: 'Nozzle 15',
+        status: 'IDLE',
+        product: 'AGO',
+        parentId: 'shell-ago',
+        islandId: 'shell-ago',
+        raw: { mqttPumpId: 'pump-8', parentPumpId: 'pump-8', product: 'AGO' },
+      },
+      {
+        id: 'n1',
+        kind: 'PUMP' as const,
+        x: 60,
+        y: 240,
+        w: 88,
+        h: 96,
+        label: 'Nozzle 1',
+        status: 'IDLE',
+        product: 'PMS',
+        parentId: 'shell-1',
+        islandId: 'shell-1',
+        raw: { mqttPumpId: 'pump-1', product: 'PMS' },
+      },
+    ]
+    const edges = [
+      {
+        id: 'c-ago',
+        tankId: 't-ago',
+        pumpId: 'n15',
+        tankName: 'AGO',
+        pumpName: 'Pump 8',
+        product: 'AGO',
+        isPrimary: true,
+        active: true,
+        role: 'PRIMARY' as const,
+        lineLabel: null,
+        source: 'CONFIGURED',
+        raw: { mqttPumpId: 'pump-8', physicalPumpId: 'pump-8' },
+      },
+      // Legacy wrong PMS→AGO backup must not draw.
+      {
+        id: 'c-stale-pms',
+        tankId: 't-pms',
+        pumpId: 'n15',
+        tankName: 'PMS',
+        pumpName: 'Pump 8',
+        product: 'PMS',
+        isPrimary: false,
+        active: true,
+        role: 'BACKUP' as const,
+        lineLabel: null,
+        source: 'CONFIGURED',
+        raw: { mqttPumpId: 'pump-8', physicalPumpId: 'pump-8' },
+      },
+      {
+        id: 'c-pms',
+        tankId: 't-pms',
+        pumpId: 'n1',
+        tankName: 'PMS',
+        pumpName: 'Pump 1',
+        product: 'PMS',
+        isPrimary: false,
+        active: true,
+        role: 'BACKUP' as const,
+        lineLabel: null,
+        source: 'CONFIGURED',
+        raw: { mqttPumpId: 'pump-1', physicalPumpId: 'pump-1' },
+      },
+    ]
+    const { routes } = routeDirect(nodes, edges)
+    expect(routes.map((r) => r.physicalPumpId).sort()).toEqual(['pump-1', 'pump-8'])
+    const ago = routes.find((r) => r.physicalPumpId === 'pump-8')!
+    const pms = routes.find((r) => r.physicalPumpId === 'pump-1')!
+    expect(ago.tankId).toBe('t-ago')
+    expect(ago.mappingSource).toBe('PRIMARY')
+    expect(ago.path).toContain('532')
+    expect(pms.mappingSource).toBe('PRIMARY') // sole feed → solid, even if DB backup
+  })
 })
 
 describe('transaction dedup', () => {

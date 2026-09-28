@@ -2,11 +2,14 @@ import { apiUrls, jsonRequestHeaders } from '../config/api'
 import {
   parseEdgeDeviceStatus,
   type EdgeDeviceStatus,
+  type DeviceAvailability,
   normalizeDeviceAvailability,
+  aggregateStationAvailability,
 } from '../types/edgeDevice'
 
 export type StationDevicesSummary = {
   stationId: string
+  stationAvailability: DeviceAvailability
   onlineCount: number
   delayedCount: number
   offlineCount: number
@@ -65,21 +68,30 @@ export async function fetchStationDevices(
   if (!id) throw new DeviceApiError('stationId is required', 422)
   const raw = (await getJson(apiUrls.stationDevices(id), signal)) as Record<string, unknown>
   const devicesRaw = Array.isArray(raw.devices) ? raw.devices : []
-  const devices = devicesRaw.map((row) => parseEdgeDeviceStatus(row))
+  const devices = devicesRaw.map((row) => parseEdgeDeviceStatus(row)).map((d) => ({
+    ...d,
+    status: normalizeDeviceAvailability(d.status),
+  }))
+  const onlineCount = Number(raw.onlineCount ?? devices.filter((d) => d.status === 'ONLINE').length)
+  const delayedCount = Number(raw.delayedCount ?? devices.filter((d) => d.status === 'DELAYED').length)
+  const offlineCount = Number(raw.offlineCount ?? devices.filter((d) => d.status === 'OFFLINE').length)
+  const fromApi =
+    raw.stationAvailability != null && raw.stationAvailability !== ''
+      ? normalizeDeviceAvailability(raw.stationAvailability)
+      : null
   return {
     stationId: String(raw.stationId || id),
-    onlineCount: Number(raw.onlineCount ?? devices.filter((d) => d.status === 'ONLINE').length),
-    delayedCount: Number(raw.delayedCount ?? devices.filter((d) => d.status === 'DELAYED').length),
-    offlineCount: Number(raw.offlineCount ?? devices.filter((d) => d.status === 'OFFLINE').length),
+    stationAvailability:
+      fromApi || aggregateStationAvailability(devices.map((d) => d.status)),
+    onlineCount,
+    delayedCount,
+    offlineCount,
     totalCount: Number(raw.totalCount ?? devices.length),
     lastStationHeartbeat:
       raw.lastStationHeartbeat == null || raw.lastStationHeartbeat === ''
         ? null
         : String(raw.lastStationHeartbeat),
-    devices: devices.map((d) => ({
-      ...d,
-      status: normalizeDeviceAvailability(d.status),
-    })),
+    devices,
   }
 }
 

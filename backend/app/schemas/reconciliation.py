@@ -278,3 +278,28 @@ class StationLayoutOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AlertNotificationSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    station_id: Optional[UUID] = None
+    organization_id: Optional[UUID] = None
+    emails: list[str] = []
+    notify_device_offline: bool = True
+    notify_set_price_failed: bool = True
+    notify_pump_closed_stuck: bool = True
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+class AlertNotificationSettingsUpdate(BaseModel):
+    emails: Optional[list[str]] = None
+    emails_csv: Optional[str] = None
+    notify_device_offline: Optional[bool] = None
+    notify_set_price_failed: Optional[bool] = None
+    notify_pump_closed_stuck: Optional[bool] = None
+    enabled: Optional[bool] = None
+

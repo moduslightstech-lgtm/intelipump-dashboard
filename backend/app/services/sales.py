@@ -6,12 +6,17 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import PumpTransaction
-from app.services.identity import resolve_pump_by_mqtt_external_id, station_query_keys
+from app.services.identity import (
+    resolve_pump_by_mqtt_external_id,
+    resolve_station,
+    station_query_keys,
+)
 from app.services.nozzle_identity import (
     CanonicalIdentity,
     NozzleCatalogEntry,
@@ -19,6 +24,41 @@ from app.services.nozzle_identity import (
     live_debug_enabled,
     nozzle_catalog_for_station,
 )
+
+# Match Executive Overview inclusion policy for "Sales today" KPIs.
+_COMPLETED_STATUSES = ("COMPLETED", "COMPLETE")
+
+
+def _tx_time_col():
+    return func.coalesce(
+        PumpTransaction.transaction_completed_at,
+        PumpTransaction.device_timestamp,
+        PumpTransaction.received_at,
+        PumpTransaction.created_at,
+    )
+
+
+def _completed_sale_clause():
+    return and_(
+        func.upper(func.coalesce(PumpTransaction.status, "")).in_(_COMPLETED_STATUSES),
+        PumpTransaction.amount.is_not(None),
+    )
+
+
+def _station_today_start_utc(db: Session, station_id: str) -> tuple[datetime, str]:
+    """Local business-day midnight in UTC, plus timezone name used."""
+    tz_name = "Africa/Lagos"
+    station = resolve_station(db, station_id)
+    if station is not None and getattr(station, "timezone", None):
+        tz_name = station.timezone
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Africa/Lagos")
+        tz_name = "Africa/Lagos"
+    local_now = datetime.now(tz)
+    start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start_local.astimezone(timezone.utc), tz_name
 
 
 def _as_float(value: Decimal | float | int | None) -> Optional[float]:
@@ -143,11 +183,23 @@ def live_sales_snapshot(
 
 
 def _station_match(keys: list[str], station_uuid: UUID | None):
+    """Match sales for a station; reject UUID-only rows whose text id belongs elsewhere."""
+    from sqlalchemy import and_
+
     clauses = []
     if keys:
         clauses.append(PumpTransaction.station_id.in_(keys))
     if station_uuid is not None:
-        clauses.append(PumpTransaction.station_uuid == station_uuid)
+        clauses.append(
+            and_(
+                PumpTransaction.station_uuid == station_uuid,
+                or_(
+                    PumpTransaction.station_id.is_(None),
+                    PumpTransaction.station_id == "",
+                    *([PumpTransaction.station_id.in_(keys)] if keys else []),
+                ),
+            )
+        )
     if not clauses:
         return None
     return or_(*clauses) if len(clauses) > 1 else clauses[0]
@@ -210,25 +262,34 @@ def sales_summary(
     *,
     station_id: str,
 ) -> dict[str, Any]:
+    """Today's completed sales for a station — same policy as Executive Overview.
+
+    - Business day in the station timezone (default Africa/Lagos), not UTC midnight.
+    - Only COMPLETED / COMPLETE rows with a non-null amount.
+    - Event time: coalesce(completed_at, device_timestamp, received_at, created_at).
+    """
+    empty = {
+        "stationId": station_id,
+        "period": "TODAY",
+        "transactionCount": 0,
+        "totalAmount": 0.0,
+        "totalVolumeLiters": 0.0,
+        "averageTransactionAmount": 0.0,
+        "latestTransactionAt": None,
+        "timezone": "Africa/Lagos",
+    }
     stmt = sales_filter(db, station_id=station_id)
     if stmt is None:
-        return {
-            "stationId": station_id,
-            "period": "TODAY",
-            "transactionCount": 0,
-            "totalAmount": 0.0,
-            "totalVolumeLiters": 0.0,
-            "averageTransactionAmount": 0.0,
-            "latestTransactionAt": None,
-        }
+        return empty
 
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    time_col = func.coalesce(
-        PumpTransaction.transaction_completed_at,
-        PumpTransaction.device_timestamp,
-        PumpTransaction.received_at,
-    )
-    filtered = stmt.where(time_col >= today_start).subquery()
+    today_start, tz_name = _station_today_start_utc(db, station_id)
+    now_utc = datetime.now(timezone.utc)
+    time_col = _tx_time_col()
+    filtered = stmt.where(
+        _completed_sale_clause(),
+        time_col >= today_start,
+        time_col <= now_utc,
+    ).subquery()
     row = db.execute(
         select(
             func.count().label("transaction_count"),
@@ -249,6 +310,7 @@ def sales_summary(
         "totalVolumeLiters": _as_float(row.total_volume) or 0.0,
         "averageTransactionAmount": (total_amount / count) if count else 0.0,
         "latestTransactionAt": row.latest_at.isoformat() if row.latest_at else None,
+        "timezone": tz_name,
     }
 
 

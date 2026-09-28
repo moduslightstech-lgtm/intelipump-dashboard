@@ -34,14 +34,21 @@ IGNORED_EVENTS = frozenset(
     {
         "STATE_CHANGED",
         "PUMP_STATE_CHANGED",
-        "ALARM_ACTIVE",
-        "ALARM_RAISED",
-        "ALARM_CLEARED",
         "AUDIT_EVENT",
-        "COMMAND_RESULT",
         "COMMAND_INTAKE",
     }
 )
+
+COMMAND_RESULT_EVENTS = frozenset({"COMMAND_RESULT"})
+PUMP_CLOSED_EVENTS = frozenset(
+    {
+        "PUMP_CLOSED_STUCK",
+        "ALARM_ACTIVE",
+        "ALARM_RAISED",
+    }
+)
+KIND_COMMAND_RESULT = "command_result"
+KIND_PUMP_ALERT = "pump_alert"
 
 # Hose lift / start → treat as live dispensing (zero or partial totals OK).
 TRANSACTION_STARTED_EVENTS = frozenset(
@@ -72,6 +79,7 @@ KIND_HEARTBEAT = "heartbeat"
 KIND_DEVICE_STATUS = "device_status"
 KIND_IGNORED = "ignored"
 KIND_UNSUPPORTED = "unsupported"
+# KIND_COMMAND_RESULT / KIND_PUMP_ALERT defined above with event sets
 
 
 def _as_str(value: Any) -> Optional[str]:
@@ -115,6 +123,10 @@ def classify_phase9_message(topic: str, payload: dict[str, Any]) -> str:
         return KIND_HEARTBEAT
     if event in DEVICE_STATUS_EVENTS or is_phase9_device_status_topic(topic):
         return KIND_DEVICE_STATUS
+    if event in COMMAND_RESULT_EVENTS or "/commands/" in (topic or "") and (topic or "").endswith("/result"):
+        return KIND_COMMAND_RESULT
+    if event in PUMP_CLOSED_EVENTS or event == "PUMP_CLOSED_STUCK":
+        return KIND_PUMP_ALERT
     tx_events = {
         TRANSACTION_COMPLETED,
         *LIVE_FILL_EVENTS,
@@ -166,6 +178,16 @@ def is_phase9_transactions_topic(topic: str) -> bool:
     return "/stations/" in t and t.rstrip("/").endswith("/transactions")
 
 
+def extract_phase9_pump_id(topic: str) -> Optional[str]:
+    """Pump id from ``intelipump/{env}/stations/{stationId}/pumps/{pumpId}/events``."""
+    t = topic or ""
+    marker = "/pumps/"
+    if marker not in t:
+        return None
+    after = t.split(marker, 1)[1]
+    return _as_str(after.split("/", 1)[0])
+
+
 def extract_phase9_device_id(topic: str) -> Optional[str]:
     """Device id from ``intelipump/{env}/devices/{deviceId}/heartbeat|status``."""
     t = topic or ""
@@ -212,6 +234,11 @@ def flatten_device_fields(payload: dict[str, Any]) -> dict[str, Any]:
     mqtt_status = str(inner.get("mqttConnectionStatus") or "").upper()
     if flat.get("mqttConnected") is None and mqtt_status:
         flat["mqttConnected"] = mqtt_status == "CONNECTED"
+    # Phase 9 FDC uses transportOpen for USB-RS485; cloud stores serialPortOpen.
+    if flat.get("serialPortOpen") is None and "transportOpen" in inner:
+        flat["serialPortOpen"] = inner.get("transportOpen")
+    if flat.get("serialPort") is None and inner.get("transportKind"):
+        flat["serialPort"] = str(inner.get("transportKind"))
     return flat
 
 
@@ -272,10 +299,14 @@ def scaled_sale_fields(payload: dict[str, Any]) -> dict[str, Any]:
         first_present(inner, "amount_decimals", "amountDecimals"),
         DEFAULT_AMOUNT_DECIMALS,
     )
-    price_decimals = _decimals(
-        first_present(inner, "price_decimals", "priceDecimals"),
-        DEFAULT_PRICE_DECIMALS,
-    )
+    # Lab Phase 9 always sends price_decimals (usually 2 → 1175 = ₦11.75).
+    # SAO / admin SET_PRICE uses face naira integers (1400 = ₦1400/L). When the
+    # Pi omits price_decimals, default to 0 — not 2 — so we do not scale 1400 → 14.
+    price_decimals_raw = first_present(inner, "price_decimals", "priceDecimals")
+    if price_decimals_raw is None:
+        price_decimals = 0
+    else:
+        price_decimals = _decimals(price_decimals_raw, DEFAULT_PRICE_DECIMALS)
     raw_currency = _as_str(first_present(inner, "currency") or first_present(payload, "currency"))
     currency = "NGN" if not raw_currency or raw_currency.upper() == "USD" else raw_currency
     volume = scale_raw(first_present(inner, "raw_volume", "rawVolume"), volume_decimals)

@@ -41,3 +41,15 @@ def test_friendly_nozzle_name_hides_raw_pump_id():
     assert friendly_nozzle_name({"name": "Pump 1"}, 0) == "Nozzle 1"
     assert friendly_nozzle_name({"name": "Pump 2", "nozzleNumber": 2}, 1) == "Nozzle 2"
     assert friendly_nozzle_name({"name": "Nozzle 2"}, 1) == "Nozzle 2"
+
+
+def test_friendly_nozzle_name_station_wide_hose_numbers():
+    assert friendly_nozzle_name({"pumpNumber": 1, "nozzleNumber": 1}, 0) == "Nozzle 1"
+    assert friendly_nozzle_name({"pumpNumber": 1, "nozzleNumber": 2}, 1) == "Nozzle 2"
+    assert (
+        friendly_nozzle_name({"pumpNumber": 2, "nozzleNumber": 1, "name": "Nozzle 1"}, 0)
+        == "Nozzle 3"
+    )
+    assert friendly_nozzle_name({"pumpNumber": 2, "nozzleNumber": 2}, 1) == "Nozzle 4"
+    assert friendly_nozzle_name({"pumpNumber": 6, "nozzleNumber": 1}, 0) == "Nozzle 11"
+    assert friendly_nozzle_name({"pumpNumber": 6, "nozzleNumber": 2}, 1) == "Nozzle 12"

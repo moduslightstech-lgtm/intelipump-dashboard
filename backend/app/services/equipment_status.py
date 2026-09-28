@@ -67,13 +67,36 @@ def aggregate_physical_pump_status(nozzle_statuses: list[str | None]) -> str:
     return "UNKNOWN"
 
 
+def station_hose_number(pump_number: int, local_nozzle_number: int) -> int:
+    """SAO forecourt labeling: pump N owns nozzles 2N-1 and 2N."""
+    return (int(pump_number) - 1) * 2 + int(local_nozzle_number)
+
+
 def friendly_nozzle_name(nozzle: dict, index: int) -> str:
+    local = nozzle.get("nozzleNumber") or nozzle.get("nozzle_number") or index + 1
+    try:
+        local_n = int(local)
+    except (TypeError, ValueError):
+        local_n = index + 1
+    if local_n <= 0:
+        local_n = index + 1
+
+    pump = (
+        nozzle.get("parentPumpNumber")
+        or nozzle.get("pumpNumber")
+        or nozzle.get("pump_number")
+    )
+    try:
+        pump_n = int(pump) if pump is not None and str(pump).strip() != "" else None
+    except (TypeError, ValueError):
+        pump_n = None
+
+    # Prefer station-wide hose numbers when the physical pump number is known
+    # (pump 2 → Nozzle 3/4, pump 3 → Nozzle 5/6, …). Keep mqtt nozzle-1/2 unchanged.
+    if pump_n is not None and pump_n > 0:
+        return f"Nozzle {station_hose_number(pump_n, local_n)}"
+
     name = str(nozzle.get("name") or "").strip()
     if name and not re.match(r"^pump[\s_-]*\d+(-n\d+)?$", name, re.I):
         return name
-    number = nozzle.get("nozzleNumber") or nozzle.get("nozzle_number") or index + 1
-    try:
-        number_n = int(number)
-    except (TypeError, ValueError):
-        number_n = index + 1
-    return f"Nozzle {number_n}"
+    return f"Nozzle {local_n}"

@@ -22,6 +22,7 @@ from app.services.edge_device_status import (
     aggregate_station_availability,
     as_utc,
     calculate_device_status,
+    calculate_pump_communication,
     calculate_pump_communication_from_transaction,
     pump_communication_label,
 )
@@ -90,6 +91,10 @@ def _hostname_expr(cols: set[str]) -> str:
     return "NULL"
 
 
+def _optional_col(cols: set[str], name: str) -> str:
+    return name if name in cols else "NULL"
+
+
 def fetch_edge_device_rows(
     db: Session,
     *,
@@ -104,6 +109,10 @@ def fetch_edge_device_rows(
     last_seen_sql = _last_seen_expr(cols)
     mqtt_sql = _mqtt_status_expr(cols)
     hostname_sql = _hostname_expr(cols)
+    serial_open_sql = _optional_col(cols, "serial_port_open")
+    serial_port_sql = _optional_col(cols, "serial_port")
+    last_serial_sql = _optional_col(cols, "last_serial_data_at")
+    last_tx_sql = _optional_col(cols, "last_transaction_at")
 
     where = ["TRUE"]
     params: dict[str, Any] = {}
@@ -129,7 +138,11 @@ def fetch_edge_device_rows(
             station_id,
             {hostname_sql} AS hostname,
             {mqtt_sql} AS mqtt_connection_status,
-            {last_seen_sql} AS last_seen
+            {last_seen_sql} AS last_seen,
+            {serial_open_sql} AS serial_port_open,
+            {serial_port_sql} AS serial_port,
+            {last_serial_sql} AS last_serial_data_at,
+            {last_tx_sql} AS last_transaction_at
         FROM edge_devices
         WHERE {' AND '.join(where)}
         ORDER BY station_id, device_id
@@ -144,6 +157,10 @@ def fetch_edge_device_rows(
                 "hostname": row["hostname"],
                 "mqtt_connection_status": row["mqtt_connection_status"],
                 "last_seen": as_utc(row["last_seen"]),
+                "serial_port_open": row["serial_port_open"],
+                "serial_port": row["serial_port"],
+                "last_serial_data_at": as_utc(row["last_serial_data_at"]),
+                "last_transaction_at": as_utc(row["last_transaction_at"]),
             }
         )
     return rows
@@ -157,6 +174,14 @@ def serialize_device_status(
     now = as_utc(now) or datetime.now(timezone.utc)
     view = calculate_device_status(now=now, last_seen=row.get("last_seen"))
     mqtt = row.get("mqtt_connection_status") or "UNKNOWN"
+    serial_open = row.get("serial_port_open")
+    pump = calculate_pump_communication(
+        device_status=view.status,
+        serial_port_open=serial_open,
+        last_serial_data_at=row.get("last_serial_data_at"),
+        last_transaction_at=row.get("last_transaction_at"),
+        now=now,
+    )
     return {
         "deviceId": row["device_id"],
         "stationId": row["station_id"],
@@ -171,6 +196,17 @@ def serialize_device_status(
         "lastHeartbeatAt": _iso(row.get("last_seen")),
         "mqttStatus": str(mqtt).upper() if mqtt else "UNKNOWN",
         "mqttConnected": str(mqtt or "").upper() == "ONLINE",
+        "serialPort": row.get("serial_port"),
+        "serialPortOpen": serial_open,
+        "lastSerialDataAt": _iso(row.get("last_serial_data_at")),
+        "lastTransactionAt": _iso(row.get("last_transaction_at")),
+        "pumpCommunicationStatus": pump.status,
+        "pumpCommunicationLabel": pump_communication_label(pump.status),
+        "rs485Healthy": pump.status not in {
+            "SERIAL_PORT_CLOSED",
+            "NO_SERIAL_DATA",
+            "DEVICE_OFFLINE",
+        },
     }
 
 
@@ -254,6 +290,12 @@ def station_devices_summary(db: Session, station_id: str) -> dict[str, Any]:
     station_status = aggregate_station_availability([d["status"] for d in devices])
     last_tx = latest_station_transaction_at(db, mqtt_id)
     pump = calculate_pump_communication_from_transaction(last_transaction_at=last_tx, now=now)
+    serial_healthy = sum(1 for d in devices if d.get("rs485Healthy") is True)
+    serial_down = sum(
+        1
+        for d in devices
+        if d.get("pumpCommunicationStatus") in {"SERIAL_PORT_CLOSED", "NO_SERIAL_DATA"}
+    )
 
     return {
         "stationId": mqtt_id,
@@ -268,6 +310,8 @@ def station_devices_summary(db: Session, station_id: str) -> dict[str, Any]:
         "lastTransactionAt": _iso(last_tx),
         "pumpCommunicationStatus": pump.status,
         "pumpCommunicationLabel": pump_communication_label(pump.status),
+        "serialHealthyDevices": serial_healthy,
+        "serialDownDevices": serial_down,
         "devices": devices,
     }
 
@@ -445,4 +489,24 @@ def evaluate_edge_device_health(db: Session) -> dict[str, int]:
             logger.exception("Failed updating calculated_status for %s", device["deviceId"])
     if can_update and transitions:
         db.commit()
-    return {"devices": len(devices), "transitions": transitions, "alertsCreated": 0, "alertsResolved": 0}
+    alerts_created = 0
+    alerts_resolved = 0
+    try:
+        from app.services.alert_engine import (
+            evaluate_edge_device_offline,
+            evaluate_edge_serial_health,
+        )
+
+        created = evaluate_edge_device_offline(db)
+        alerts_created += len(created)
+        serial = evaluate_edge_serial_health(db)
+        alerts_created += serial.get("created", 0)
+        alerts_resolved += serial.get("resolved", 0)
+    except Exception:
+        logger.exception("Failed evaluating edge-device alerts")
+    return {
+        "devices": len(devices),
+        "transitions": transitions,
+        "alertsCreated": alerts_created,
+        "alertsResolved": alerts_resolved,
+    }

@@ -14,7 +14,7 @@ import {
 } from '../api/client'
 import { apiErrorMessage } from '../lib/apiError'
 import { useAuth } from '../context/AuthContext'
-import { normalizeRole } from '../lib/roles'
+import { isAdmin as roleIsAdmin } from '../lib/roles'
 import {
   filterCounts,
   formatFinancialVariance,
@@ -38,7 +38,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 export default function ReconciliationsPage() {
   const qc = useQueryClient()
   const { user } = useAuth()
-  const isAdmin = normalizeRole(user?.normalizedRole || user?.role) === 'ADMIN'
+  const isAdmin = roleIsAdmin(user?.normalizedRole || user?.role)
   const [params, setParams] = useSearchParams()
   const businessDate = params.get('date') || todayBusinessDate()
   const selectedId = params.get('station')

@@ -175,6 +175,9 @@ class StationOut(BaseModel):
     last_heartbeat_at: Optional[datetime] = None
     status_source: Optional[str] = None
     status_reason: Optional[str] = None
+    commanded_unit_price_raw: Optional[int] = None
+    commanded_unit_price_at: Optional[datetime] = None
+    commanded_unit_price_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -280,6 +283,8 @@ class PumpUpdate(BaseModel):
     status: Optional[str] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
+    # Not a pumps.* column — cascades to active nozzles (catalog source of truth).
+    product: Optional[str] = None
 
 
 class PumpOut(BaseModel):
@@ -303,6 +308,9 @@ class PumpOut(BaseModel):
     deactivated_at: Optional[datetime] = None
     notes: Optional[str] = None
     operational_state: str = "UNKNOWN"
+    commanded_unit_price_raw: Optional[int] = None
+    commanded_unit_price_at: Optional[datetime] = None
+    commanded_unit_price_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -359,6 +367,8 @@ from app.schemas.reconciliation import (  # noqa: E402
     AlertEventOut,
     AlertResolveRequest,
     AlertRuleOut,
+    AlertNotificationSettingsOut,
+    AlertNotificationSettingsUpdate,
     AlertSummaryOut,
     LayoutItemIn,
     PaymentSummaryCreate,

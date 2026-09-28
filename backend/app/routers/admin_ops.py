@@ -15,7 +15,15 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Tank, TankReadingBatch, User, UserStationAssignment
 from app.security import hash_password
-from app.services.rbac import accessible_stations, normalize_role, require_admin
+from app.services.rbac import (
+    ROLE_SUPER_ADMIN,
+    accessible_stations,
+    assignable_role,
+    assert_station_ids_subset,
+    is_super_admin,
+    normalize_role,
+    require_admin,
+)
 from app.services.tank_lifecycle import is_archived_tank
 from app.services.tank_readings import (
     admin_accept_batch,
@@ -92,9 +100,12 @@ class CorrectBody(BaseModel):
 @users_router.get("")
 def list_users(
     db: Session = Depends(get_db),
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
 ) -> list[dict[str, Any]]:
-    users = list(db.scalars(select(User).order_by(User.email)).all())
+    stmt = select(User).order_by(User.email)
+    if not is_super_admin(admin) and admin.organization_id is not None:
+        stmt = stmt.where(User.organization_id == admin.organization_id)
+    users = list(db.scalars(stmt).all())
     out = []
     for u in users:
         assigns = list(
@@ -130,9 +141,12 @@ def create_user(
     existing = db.scalar(select(User).where(User.email == body.email.lower()))
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
-    role = normalize_role(body.role)
-    if role not in {"ADMIN", "EXECUTIVE", "STATION_MANAGER"}:
-        raise HTTPException(status_code=400, detail="Invalid role")
+    role = assignable_role(admin, body.role)
+    org_id = body.organization_id
+    if role == ROLE_SUPER_ADMIN:
+        org_id = None
+    elif not is_super_admin(admin) and admin.organization_id is not None:
+        org_id = admin.organization_id
     user = User(
         id=uuid4(),
         email=body.email.lower(),
@@ -140,7 +154,7 @@ def create_user(
         first_name=body.first_name,
         last_name=body.last_name,
         role=role,
-        organization_id=body.organization_id or admin.organization_id,
+        organization_id=org_id,
         status="ACTIVE",
     )
     db.add(user)
@@ -166,10 +180,16 @@ def update_user(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if not is_super_admin(admin) and admin.organization_id is not None and user.organization_id != admin.organization_id:
+        raise HTTPException(status_code=404, detail="User not found")
     before = {"role": user.role, "status": user.status}
     data = body.model_dump(exclude_unset=True)
+    if not is_super_admin(admin) and admin.organization_id is not None:
+        data.pop("organization_id", None)
     if "role" in data and data["role"] is not None:
-        data["role"] = normalize_role(data["role"])
+        data["role"] = assignable_role(admin, data["role"])
+        if data["role"] == ROLE_SUPER_ADMIN:
+            data["organization_id"] = None
     if "password" in data and data["password"]:
         user.password_hash = hash_password(data.pop("password"))
     else:
@@ -200,8 +220,12 @@ def assign_role(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if not is_super_admin(admin) and admin.organization_id is not None and user.organization_id != admin.organization_id:
+        raise HTTPException(status_code=404, detail="User not found")
     before = user.role
-    user.role = normalize_role(body.role)
+    user.role = assignable_role(admin, body.role)
+    if user.role == ROLE_SUPER_ADMIN:
+        user.organization_id = None
     write_audit(
         db,
         actor=admin,
@@ -225,6 +249,9 @@ def assign_stations(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if not is_super_admin(admin) and admin.organization_id is not None and user.organization_id != admin.organization_id:
+        raise HTTPException(status_code=404, detail="User not found")
+    assert_station_ids_subset(db, admin, body.station_ids)
     existing = list(
         db.scalars(select(UserStationAssignment).where(UserStationAssignment.user_id == user_id)).all()
     )

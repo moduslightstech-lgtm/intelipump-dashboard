@@ -15,26 +15,38 @@ if [[ -z "$HOST" ]]; then
   exit 1
 fi
 
-ssh "$HOST" "mkdir -p '$REMOTE/nginx' '$REMOTE/scripts' '$REMOTE/db'"
+ssh "$HOST" "mkdir -p '$REMOTE/nginx' '$REMOTE/scripts' '$REMOTE/db' '$REMOTE/certbot/www' '$REMOTE/certbot/conf'"
 
 scp "$ROOT/docker-compose.yml" "$HOST:$REMOTE/docker-compose.yml"
-scp "$ROOT/nginx/default.conf" "$HOST:$REMOTE/nginx/default.conf"
+scp "$ROOT/nginx/default.conf" \
+  "$ROOT/nginx/default.ssl.conf" \
+  "$ROOT/nginx/bootstrap-http.conf" \
+  "$HOST:$REMOTE/nginx/"
 scp -r "$ROOT/db/alembic.ini" "$ROOT/db/requirements.txt" "$ROOT/db/alembic" \
   "$HOST:$REMOTE/db/"
 scp \
   "$ROOT/scripts/droplet-cutover.sh" \
   "$ROOT/scripts/create_admin_via_api.sh" \
+  "$ROOT/scripts/create_super_admin_via_api.sh" \
   "$ROOT/scripts/migrate.sh" \
+  "$ROOT/scripts/seed_tenancy.sh" \
+  "$ROOT/scripts/enable-https.sh" \
   "$HOST:$REMOTE/scripts/"
+
+ssh "$HOST" "mkdir -p '$REMOTE/seed-src'"
+scp -r "$ROOT/backend/app/seed/." "$HOST:$REMOTE/seed-src/"
 
 ssh "$HOST" "chmod +x '$REMOTE/scripts/'*.sh && rm -f '$REMOTE/docker-compose.override.yml'"
 
 echo
-echo "Copied compose, nginx, db migrations, and scripts to $HOST:$REMOTE"
-echo "Not copied (keep the droplet originals): .env, mosquitto/, postgres/data/"
+echo "Copied compose, nginx (incl. TLS), db migrations, tenancy seeder, and scripts to $HOST:$REMOTE"
+echo "Not copied (keep the droplet originals): .env, mosquitto/, postgres/data/, certbot/"
 echo
 echo "Next, SSH in and run:"
 echo "  ssh $HOST"
 echo "  cd $REMOTE"
 echo "  # add JWT_SECRET to .env if missing: openssl rand -hex 32"
 echo "  ./scripts/droplet-cutover.sh"
+echo
+echo "To enable HTTPS (after DNS points here):"
+echo "  PUBLIC_HOST=app.intellixxx.com LETSENCRYPT_EMAIL=you@example.com ./scripts/enable-https.sh"

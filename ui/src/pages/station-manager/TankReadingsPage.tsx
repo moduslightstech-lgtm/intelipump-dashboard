@@ -13,7 +13,7 @@ import {
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { formatStatusLabel } from '../../lib/enumPresentation'
-import { normalizeRole } from '../../lib/roles'
+import { isAdmin as roleIsAdmin, normalizeRole } from '../../lib/roles'
 import TankReadingSummary from '../../components/tank-readings/TankReadingSummary'
 
 type Mode = 'create' | 'continue' | 'view' | 'correct'
@@ -66,7 +66,7 @@ export default function TankReadingsPage() {
   const qc = useQueryClient()
   const { user } = useAuth()
   const role = normalizeRole(user?.normalizedRole || user?.role)
-  const isAdmin = role === 'ADMIN'
+  const isAdmin = roleIsAdmin(role)
   const triggerRef = useRef<HTMLButtonElement | null>(null)
 
   const stationsQ = useQuery({

@@ -66,7 +66,14 @@ describe('Transactions table', () => {
         {
           id: 'st1',
           station_code: 'US-LAB-001',
-          name: 'InteliPump US Lab',
+          name: 'InteliPump Lab',
+          timezone: 'Africa/Lagos',
+        },
+        {
+          id: 'st2',
+          station_code: 'SAO-RS-001',
+          mqtt_station_id: 'SAO-Redeemed-Station-1',
+          name: 'SAO redeemed station 1',
           timezone: 'Africa/Lagos',
         },
       ],
@@ -104,6 +111,19 @@ describe('Transactions table', () => {
     expect(screen.getByTestId('tx-amount').textContent).not.toEqual(screen.getByTestId('tx-status').textContent)
     expect(screen.getByTestId('tx-status')).toHaveTextContent('Completed')
     expect(screen.getAllByText('Not mapped').length).toBeGreaterThan(0)
+  })
+
+  it('switches the station dropdown to SAO redeemed station 1', async () => {
+    render(wrap(<MemoryRouter><TransactionsPage /></MemoryRouter>))
+    const stationSelect = await screen.findByLabelText('Station')
+    await waitFor(() => expect(stationSelect).toHaveValue('US-LAB-001'))
+    fireEvent.change(stationSelect, { target: { value: 'SAO-RS-001' } })
+    expect(stationSelect).toHaveValue('SAO-RS-001')
+    await waitFor(() => {
+      expect(client.getTransactions).toHaveBeenCalledWith(
+        expect.objectContaining({ station_id: 'SAO-RS-001' }),
+      )
+    })
   })
 })
 

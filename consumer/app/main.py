@@ -12,15 +12,20 @@ from app.config import load_settings
 from app.database import Database
 from app.mqtt_client import MqttClient
 from app.phase9 import (
+    KIND_COMMAND_RESULT,
     KIND_DEVICE_STATUS,
     KIND_HEARTBEAT,
     KIND_IGNORED,
+    KIND_PUMP_ALERT,
     KIND_TRANSACTION,
+    TRANSACTION_STARTED_EVENTS,
     classify_phase9_message,
     extract_phase9_device_id,
+    event_type_of,
     flatten_device_fields,
     is_phase9_device_status_topic,
 )
+from app.services.alert_writer import handle_command_result, handle_pump_alert
 from app.schemas import normalize_transaction, parse_json_payload
 from app.services.edge_device_service import EdgeDeviceService
 from app.services.status_service import StationStatusService
@@ -176,6 +181,18 @@ class ConsumerApp:
             transaction, validation_error = normalize_transaction(
                 payload, source_topic=topic
             )
+            if (
+                validation_error is not None
+                and validation_error.error_type == "MISSING_PUMP_ID"
+                and event_type_of(payload) in TRANSACTION_STARTED_EVENTS
+            ):
+                logger.info(
+                    "Ignored %s without pumpId topic=%s transactionId=%s",
+                    event_type_of(payload),
+                    topic,
+                    tx_id,
+                )
+                return
             if validation_error is not None:
                 logger.warning(
                     "live_event_rejected stationId=%s transactionId=%s errorType=%s message=%s",
@@ -215,6 +232,26 @@ class ConsumerApp:
                     transaction.transaction_id,
                     transaction.status,
                 )
+            return
+
+        if kind == KIND_COMMAND_RESULT:
+            result = handle_command_result(self.db, topic=topic, payload=payload)
+            logger.info(
+                "Command result alert topic=%s result=%s eventType=%s",
+                topic,
+                result,
+                payload.get("eventType"),
+            )
+            return
+
+        if kind == KIND_PUMP_ALERT:
+            result = handle_pump_alert(self.db, topic=topic, payload=payload)
+            logger.info(
+                "Pump alert topic=%s result=%s eventType=%s",
+                topic,
+                result,
+                payload.get("eventType"),
+            )
             return
 
         logger.info(

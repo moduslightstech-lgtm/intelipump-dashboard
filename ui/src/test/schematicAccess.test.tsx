@@ -7,6 +7,12 @@ describe('layout edit access', () => {
     expect(normalizeRole('ADMIN')).toBe('ADMIN')
   })
 
+  it('super admin is treated as admin', () => {
+    expect(isAdmin('SUPER_ADMIN')).toBe(true)
+    expect(isAdmin('SUPERADMIN')).toBe(true)
+    expect(normalizeRole('SUPERADMIN')).toBe('SUPER_ADMIN')
+  })
+
   it('station manager is read-only for layout', () => {
     expect(isAdmin('STATION_MANAGER')).toBe(false)
     expect(normalizeRole('STATION_MANAGER')).toBe('STATION_MANAGER')

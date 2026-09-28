@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Device, MqttMessage, Pump, RejectedMessage, Station, StationStatusHistory, User
+from app.models import Device, MqttMessage, Organization, Pump, RejectedMessage, Station, StationStatusHistory, User
 from app.schemas import (
     DeviceCreate,
     DeviceOut,
@@ -26,6 +26,7 @@ from app.schemas import (
     StationUpdate,
 )
 from app.security import get_current_user
+from app.services.rbac import accessible_stations, assert_station_access, is_platform_operator, is_super_admin
 from app.services.station_search import (
     list_critical_alert_stations,
     list_favorite_stations,
@@ -39,14 +40,32 @@ stations_router = APIRouter(prefix="/stations", tags=["stations"])
 devices_router = APIRouter(prefix="/devices", tags=["devices"])
 pumps_router = APIRouter(prefix="/pumps", tags=["pumps"])
 mqtt_router = APIRouter(prefix="/mqtt", tags=["mqtt"])
+organizations_router = APIRouter(prefix="/organizations", tags=["organizations"])
+
+
+def _allowed_station_ids(db: Session, user: User) -> list[UUID]:
+    return [s.id for s in accessible_stations(db, user)]
+
+
+@organizations_router.get("")
+def list_organizations(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    if is_super_admin(user) or user.organization_id is None:
+        rows = list(db.scalars(select(Organization).order_by(Organization.name)).all())
+    else:
+        org = db.get(Organization, user.organization_id)
+        rows = [org] if org is not None else []
+    return [{"id": str(o.id), "code": o.code, "name": o.name} for o in rows]
 
 
 @stations_router.get("", response_model=list[StationOut])
 def list_stations(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[Station]:
-    return list(db.scalars(select(Station).order_by(Station.name)).all())
+    return accessible_stations(db, user)
 
 
 @stations_router.get("/search")
@@ -100,6 +119,7 @@ def toggle_station_favorite(
     station = db.get(Station, station_id)
     if station is None:
         raise HTTPException(status_code=404, detail="Station not found")
+    assert_station_access(db, user, station_id)
     is_fav = toggle_favorite(db, user, station_id)
     return {"stationId": str(station_id), "isFavorite": is_fav}
 
@@ -108,7 +128,7 @@ def toggle_station_favorite(
 def create_station(
     body: StationCreate,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> Station:
     data = body.model_dump()
     country = str(data.get("country") or "").strip().upper()
@@ -118,6 +138,8 @@ def create_station(
             data["timezone"] = "Africa/Lagos"
     elif not data.get("timezone"):
         data["timezone"] = "Africa/Lagos"
+    if user.organization_id is not None:
+        data["organization_id"] = user.organization_id
     station = Station(**data)
     db.add(station)
     db.commit()
@@ -129,12 +151,9 @@ def create_station(
 def get_station(
     station_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> Station:
-    station = db.get(Station, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
-    return station
+    return assert_station_access(db, user, station_id)
 
 
 @stations_router.put("/{station_id}", response_model=StationOut)
@@ -142,11 +161,9 @@ def update_station(
     station_id: UUID,
     body: StationUpdate,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> Station:
-    station = db.get(Station, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
+    station = assert_station_access(db, user, station_id, hide=False)
     data = body.model_dump(exclude_unset=True)
     for key in ("opens_at", "closes_at"):
         if key in data and data[key] is not None:
@@ -169,13 +186,11 @@ def update_station(
 def manually_close_station(
     station_id: UUID,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     reason: Optional[str] = Query(None),
 ) -> Station:
     """Operator manual close — MANUAL source, no outage alert."""
-    station = db.get(Station, station_id)
-    if station is None:
-        raise HTTPException(status_code=404, detail="Station not found")
+    station = assert_station_access(db, user, station_id, hide=False)
     decision = evaluate_manual_close(reason)
     now = datetime.now(timezone.utc)
     prev_op = station.operational_status
@@ -217,9 +232,15 @@ def manually_close_station(
 @devices_router.get("", response_model=list[DeviceOut])
 def list_devices(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[Device]:
-    return list(db.scalars(select(Device).order_by(Device.device_code)).all())
+    ids = _allowed_station_ids(db, user)
+    stmt = select(Device).order_by(Device.device_code)
+    if is_platform_operator(user):
+        return list(db.scalars(stmt).all())
+    if not ids:
+        return []
+    return list(db.scalars(stmt.where(Device.station_id.in_(ids))).all())
 
 
 @devices_router.post("", response_model=DeviceOut, status_code=201)
@@ -270,11 +291,16 @@ def update_device(
 def list_pumps(
     include_inactive: bool = Query(False),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[Pump]:
     stmt = select(Pump).order_by(Pump.pump_code)
     if not include_inactive:
         stmt = stmt.where(Pump.active.is_(True))
+    if not is_platform_operator(user):
+        ids = _allowed_station_ids(db, user)
+        if not ids:
+            return []
+        stmt = stmt.where(Pump.station_id.in_(ids))
     return list(db.scalars(stmt).all())
 
 

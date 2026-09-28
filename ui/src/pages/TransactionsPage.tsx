@@ -41,6 +41,14 @@ function readParam(sp: URLSearchParams, key: string, fallback = '') {
   return sp.get(key) ?? fallback
 }
 
+function stationOptionValue(station?: {
+  id?: string
+  station_code?: string
+  mqtt_station_id?: string | null
+} | null) {
+  return (station?.station_code || station?.mqtt_station_id || station?.id || '').trim()
+}
+
 export default function TransactionsPage() {
   const { token } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -56,7 +64,7 @@ export default function TransactionsPage() {
   const [dateTo, setDateTo] = useState(() => readParam(searchParams, 'to', today))
   const [fromTime, setFromTime] = useState(() => readParam(searchParams, 'fromTime'))
   const [toTime, setToTime] = useState(() => readParam(searchParams, 'toTime'))
-  const [status, setStatus] = useState(() => readParam(searchParams, 'status'))
+  const [status, setStatus] = useState(() => readParam(searchParams, 'status', 'COMPLETED'))
   const [q, setQ] = useState(() => readParam(searchParams, 'q'))
   const [minAmount, setMinAmount] = useState(() => readParam(searchParams, 'minAmount'))
   const [maxAmount, setMaxAmount] = useState(() => readParam(searchParams, 'maxAmount'))
@@ -75,7 +83,7 @@ export default function TransactionsPage() {
     dateTo: readParam(searchParams, 'to', today),
     fromTime: readParam(searchParams, 'fromTime'),
     toTime: readParam(searchParams, 'toTime'),
-    status: readParam(searchParams, 'status'),
+    status: readParam(searchParams, 'status', 'COMPLETED'),
     q: readParam(searchParams, 'q'),
     minAmount: readParam(searchParams, 'minAmount'),
     maxAmount: readParam(searchParams, 'maxAmount'),
@@ -89,14 +97,20 @@ export default function TransactionsPage() {
   })
 
   const catalogStations = stationsQ.data || []
+  const findCatalogStation = useCallback(
+    (id: string) =>
+      catalogStations.find(
+        (s) => s.station_code === id || s.id === id || s.mqtt_station_id === id,
+      ),
+    [catalogStations],
+  )
+  const draftStation = findCatalogStation(stationId)
   const selectedStation = useMemo(
     () =>
-      catalogStations.find(
-        (s) =>
-          s.station_code === (applied.stationId || stationId) ||
-          s.id === (applied.stationId || stationId),
-      ) || catalogStations[0],
-    [catalogStations, applied.stationId, stationId],
+      findCatalogStation(applied.stationId) ||
+      draftStation ||
+      catalogStations[0],
+    [applied.stationId, catalogStations, draftStation, findCatalogStation],
   )
   const stationFilter =
     applied.stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
@@ -176,7 +190,7 @@ export default function TransactionsPage() {
 
   const applyFilters = (opts?: { page?: number }) => {
     const draft = {
-      stationId: stationId || selectedStation?.station_code || '',
+      stationId: stationId || stationOptionValue(selectedStation),
       dateFrom,
       dateTo,
       fromTime,
@@ -190,12 +204,14 @@ export default function TransactionsPage() {
     }
     const amt = validateMoneyRange(draft.minAmount, draft.maxAmount, 'Sale amount')
     const price = validateMoneyRange(draft.minUnitPrice, draft.maxUnitPrice, 'Unit price')
+    const nextStation =
+      findCatalogStation(draft.stationId) || selectedStation
     const win = stationRangeToUtcIso({
       dateFrom: draft.dateFrom,
       dateTo: draft.dateTo,
       fromTime: draft.fromTime,
       toTime: draft.toTime,
-      timeZone: selectedStation?.timezone || NIGERIA_TZ,
+      timeZone: nextStation?.timezone || NIGERIA_TZ,
     })
     const err = amt.error || price.error || win.error || null
     setFilterError(err)
@@ -208,12 +224,12 @@ export default function TransactionsPage() {
 
   const clearFilters = () => {
     const day = stationToday(selectedStation?.timezone || NIGERIA_TZ)
-    setStationId(selectedStation?.station_code || '')
+    setStationId(stationOptionValue(selectedStation))
     setDateFrom(day)
     setDateTo(day)
     setFromTime('')
     setToTime('')
-    setStatus('')
+    setStatus('COMPLETED')
     setQ('')
     setMinAmount('')
     setMaxAmount('')
@@ -221,12 +237,12 @@ export default function TransactionsPage() {
     setMaxUnitPrice('')
     setFilterError(null)
     const draft = {
-      stationId: selectedStation?.station_code || '',
+      stationId: stationOptionValue(selectedStation),
       dateFrom: day,
       dateTo: day,
       fromTime: '',
       toTime: '',
-      status: '',
+      status: 'COMPLETED',
       q: '',
       minAmount: '',
       maxAmount: '',
@@ -252,11 +268,12 @@ export default function TransactionsPage() {
   }
 
   useEffect(() => {
-    if (catalogStations.length && !applied.stationId && selectedStation?.station_code) {
-      setStationId(selectedStation.station_code)
-      setApplied((prev) => ({ ...prev, stationId: selectedStation.station_code }))
+    const fallback = stationOptionValue(selectedStation)
+    if (catalogStations.length && !applied.stationId && !stationId && fallback) {
+      setStationId(fallback)
+      setApplied((prev) => ({ ...prev, stationId: fallback }))
     }
-  }, [catalogStations.length, applied.stationId, selectedStation?.station_code])
+  }, [catalogStations.length, applied.stationId, selectedStation, stationId])
 
   const total = txQ.data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -383,13 +400,22 @@ export default function TransactionsPage() {
       >
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 items-end">
           <CompactSelect
+            id="transactions-station"
+            name="station"
             label="Station"
-            value={selectedStation?.station_code || stationId}
-            onChange={(e) => setStationId(e.target.value)}
+            value={stationId}
+            onChange={(e) => {
+              const next = e.target.value
+              setStationId(next)
+              const draft = { ...applied, stationId: next }
+              setApplied(draft)
+              setPage(1)
+              syncUrl(draft, 1, pageSize)
+            }}
           >
             {catalogStations.length === 0 && <option value="">No stations yet</option>}
             {catalogStations.map((s) => (
-              <option key={s.id} value={s.station_code}>
+              <option key={s.id} value={stationOptionValue(s)}>
                 {stationLabel(s)}
               </option>
             ))}
@@ -409,8 +435,8 @@ export default function TransactionsPage() {
             onChange={(e) => setDateTo(e.target.value)}
           />
           <CompactSelect label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
-            <option value="">All statuses</option>
             <option value="COMPLETED">Complete</option>
+            <option value="ALL">All statuses</option>
             <option value="DISPENSING">Dispensing</option>
             <option value="PENDING">Pending</option>
             <option value="REJECTED">Rejected</option>

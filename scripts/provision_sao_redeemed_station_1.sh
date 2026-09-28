@@ -17,12 +17,14 @@
 #   ./scripts/provision_sao_redeemed_station_1.sh
 #
 # Optional:
-#   TWIN_API_BASE default http://127.0.0.1:8000
-#   --dry-run   print planned actions only
+#   TWIN_API_BASE  droplet (nginx): http://127.0.0.1
+#                  local API published: http://127.0.0.1:8000
+#   --dry-run
 #
 set -euo pipefail
 
-API_BASE="${TWIN_API_BASE:-http://127.0.0.1:8000}"
+# Droplet compose does not publish :8000; nginx on :80 proxies /api/.
+API_BASE="${TWIN_API_BASE:-http://127.0.0.1}"
 EMAIL="${TWIN_ADMIN_EMAIL:-}"
 PASSWORD="${TWIN_ADMIN_PASSWORD:-}"
 DRY_RUN=0
@@ -40,7 +42,9 @@ usage() {
 Provision dashboard catalog for SAO redeemed station 1 (1 pump / 2 nozzles).
 
 Env:
-  TWIN_API_BASE          API base URL (default http://127.0.0.1:8000)
+  TWIN_API_BASE          API base URL (default http://127.0.0.1 via nginx)
+                         Droplet: http://127.0.0.1
+                         Local published API: http://127.0.0.1:8000
   TWIN_ADMIN_EMAIL       Admin login email (required)
   TWIN_ADMIN_PASSWORD    Admin login password (required)
 

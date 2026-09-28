@@ -184,12 +184,18 @@ export default function OperationalTwinView({
   )
 
   const edgeStatus = edgeQ.hasMapping
-    ? edgeQ.primary?.status || (edgeQ.isError ? 'UNKNOWN' : undefined)
+    ? edgeQ.stationAvailability ||
+      edgeQ.primary?.status ||
+      (edgeQ.isError ? 'UNKNOWN' : undefined)
     : undefined
   const liveConnectivityLabel = edgeQ.hasMapping
     ? (edgeStatus || (edgeQ.isLoading ? '…' : 'UNKNOWN'))
     : station?.connectivityStatus || 'UNKNOWN'
   const liveConnectivityStored = mapEdgeToConnectivityStatus(edgeStatus)
+  const connectivityHint =
+    edgeQ.totalCount > 1
+      ? `${edgeQ.onlineCount} of ${edgeQ.totalCount} Pis online`
+      : 'Raspberry Pi heartbeat'
 
   const displayState = useMemo(() => {
     const base = applyLiveStationStatus(
@@ -467,14 +473,14 @@ export default function OperationalTwinView({
             value={
               !edgeQ.hasMapping
                 ? 'No edge device'
-                : edgeQ.isLoading && !edgeQ.primary
+                : edgeQ.isLoading && !edgeQ.stationAvailability && !edgeQ.primary
                   ? 'Checking…'
                   : String(liveConnectivityLabel).replace(/_/g, ' ')
             }
             tone={connTone(
               edgeQ.hasMapping ? edgeStatus || liveConnectivityLabel : 'UNKNOWN',
             )}
-            hint="Raspberry Pi heartbeat"
+            hint={connectivityHint}
           />
           <StatusPill label="Sales today" value={fmtNaira(salesToday)} tone="green" />
           <StatusPill label="Volume today" value={fmtLiters(volumeToday)} tone="neutral" />

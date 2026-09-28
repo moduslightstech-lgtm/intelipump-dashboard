@@ -128,7 +128,15 @@ export default function PumpCard({
                 data-testid={`pump-list-nozzle-${n.id || i}`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-semibold text-white">{friendlyNozzleName(n, i)}</span>
+                  <span className="text-[11px] font-semibold text-white">
+                    {friendlyNozzleName(
+                      {
+                        ...n,
+                        parentPumpNumber: pump.pumpNumber ?? pump.pump_number ?? n.parentPumpNumber,
+                      },
+                      i,
+                    )}
+                  </span>
                   <span className="text-[10px] font-semibold" style={{ color: pumpStatusColor(ns) }}>
                     {pumpStatusLabel(ns)}
                   </span>

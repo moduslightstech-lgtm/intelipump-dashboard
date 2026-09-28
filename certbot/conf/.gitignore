@@ -1,0 +1,3 @@
+# Let's Encrypt certificates. Created by enable-https.sh — never commit.
+*
+!.gitignore

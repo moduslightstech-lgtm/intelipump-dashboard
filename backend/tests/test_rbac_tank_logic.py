@@ -15,7 +15,9 @@ from app.services.station_status import Schedule, is_within_operating_hours
 
 def test_normalize_role_aliases():
     assert normalize_role("ADMIN") == "ADMIN"
-    assert normalize_role("SUPERADMIN") == "ADMIN"
+    assert normalize_role("SUPERADMIN") == "SUPER_ADMIN"
+    assert normalize_role("SUPER_ADMIN") == "SUPER_ADMIN"
+    assert normalize_role("PLATFORM_ADMIN") == "SUPER_ADMIN"
     assert normalize_role("OPS") == "ADMIN"
     assert normalize_role("VIEWER") == "EXECUTIVE"
     assert normalize_role("EXECUTIVE") == "EXECUTIVE"
@@ -26,6 +28,7 @@ def test_landing_paths():
     assert landing_path_for_role("STATION_MANAGER") == "/station-manager/tank-readings"
     assert landing_path_for_role("EXECUTIVE") == "/executive"
     assert landing_path_for_role("ADMIN") == "/"
+    assert landing_path_for_role("SUPER_ADMIN") == "/"
 
 
 def test_require_reconciliation_access_blocks_station_manager():
@@ -40,6 +43,8 @@ def test_require_reconciliation_access_blocks_station_manager():
 
     admin = type("U", (), {"role": "ADMIN"})()
     assert require_reconciliation_access(admin) is admin  # type: ignore[arg-type]
+    super_admin = type("U", (), {"role": "SUPER_ADMIN"})()
+    assert require_reconciliation_access(super_admin) is super_admin  # type: ignore[arg-type]
 
 
 def test_stock_variance_classification():

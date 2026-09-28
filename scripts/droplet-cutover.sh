@@ -111,3 +111,5 @@ echo
 echo "Cutover finished. Open http://<droplet-ip>/ and sign in."
 echo "If no admin exists yet:"
 echo "  ./scripts/create_admin_via_api.sh admin@example.com 'your-strong-password'"
+echo "Platform Super Admin (all companies, can configure any user):"
+echo "  ./scripts/create_super_admin_via_api.sh you@example.com 'your-strong-password'"

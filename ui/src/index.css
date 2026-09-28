@@ -174,6 +174,11 @@
   stroke: #fbbf24;
 }
 
+.schematic-pipe-flow-ago {
+  stroke: #facc15;
+  filter: drop-shadow(0 0 3px rgba(250, 204, 21, 0.55));
+}
+
 .nozzle-dispensing-pulse {
   box-shadow: 0 0 0 1px rgba(52, 211, 153, 0.45);
 }

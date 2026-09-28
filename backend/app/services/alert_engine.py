@@ -16,6 +16,7 @@ from app.models import (
     AlertEvent,
     AlertRule,
     Device,
+    EdgeDevice,
     ReconciliationRun,
     RejectedMessage,
     Station,
@@ -108,7 +109,247 @@ def upsert_alert(
     if commit:
         db.commit()
         db.refresh(alert)
+        try:
+            from app.services.email_notify import notify_alert_created
+
+            notify_alert_created(db, alert)
+        except Exception:
+            pass
     return alert
+
+
+def evaluate_edge_device_offline(db: Session, threshold_minutes: int = 3) -> list[Alert]:
+    """Raise EDGE_DEVICE_OFFLINE from edge_devices heartbeat age (Pi Online/Offline)."""
+    from app.services.edge_device_status import as_utc, calculate_device_status
+
+    rule = db.scalar(
+        select(AlertRule).where(
+            AlertRule.rule_type.in_(("EDGE_DEVICE_OFFLINE", "DEVICE_OFFLINE", "EDGE_OFFLINE")),
+            AlertRule.enabled.is_(True),
+        )
+    )
+    minutes = rule.threshold_minutes if rule and rule.threshold_minutes else threshold_minutes
+    severity = rule.severity if rule else "HIGH"
+    now = datetime.now(timezone.utc)
+    created: list[Alert] = []
+
+    edges = list(db.scalars(select(EdgeDevice)).all())
+    for edge in edges:
+        last = as_utc(edge.last_heartbeat_at or edge.last_seen_at)
+        view = calculate_device_status(now=now, last_seen=last)
+        if view.status != "OFFLINE":
+            continue
+        station = db.scalar(
+            select(Station).where(
+                (Station.mqtt_station_id == edge.station_id)
+                | (Station.station_code == edge.station_id)
+            )
+        )
+        station_uuid = station.id if station else None
+        age = view.seconds_since_last_heartbeat
+        alert = upsert_alert(
+            db,
+            alert_type="EDGE_DEVICE_OFFLINE",
+            severity=severity,
+            title=f"Pi offline: {edge.device_id}",
+            message=(
+                f"No heartbeat for >{minutes} minutes"
+                + (f" (last seen {age}s ago)" if age is not None else " (never seen)")
+            ),
+            deduplication_key=f"EDGE_DEVICE_OFFLINE:{edge.device_id}",
+            station_id=station_uuid,
+            organization_id=getattr(station, "organization_id", None) if station else None,
+            source="alert_engine.edge_device_offline",
+            metadata_json={
+                "deviceId": edge.device_id,
+                "mqttStationId": edge.station_id,
+                "threshold_minutes": minutes,
+                "last_seen_at": last.isoformat() if last else None,
+                "status": view.status,
+            },
+            commit=False,
+        )
+        if alert is not None:
+            created.append(alert)
+    if created:
+        db.commit()
+        from app.services.email_notify import notify_alert_created
+
+        for alert in created:
+            db.refresh(alert)
+            notify_alert_created(db, alert)
+    return created
+
+
+def resolve_open_alert_by_key(
+    db: Session,
+    *,
+    deduplication_key: str,
+    comment: str = "Auto-resolved: condition cleared",
+    commit: bool = False,
+) -> Alert | None:
+    """System-resolve an open alert matching the dedup key."""
+    alert = db.scalar(
+        select(Alert).where(
+            Alert.deduplication_key == deduplication_key,
+            Alert.status.in_(OPEN_STATUSES),
+        )
+    )
+    if alert is None:
+        return None
+    previous = alert.status
+    now = datetime.now(timezone.utc)
+    alert.status = "RESOLVED"
+    alert.resolved_at = now
+    alert.resolution_notes = comment
+    alert.updated_at = now
+    record_event(
+        db,
+        alert,
+        "RESOLVED",
+        previous_status=previous,
+        new_status="RESOLVED",
+        comment=comment,
+    )
+    db.add(alert)
+    if commit:
+        db.commit()
+        db.refresh(alert)
+    return alert
+
+
+def evaluate_edge_serial_health(db: Session) -> dict[str, int]:
+    """Raise/resolve SERIAL_PORT_CLOSED and NO_SERIAL_DATA for online Pis."""
+    from app.services.edge_device_status import (
+        as_utc,
+        calculate_device_status,
+        calculate_pump_communication,
+    )
+
+    closed_rule = db.scalar(
+        select(AlertRule).where(
+            AlertRule.rule_type.in_(("SERIAL_PORT_CLOSED", "RS485_DOWN")),
+            AlertRule.enabled.is_(True),
+        )
+    )
+    no_data_rule = db.scalar(
+        select(AlertRule).where(
+            AlertRule.rule_type == "NO_SERIAL_DATA",
+            AlertRule.enabled.is_(True),
+        )
+    )
+    closed_severity = closed_rule.severity if closed_rule else "HIGH"
+    no_data_severity = no_data_rule.severity if no_data_rule else "MEDIUM"
+    no_serial_minutes = (
+        no_data_rule.threshold_minutes if no_data_rule and no_data_rule.threshold_minutes else 30
+    )
+    no_serial_seconds = max(60, int(no_serial_minutes) * 60)
+
+    now = datetime.now(timezone.utc)
+    created = 0
+    resolved = 0
+    created_alerts: list[Alert] = []
+
+    edges = list(db.scalars(select(EdgeDevice)).all())
+    for edge in edges:
+        last = as_utc(edge.last_heartbeat_at or edge.last_seen_at)
+        view = calculate_device_status(now=now, last_seen=last)
+        pump = calculate_pump_communication(
+            device_status=view.status,
+            serial_port_open=edge.serial_port_open,
+            last_serial_data_at=as_utc(edge.last_serial_data_at),
+            last_transaction_at=as_utc(edge.last_transaction_at),
+            now=now,
+            no_serial_seconds=no_serial_seconds,
+        )
+        station = db.scalar(
+            select(Station).where(
+                (Station.mqtt_station_id == edge.station_id)
+                | (Station.station_code == edge.station_id)
+            )
+        )
+        station_uuid = station.id if station else None
+        org_id = getattr(station, "organization_id", None) if station else None
+
+        closed_key = f"SERIAL_PORT_CLOSED:{edge.device_id}"
+        no_data_key = f"NO_SERIAL_DATA:{edge.device_id}"
+
+        if pump.status == "SERIAL_PORT_CLOSED":
+            alert = upsert_alert(
+                db,
+                alert_type="SERIAL_PORT_CLOSED",
+                severity=closed_severity,
+                title=f"RS485 down: {edge.device_id}",
+                message=(
+                    f"Pi {edge.device_id} is {view.status.lower()} but the RS485/serial "
+                    "port to the pump is not open."
+                ),
+                deduplication_key=closed_key,
+                station_id=station_uuid,
+                organization_id=org_id,
+                source="alert_engine.edge_serial",
+                metadata_json={
+                    "deviceId": edge.device_id,
+                    "mqttStationId": edge.station_id,
+                    "serialPort": edge.serial_port,
+                    "serialPortOpen": edge.serial_port_open,
+                    "deviceStatus": view.status,
+                    "pumpCommunicationStatus": pump.status,
+                },
+                commit=False,
+            )
+            if alert is not None:
+                created += 1
+                created_alerts.append(alert)
+            # Serial-closed supersedes stale no-data alert
+            if resolve_open_alert_by_key(db, deduplication_key=no_data_key, commit=False):
+                resolved += 1
+        elif pump.status == "NO_SERIAL_DATA" and view.status in {"ONLINE", "DELAYED"}:
+            alert = upsert_alert(
+                db,
+                alert_type="NO_SERIAL_DATA",
+                severity=no_data_severity,
+                title=f"No pump data: {edge.device_id}",
+                message=(
+                    f"Pi {edge.device_id} is online and the serial port is open, "
+                    f"but no pump/serial activity for >{no_serial_minutes} minutes."
+                ),
+                deduplication_key=no_data_key,
+                station_id=station_uuid,
+                organization_id=org_id,
+                source="alert_engine.edge_serial",
+                metadata_json={
+                    "deviceId": edge.device_id,
+                    "mqttStationId": edge.station_id,
+                    "serialPortOpen": edge.serial_port_open,
+                    "deviceStatus": view.status,
+                    "pumpCommunicationStatus": pump.status,
+                    "threshold_minutes": no_serial_minutes,
+                },
+                commit=False,
+            )
+            if alert is not None:
+                created += 1
+                created_alerts.append(alert)
+            if resolve_open_alert_by_key(db, deduplication_key=closed_key, commit=False):
+                resolved += 1
+        else:
+            # Healthy or device offline — clear serial alerts for this Pi
+            if resolve_open_alert_by_key(db, deduplication_key=closed_key, commit=False):
+                resolved += 1
+            if resolve_open_alert_by_key(db, deduplication_key=no_data_key, commit=False):
+                resolved += 1
+
+    if created or resolved:
+        db.commit()
+        if created_alerts:
+            from app.services.email_notify import notify_alert_created
+
+            for alert in created_alerts:
+                db.refresh(alert)
+                notify_alert_created(db, alert)
+
+    return {"created": created, "resolved": resolved}
 
 
 def evaluate_device_offline(db: Session, threshold_minutes: int = 5) -> list[Alert]:

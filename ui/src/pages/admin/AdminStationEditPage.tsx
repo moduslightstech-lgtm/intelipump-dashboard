@@ -4,6 +4,8 @@ import { useOutletContext } from 'react-router-dom'
 import {
   createAdminStationDevice,
   getAdminStationDevices,
+  getAdminStationPumps,
+  setAdminStationPrice,
   type Station,
   updateAdminDevice,
   updateAdminStation,
@@ -27,6 +29,8 @@ const DAYS = [
   { v: 6, label: 'Sun' },
 ]
 
+const PRICE_TARGET_ALL_PMS = '__all_pms__'
+
 function useMinuteTick() {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
@@ -43,6 +47,11 @@ export default function AdminStationEditPage() {
   const devicesQ = useQuery({
     queryKey: ['admin-station-devices', stationId],
     queryFn: async () => (await getAdminStationDevices(stationId)).data,
+    enabled: Boolean(stationId),
+  })
+  const pumpsQ = useQuery({
+    queryKey: ['admin-station-pumps', stationId],
+    queryFn: async () => (await getAdminStationPumps(stationId, false)).data,
     enabled: Boolean(stationId),
   })
 
@@ -67,6 +76,54 @@ export default function AdminStationEditPage() {
     mqtt_client_id: '',
     external_device_id: '',
   })
+  const [priceRaw, setPriceRaw] = useState('1400')
+  const [priceTarget, setPriceTarget] = useState(PRICE_TARGET_ALL_PMS)
+  const [priceMsg, setPriceMsg] = useState('')
+
+  const activePumps = useMemo(() => {
+    const rows = (pumpsQ.data || []).filter((p) => p.active !== false)
+    return [...rows].sort((a, b) => {
+      const ao = Number(a.display_order ?? a.pump_number ?? 999)
+      const bo = Number(b.display_order ?? b.pump_number ?? 999)
+      if (ao !== bo) return ao - bo
+      return String(a.mqtt_pump_id || a.pump_code || '').localeCompare(
+        String(b.mqtt_pump_id || b.pump_code || ''),
+      )
+    })
+  }, [pumpsQ.data])
+
+  const selectedPump = useMemo(() => {
+    if (priceTarget === PRICE_TARGET_ALL_PMS) return undefined
+    return activePumps.find((p) => (p.mqtt_pump_id || p.pump_code) === priceTarget)
+  }, [activePumps, priceTarget])
+
+  useEffect(() => {
+    if (priceTarget === PRICE_TARGET_ALL_PMS) {
+      if (station?.commanded_unit_price_raw != null) {
+        setPriceRaw(String(station.commanded_unit_price_raw))
+      }
+      return
+    }
+    if (selectedPump?.commanded_unit_price_raw != null) {
+      setPriceRaw(String(selectedPump.commanded_unit_price_raw))
+      return
+    }
+    const product = String(selectedPump?.product || 'PMS').toUpperCase()
+    if (product === 'AGO') {
+      setPriceRaw('1875')
+      return
+    }
+    if (station?.commanded_unit_price_raw != null) {
+      setPriceRaw(String(station.commanded_unit_price_raw))
+      return
+    }
+    setPriceRaw('1400')
+  }, [
+    station?.commanded_unit_price_raw,
+    priceTarget,
+    selectedPump?.commanded_unit_price_raw,
+    selectedPump?.product,
+  ])
 
   const stationKey =
     form.mqtt_station_id || station?.mqtt_station_id || station?.station_code || station?.name
@@ -88,9 +145,9 @@ export default function AdminStationEditPage() {
 
   const liveConnectivity = useMemo(() => {
     if (!edgeQ.hasMapping) return 'UNKNOWN' as const
-    if (edgeQ.isError && !edgeQ.primary) return 'UNKNOWN' as const
-    return mapEdgeToConnectivityStatus(edgeQ.primary?.status)
-  }, [edgeQ.hasMapping, edgeQ.isError, edgeQ.primary])
+    if (edgeQ.isError && !edgeQ.stationAvailability && !edgeQ.primary) return 'UNKNOWN' as const
+    return mapEdgeToConnectivityStatus(edgeQ.stationAvailability || edgeQ.primary?.status)
+  }, [edgeQ.hasMapping, edgeQ.isError, edgeQ.stationAvailability, edgeQ.primary])
 
   useEffect(() => {
     if (!station) return
@@ -150,6 +207,39 @@ export default function AdminStationEditPage() {
       refreshStation()
     },
     onError: () => setMsg('Failed to add device'),
+  })
+
+  const setPriceMut = useMutation({
+    mutationFn: async () => {
+      const n = Number.parseInt(priceRaw, 10)
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new Error('invalid_price')
+      }
+      const body: { unit_price_raw: number; pump_id?: string } = { unit_price_raw: n }
+      if (priceTarget !== PRICE_TARGET_ALL_PMS) {
+        body.pump_id = priceTarget
+      }
+      return (await setAdminStationPrice(stationId, body)).data
+    },
+    onSuccess: (data) => {
+      const pumps = data.pumpIds?.length ? data.pumpIds.join(', ') : data.pumpId
+      setPriceMsg(
+        `Queued ₦${data.unitPriceRaw}/L → ${data.stationId} [${pumps}]`,
+      )
+      setMsg(data.detail)
+      refreshStation()
+      qc.invalidateQueries({ queryKey: ['admin-station', stationId] })
+      qc.invalidateQueries({ queryKey: ['admin-station-pumps', stationId] })
+      void pumpsQ.refetch()
+    },
+    onError: (err: unknown) => {
+      const detail =
+        err && typeof err === 'object' && 'response' in err
+          ? String((err as { response?: { data?: { detail?: string } } }).response?.data?.detail || '')
+          : ''
+      setPriceMsg(detail || 'Failed to publish price command')
+      setMsg(detail || 'Failed to publish price command')
+    },
   })
 
   const onSave = (e: FormEvent) => {
@@ -254,14 +344,18 @@ export default function AdminStationEditPage() {
             >
               {!edgeQ.hasMapping ? (
                 <span className="text-sm text-slate-500">No edge device mapped for this MQTT station id</span>
-              ) : edgeQ.isLoading && !edgeQ.primary ? (
+              ) : edgeQ.isLoading && !edgeQ.stationAvailability && !edgeQ.primary ? (
                 <span className="text-sm text-slate-500">Checking Pi heartbeat…</span>
-              ) : edgeQ.isError && !edgeQ.primary ? (
+              ) : edgeQ.isError && !edgeQ.stationAvailability && !edgeQ.primary ? (
                 <span className="text-sm text-slate-500">Status unavailable</span>
               ) : (
                 <div className="flex items-center justify-between gap-2">
-                  <StatusDot status={edgeQ.primary?.status} />
-                  <span className="text-[11px] text-slate-500">Live from Raspberry Pi</span>
+                  <StatusDot status={edgeQ.stationAvailability || edgeQ.primary?.status} />
+                  <span className="text-[11px] text-slate-500">
+                    {edgeQ.totalCount > 1
+                      ? `${edgeQ.onlineCount} of ${edgeQ.totalCount} Pis online`
+                      : 'Live from Raspberry Pi'}
+                  </span>
                 </div>
               )}
             </div>
@@ -308,6 +402,81 @@ export default function AdminStationEditPage() {
           Save station
         </button>
       </form>
+
+      <section className="card space-y-4 max-w-4xl">
+        <h2 className="text-white font-semibold">Unit price</h2>
+        <p className="text-sm text-slate-400">
+          <strong className="font-semibold text-slate-300">All PMS pumps</strong> sends one
+          price to every active PMS Pi and skips AGO. Pick a single pump to set that Pi only
+          (AGO e.g. Pump 8 for diesel). Controllers keep the last sale on the pump face until
+          the next lift; a queued price applies on the next idle/RESET (no Pi restart). Use
+          raw integers (1400 PMS / 1875 AGO).
+        </p>
+        {priceTarget === PRICE_TARGET_ALL_PMS && station?.commanded_unit_price_raw != null && (
+          <p className="text-sm text-emerald-300/90">
+            Last PMS station price: ₦{station.commanded_unit_price_raw}/L
+            {station.commanded_unit_price_at
+              ? ` at ${new Date(station.commanded_unit_price_at).toLocaleString()}`
+              : ''}
+          </p>
+        )}
+        {priceTarget !== PRICE_TARGET_ALL_PMS && selectedPump?.commanded_unit_price_raw != null && (
+          <p className="text-sm text-emerald-300/90">
+            Last price for this pump: ₦{selectedPump.commanded_unit_price_raw}/L
+            {selectedPump.commanded_unit_price_at
+              ? ` at ${new Date(selectedPump.commanded_unit_price_at).toLocaleString()}`
+              : ''}
+          </p>
+        )}
+        <form
+          className="flex flex-wrap items-end gap-3"
+          onSubmit={(e) => {
+            e.preventDefault()
+            setPriceMut.mutate()
+          }}
+        >
+          <label className="space-y-1">
+            <span className="label-text">Target</span>
+            <select
+              className="input min-w-[220px]"
+              value={priceTarget}
+              onChange={(e) => {
+                setPriceTarget(e.target.value)
+              }}
+            >
+              <option value={PRICE_TARGET_ALL_PMS}>All PMS pumps (exclude AGO)</option>
+              {activePumps.map((p) => {
+                const id = String(p.mqtt_pump_id || p.pump_code || '')
+                const label = p.name || `Pump ${p.pump_number ?? id}`
+                const product = String(p.product || 'PMS').toUpperCase()
+                return (
+                  <option key={id} value={id}>
+                    {label} · {product === 'AGO' ? 'AGO' : 'PMS only'} ({id})
+                  </option>
+                )
+              })}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="label-text">Unit price (raw)</span>
+            <input
+              className="input font-mono w-40"
+              inputMode="numeric"
+              value={priceRaw}
+              onChange={(e) => setPriceRaw(e.target.value)}
+              required
+            />
+          </label>
+          <button className="btn-primary" type="submit" disabled={setPriceMut.isPending}>
+            {setPriceMut.isPending
+              ? 'Sending…'
+              : priceTarget === PRICE_TARGET_ALL_PMS
+                ? 'Set PMS price'
+                : 'Set pump price'}
+          </button>
+        </form>
+        {priceMsg && <p className="text-sm text-slate-300">{priceMsg}</p>}
+      </section>
 
       <section className="card space-y-4">
         <h2 className="text-white font-semibold">Devices</h2>

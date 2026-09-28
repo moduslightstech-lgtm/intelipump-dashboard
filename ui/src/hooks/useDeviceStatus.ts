@@ -40,11 +40,27 @@ export function useStationEdgeDevices(stationKey?: string | null) {
   const deviceIds = devices.map((d) => d.deviceId)
   const primaryId = primary?.deviceId
 
-  const onlineCount = devices.filter((d) => d.status === 'ONLINE').length
-  const delayedCount = devices.filter((d) => d.status === 'DELAYED').length
-  const offlineCount = devices.filter((d) => d.status === 'OFFLINE').length
+  const onlineCount =
+    query.data?.onlineCount ?? devices.filter((d) => d.status === 'ONLINE').length
+  const delayedCount =
+    query.data?.delayedCount ?? devices.filter((d) => d.status === 'DELAYED').length
+  const offlineCount =
+    query.data?.offlineCount ?? devices.filter((d) => d.status === 'OFFLINE').length
   const neverCount = devices.filter((d) => d.status === 'NEVER_CONNECTED').length
   const unknownCount = devices.filter((d) => d.status === 'UNKNOWN').length
+
+  // Station-level status: ONLINE if any Pi is ONLINE (not devices[0] alone).
+  const stationAvailability =
+    query.data?.stationAvailability ||
+    (devices.length
+      ? devices.some((d) => d.status === 'ONLINE')
+        ? 'ONLINE'
+        : devices.some((d) => d.status === 'DELAYED')
+          ? 'DELAYED'
+          : devices.some((d) => d.status === 'OFFLINE')
+            ? 'OFFLINE'
+            : 'UNKNOWN'
+      : undefined)
 
   const notFound =
     query.error?.status === 404 ||
@@ -58,6 +74,7 @@ export function useStationEdgeDevices(stationKey?: string | null) {
     primaryId,
     devices,
     primary,
+    stationAvailability,
     onlineCount,
     delayedCount,
     offlineCount,

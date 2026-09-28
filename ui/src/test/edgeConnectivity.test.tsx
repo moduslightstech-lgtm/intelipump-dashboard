@@ -9,7 +9,42 @@ import {
 import { formatRelativeHeartbeat } from '../lib/relativeTime'
 import { DeviceApiError, fetchStationDevices, type StationDevicesSummary } from '../services/deviceApi'
 import type { EdgeDeviceStatus } from '../types/edgeDevice'
-import { parseEdgeDeviceStatus } from '../types/edgeDevice'
+import { parseEdgeDeviceStatus, aggregateStationAvailability } from '../types/edgeDevice'
+
+describe('aggregateStationAvailability', () => {
+  it('is ONLINE when any Pi is ONLINE', () => {
+    expect(aggregateStationAvailability(['OFFLINE', 'ONLINE', 'DELAYED'])).toBe('ONLINE')
+  })
+
+  it('is DELAYED when none online but one delayed', () => {
+    expect(aggregateStationAvailability(['OFFLINE', 'DELAYED'])).toBe('DELAYED')
+  })
+
+  it('is OFFLINE only when all are offline', () => {
+    expect(aggregateStationAvailability(['OFFLINE', 'OFFLINE'])).toBe('OFFLINE')
+  })
+})
+
+describe('edgeConnectivityLabel', () => {
+  it('shows RS485 down when online but serial closed', async () => {
+    const { edgeConnectivityLabel, edgeConnectivityTone } = await import('../types/edgeDevice')
+    expect(
+      edgeConnectivityLabel({
+        status: 'ONLINE',
+        serialPortOpen: false,
+        pumpCommunicationStatus: 'SERIAL_PORT_CLOSED',
+      }),
+    ).toBe('Online · RS485 down')
+    expect(
+      edgeConnectivityTone({
+        status: 'ONLINE',
+        serialPortOpen: false,
+        pumpCommunicationStatus: 'SERIAL_PORT_CLOSED',
+      }),
+    ).toBe('amber')
+  })
+})
+
 
 vi.mock('../services/deviceApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/deviceApi')>()
@@ -43,6 +78,13 @@ function status(partial: Partial<EdgeDeviceStatus> = {}): EdgeDeviceStatus {
 function summary(devices: EdgeDeviceStatus[], stationId = 'InteliPump-US-Lab'): StationDevicesSummary {
   return {
     stationId,
+    stationAvailability: devices.some((d) => d.status === 'ONLINE')
+      ? 'ONLINE'
+      : devices.some((d) => d.status === 'DELAYED')
+        ? 'DELAYED'
+        : devices.some((d) => d.status === 'OFFLINE')
+          ? 'OFFLINE'
+          : 'UNKNOWN',
     onlineCount: devices.filter((d) => d.status === 'ONLINE').length,
     delayedCount: devices.filter((d) => d.status === 'DELAYED').length,
     offlineCount: devices.filter((d) => d.status === 'OFFLINE').length,
@@ -125,11 +167,11 @@ describe('EdgeDeviceStatusDetailCard', () => {
   })
   afterEach(() => cleanup())
 
-  it('shows ONLINE detail with separate pump activity', async () => {
+  it('shows ONLINE detail with RS485 row', async () => {
     mockedFetchStationDevices.mockResolvedValue(summary([status({ status: 'ONLINE' })]))
     render(wrap(<EdgeDeviceStatusDetailCard stationId="InteliPump-US-Lab" />))
     expect(await screen.findByTestId('status-dot-online')).toBeInTheDocument()
-    expect(screen.getByText(/No recent transaction/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/RS485/i).length).toBeGreaterThan(0)
     expect(screen.getByText('InteliPump-Lab-pi-001')).toBeInTheDocument()
     expect(screen.getByText('raspberrypi')).toBeInTheDocument()
   })

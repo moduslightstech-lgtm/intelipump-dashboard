@@ -160,6 +160,13 @@ function navForRole(role: AppRole): NavItem[] {
   return ADMIN_NAV
 }
 
+function roleSubtitle(role: AppRole): string {
+  if (role === 'STATION_MANAGER') return 'Station Manager'
+  if (role === 'EXECUTIVE') return 'Executive'
+  if (role === 'SUPER_ADMIN') return 'Super Admin'
+  return 'Cloud Dashboard'
+}
+
 export default function Layout() {
   const { user, logout } = useAuth()
   const role = normalizeRole(user?.normalizedRole || user?.role)
@@ -176,13 +183,7 @@ export default function Layout() {
             </div>
             <div>
               <div className="text-sm font-bold leading-tight text-white">InteliPump</div>
-              <div className="text-xs text-slate-400">
-                {role === 'STATION_MANAGER'
-                  ? 'Station Manager'
-                  : role === 'EXECUTIVE'
-                    ? 'Executive'
-                    : 'Cloud Dashboard'}
-              </div>
+              <div className="text-xs text-slate-400">{roleSubtitle(role)}</div>
             </div>
           </div>
         </div>

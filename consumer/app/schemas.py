@@ -14,6 +14,7 @@ from app.phase9 import (
     LIVE_FILL_EVENTS,
     TRANSACTION_STARTED_EVENTS,
     event_type_of,
+    extract_phase9_pump_id,
     is_phase9_envelope,
     scaled_sale_fields,
 )
@@ -102,7 +103,7 @@ def normalize_transaction(
     # External station code — may be long strings like EnergySwitch-Ibadan-Boluwaji
     station_id = str(station_id).strip()
 
-    pump_id = _first(payload, "pumpId", "pump_id")
+    pump_id = _first(payload, "pumpId", "pump_id") or extract_phase9_pump_id(source_topic)
     if pump_id is None:
         return None, ValidationError("MISSING_PUMP_ID", "pumpId is required")
     # Preserve slash-containing pump IDs exactly (e.g. PUMP-05/06)
@@ -119,9 +120,11 @@ def normalize_transaction(
     if amount_err:
         return None, ValidationError("MISSING_AMOUNT", amount_err)
 
+    # Never derive unit price from amount/volume — rounding makes ₦/L drift.
+    # Missing price is filled from stations.commanded_unit_price_raw on persist.
     price_raw = _first(payload, "pricePerLiter", "price_per_liter")
-    if price_raw is None and volume is not None and volume > 0 and amount is not None:
-        price_per_liter = (amount / volume).quantize(Decimal("0.01"))
+    if price_raw is None:
+        price_per_liter = Decimal("0")
     else:
         price_per_liter, price_err = _as_decimal(price_raw, "pricePerLiter")
         if price_err:
@@ -194,7 +197,7 @@ def _normalize_phase9_transaction(
     if not station_id:
         return None, ValidationError("MISSING_STATION_ID", "stationId is required")
 
-    pump_id = fields["pump_id"]
+    pump_id = fields["pump_id"] or extract_phase9_pump_id(source_topic)
     if not pump_id:
         return None, ValidationError("MISSING_PUMP_ID", "pumpId is required")
 
@@ -212,9 +215,9 @@ def _normalize_phase9_transaction(
             "payload.raw_amount is required (scaled integer)",
         )
 
+    # Never derive unit price from amount/volume — use MQTT raw_unit_price, else
+    # stations.commanded_unit_price_raw on persist (admin SET_PRICE).
     price = fields["price"]
-    if price is None and volume > 0:
-        price = (amount / volume).quantize(Decimal("0.01"))
     event = event_type_of(payload)
     in_progress = event in LIVE_FILL_EVENTS
     # TRANSACTION_STARTED is published only after verified dispensing begins.
@@ -222,13 +225,7 @@ def _normalize_phase9_transaction(
     is_fill_complete = event in FILL_COMPLETE_EVENTS
     is_incident = event in INCIDENT_EVENTS
     if price is None:
-        if in_progress or verified_started or is_incident:
-            price = Decimal("0")
-        else:
-            return None, ValidationError(
-                "INVALID_PRICE",
-                "payload.raw_unit_price is required when volume is zero",
-            )
+        price = Decimal("0")
 
     started = _parse_timestamp(fields["started_at"])
     completed = None if (in_progress or verified_started) else _parse_timestamp(

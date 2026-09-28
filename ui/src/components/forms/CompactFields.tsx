@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react'
+import { useId, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react'
 
 type FieldProps = {
   label: string
@@ -10,15 +10,17 @@ type FieldProps = {
 
 export function CompactField({ label, htmlFor, error, className = '', children }: FieldProps) {
   return (
-    <label className={`block min-w-0 ${className}`} htmlFor={htmlFor}>
-      <span className="field-label">{label}</span>
+    <div className={`min-w-0 ${className}`}>
+      <label className="field-label" htmlFor={htmlFor}>
+        {label}
+      </label>
       {children}
       {error ? (
         <span className="mt-0.5 block text-[11px] text-red-300" role="alert">
           {error}
         </span>
       ) : null}
-    </label>
+    </div>
   )
 }
 
@@ -28,7 +30,8 @@ type InputProps = InputHTMLAttributes<HTMLInputElement> & {
 }
 
 export function CompactInput({ label, error, className = '', id, ...rest }: InputProps) {
-  const inputId = id || rest.name || undefined
+  const autoId = useId()
+  const inputId = id || rest.name || autoId
   return (
     <CompactField label={label} htmlFor={inputId} error={error}>
       <input id={inputId} className={`input-compact ${className}`} {...rest} />
@@ -42,7 +45,8 @@ type SelectProps = SelectHTMLAttributes<HTMLSelectElement> & {
 }
 
 export function CompactSelect({ label, error, className = '', id, children, ...rest }: SelectProps) {
-  const inputId = id || rest.name || undefined
+  const autoId = useId()
+  const inputId = id || rest.name || autoId
   return (
     <CompactField label={label} htmlFor={inputId} error={error}>
       <select id={inputId} className={`input-compact ${className}`} {...rest}>

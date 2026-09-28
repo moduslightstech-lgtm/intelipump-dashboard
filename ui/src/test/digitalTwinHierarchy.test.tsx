@@ -93,6 +93,17 @@ describe('nozzle display names', () => {
     expect(friendlyNozzleName({ name: 'pump-2', nozzleNumber: 2 }, 1)).toBe('Nozzle 2')
     expect(friendlyNozzleName({ name: 'Nozzle 1' }, 0)).toBe('Nozzle 1')
   })
+
+  it('uses station-wide hose numbers from physical pump number', () => {
+    expect(friendlyNozzleName({ parentPumpNumber: 1, nozzleNumber: 1 }, 0)).toBe('Nozzle 1')
+    expect(friendlyNozzleName({ parentPumpNumber: 1, nozzleNumber: 2 }, 1)).toBe('Nozzle 2')
+    expect(friendlyNozzleName({ parentPumpNumber: 2, nozzleNumber: 1, name: 'Nozzle 1' }, 0)).toBe(
+      'Nozzle 3',
+    )
+    expect(friendlyNozzleName({ parentPumpNumber: 2, nozzleNumber: 2 }, 1)).toBe('Nozzle 4')
+    expect(friendlyNozzleName({ pumpNumber: 6, nozzleNumber: 1 }, 0)).toBe('Nozzle 11')
+    expect(friendlyNozzleName({ pumpNumber: 6, nozzleNumber: 2 }, 1)).toBe('Nozzle 12')
+  })
 })
 
 describe('schematic viewport height', () => {

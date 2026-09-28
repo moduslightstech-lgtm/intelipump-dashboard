@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   fmtTime,
+  getStations,
   getTwinLiveState,
   putTwinLayout,
   resetTwinLayout,
@@ -17,12 +18,13 @@ import {
   fourTankTwelvePumpState,
 } from '../components/twin/schematic/fourByTwelveFixture'
 import type { LayoutPersist } from '../components/twin/schematic/types'
+import { canonicalTwinStationId, resolveAccessibleStation } from '../lib/twinStation'
 import {
   getTwinViewPreference,
   setTwinViewPreference,
   type TwinViewMode,
 } from '../lib/twinViewPreference'
-import { normalizeRole } from '../lib/roles'
+import { isAdmin, normalizeRole } from '../lib/roles'
 
 const BabylonStationTwin = lazy(() => import('../components/BabylonStationTwin'))
 
@@ -41,8 +43,8 @@ export default function DigitalTwinPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const { user } = useAuth()
-  const role = normalizeRole(user?.role)
-  const canEdit = role === 'ADMIN'
+  const role = normalizeRole(user?.normalizedRole || user?.role)
+  const canEdit = isAdmin(role)
 
   const [stationId, setStationId] = useState(
     () => routeStationId || localStorage.getItem(LAST_TWIN_KEY) || '',
@@ -57,14 +59,44 @@ export default function DigitalTwinPage() {
   const [layoutDirty, setLayoutDirty] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
 
-  useEffect(() => {
-    if (routeStationId) {
-      setStationId(routeStationId)
-      localStorage.setItem(LAST_TWIN_KEY, routeStationId)
-    }
-  }, [routeStationId])
+  const stationsQ = useQuery({
+    queryKey: ['stations'],
+    queryFn: async () => (await getStations()).data,
+  })
 
   const isFixture = stationId === FIXTURE_STATION_ID
+  const accessible = resolveAccessibleStation(stationsQ.data, routeStationId || stationId)
+  const canonicalId = accessible ? canonicalTwinStationId(accessible) : ''
+
+  useEffect(() => {
+    if (isFixture) return
+    if (!stationsQ.isSuccess) return
+    if (canonicalId && canonicalId !== stationId) {
+      setStationId(canonicalId)
+      if (accessible) setSelectedLabel(`${accessible.name} (${accessible.station_code})`)
+      localStorage.setItem(LAST_TWIN_KEY, canonicalId)
+      if (routeStationId !== canonicalId) {
+        navigate(`/digital-twin/${encodeURIComponent(canonicalId)}`, { replace: true })
+      }
+      return
+    }
+    if (!canonicalId && stationId) {
+      setStationId('')
+      setSelectedLabel('')
+      localStorage.removeItem(LAST_TWIN_KEY)
+      if (routeStationId) navigate('/digital-twin', { replace: true })
+    }
+  }, [
+    accessible,
+    canonicalId,
+    isFixture,
+    navigate,
+    routeStationId,
+    stationId,
+    stationsQ.isSuccess,
+  ])
+
+  const twinReady = isFixture || (!!canonicalId && canonicalId === stationId)
 
   const twinQ = useQuery({
     queryKey: ['twin', 'live-state', stationId, includeInactive],
@@ -72,8 +104,8 @@ export default function DigitalTwinPage() {
       if (isFixture) return fourTankTwelvePumpState()
       return (await getTwinLiveState(stationId, { touch: true, includeInactive })).data
     },
-    enabled: !!stationId,
-    refetchInterval: viewMode === 'operational' && !isFixture ? 45_000 : false,
+    enabled: twinReady,
+    refetchInterval: viewMode === 'operational' && !isFixture && twinReady ? 45_000 : false,
   })
 
   useEffect(() => {
@@ -297,11 +329,15 @@ export default function DigitalTwinPage() {
         )}
       </div>
 
-      {!stationId ? (
+      {!stationsQ.isSuccess && !isFixture ? (
+        <div className="card text-slate-400 text-sm text-center py-16">Loading stations…</div>
+      ) : !stationId ? (
         <div className="card text-slate-400 text-sm text-center py-16">
           Search for a station to open its Operational Twin. Works for hundreds of stations without
           a custom 3D scene.
         </div>
+      ) : !twinReady ? (
+        <div className="card text-slate-400 text-sm text-center py-16">Opening station…</div>
       ) : twinQ.isError ? (
         <div className="card border-red-800 text-red-300 text-sm space-y-3" role="alert">
           <p>Unable to load station twin API data.</p>

@@ -134,13 +134,27 @@ def test_invalid_json():
     assert err.error_type == "INVALID_JSON"
 
 
-def test_price_derived_when_missing():
+def test_price_not_derived_from_amount_when_missing():
+    """Unit price must come from MQTT or admin SET_PRICE — never amount÷volume."""
     payload = dict(VALID_PAYLOAD)
     del payload["pricePerLiter"]
     tx, err = normalize_transaction(payload)
     assert err is None
     assert tx is not None
-    assert tx.price_per_liter == Decimal("1193.03")
+    assert tx.price_per_liter == Decimal("0")
+
+
+def test_apply_admin_unit_price_from_station():
+    db, cur = _mock_db_with_cursor(fetchone_result=(1400,))
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    del payload["pricePerLiter"]
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    assert tx is not None
+    service._apply_admin_unit_price(tx)
+    assert tx.price_per_liter == Decimal("1400")
+    assert cur.execute.called
 
 
 def _mock_db_with_cursor(fetchone_result=None, execute_side_effect=None):

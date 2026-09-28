@@ -119,10 +119,10 @@ export default function AdminStationPumpsPage() {
         active: form.active,
         notes: form.notes || null,
       }
+      payload.product = form.product
       if (editing) {
         return (await updateAdminPump(editing.id, payload)).data
       }
-      payload.product = form.product
       payload.nozzle_count = form.nozzle_count ? Number(form.nozzle_count) : 0
       return (await createAdminStationPump(stationId, payload)).data
     },
@@ -289,22 +289,27 @@ export default function AdminStationPumpsPage() {
             />
             <span className="label-text">Active</span>
           </label>
+          <label className="space-y-1">
+            <span className="label-text">Product assignment</span>
+            <select
+              className="input"
+              value={form.product}
+              onChange={(e) => setForm({ ...form, product: e.target.value })}
+            >
+              {['PMS', 'AGO', 'DPK'].map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            {editing ? (
+              <span className="text-[11px] text-slate-500">
+                Updates all active nozzles on this pump (e.g. PMS → AGO).
+              </span>
+            ) : null}
+          </label>
           {!editing && (
             <>
-              <label className="space-y-1">
-                <span className="label-text">Product assignment</span>
-                <select
-                  className="input"
-                  value={form.product}
-                  onChange={(e) => setForm({ ...form, product: e.target.value })}
-                >
-                  {['PMS', 'AGO', 'DPK'].map((p) => (
-                    <option key={p} value={p}>
-                      {p}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label className="space-y-1">
                 <span className="label-text">Number of nozzles</span>
                 <input
@@ -584,6 +589,8 @@ function NozzleEditor({ pumpId, stationId }: { pumpId: string; stationId: string
                   onChange={async (e) => {
                     await updateAdminNozzle(n.id, { product: e.target.value })
                     nozzlesQ.refetch()
+                    qc.invalidateQueries({ queryKey: ['admin-station-pumps', stationId] })
+                    qc.invalidateQueries({ queryKey: ['twin'] })
                   }}
                 >
                   {['PMS', 'AGO', 'DPK', ''].map((p) => (

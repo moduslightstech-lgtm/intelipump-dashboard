@@ -6,9 +6,19 @@ import { MemoryRouter } from 'react-router-dom'
 vi.mock('../api/client', () => ({
   getAdminUsers: vi.fn(async () => ({ data: [] })),
   getStations: vi.fn(async () => ({ data: [] })),
+  getOrganizations: vi.fn(async () => ({ data: [] })),
   createAdminUser: vi.fn(),
+  updateAdminUser: vi.fn(),
   assignUserRole: vi.fn(),
   assignUserStations: vi.fn(),
+}))
+
+const authState = {
+  user: { email: 'admin@example.com', role: 'ADMIN', normalizedRole: 'ADMIN' as const, organizationId: null },
+}
+
+vi.mock('../context/AuthContext', () => ({
+  useAuth: () => authState,
 }))
 
 import UsersPage from '../pages/UsersPage'
@@ -26,6 +36,12 @@ function wrap(ui: React.ReactNode) {
 describe('UsersPage create user', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    authState.user = {
+      email: 'admin@example.com',
+      role: 'ADMIN',
+      normalizedRole: 'ADMIN',
+      organizationId: null,
+    }
   })
 
   it('shows an error when the password is shorter than 8 characters', async () => {
@@ -41,5 +57,27 @@ describe('UsersPage create user', () => {
       await screen.findByRole('alert'),
     ).toHaveTextContent('Password must be at least 8 characters.')
     expect(createAdminUser).not.toHaveBeenCalled()
+  })
+
+  it('hides Super Admin from company admins', async () => {
+    authState.user = {
+      email: 'admin@sao.ng',
+      role: 'ADMIN',
+      normalizedRole: 'ADMIN',
+      organizationId: 'org-sao',
+    }
+    render(wrap(<UsersPage />))
+    expect(screen.queryByRole('option', { name: /SUPER_ADMIN/ })).toBeNull()
+  })
+
+  it('lets Super Admin grant Super Admin', async () => {
+    authState.user = {
+      email: 'root@intelipump.com',
+      role: 'SUPER_ADMIN',
+      normalizedRole: 'SUPER_ADMIN',
+      organizationId: null,
+    }
+    render(wrap(<UsersPage />))
+    expect(await screen.findByRole('option', { name: /SUPER_ADMIN/ })).toBeInTheDocument()
   })
 })

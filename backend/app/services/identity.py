@@ -8,10 +8,27 @@ from __future__ import annotations
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import MqttIdentityMap, Nozzle, Pump, PumpTransaction, Station
+
+
+def station_alias_matches(requested: str, *candidates: str | None) -> bool:
+    """LAB-001 uniquely matches US-LAB-001; bare 001 does not."""
+    req = (requested or "").strip().upper()
+    if not req:
+        return False
+    allow_suffix = any(ch.isalpha() for ch in req)
+    for raw in candidates:
+        code = (raw or "").strip().upper()
+        if not code:
+            continue
+        if code == req:
+            return True
+        if allow_suffix and code.endswith("-" + req):
+            return True
+    return False
 
 
 def resolve_station_by_mqtt_external_id(db: Session, mqtt_station_id: str) -> Station | None:
@@ -36,7 +53,26 @@ def resolve_station_by_mqtt_external_id(db: Session, mqtt_station_id: str) -> St
         return db.get(Station, mapped)
 
     # 3) Fallback: station_code (legacy setups where they happened to match)
-    return db.scalar(select(Station).where(Station.station_code == text))
+    station = db.scalar(select(Station).where(Station.station_code == text))
+    if station is not None:
+        return station
+
+    # 4) Unique suffix: LAB-001 → US-LAB-001 (stale bookmarks / lastTwinStation)
+    pattern = f"%{text}"
+    rows = list(
+        db.scalars(
+            select(Station).where(
+                or_(
+                    Station.station_code.ilike(pattern),
+                    Station.mqtt_station_id.ilike(pattern),
+                )
+            )
+        ).all()
+    )
+    hits = [s for s in rows if station_alias_matches(text, s.station_code, s.mqtt_station_id)]
+    if len(hits) == 1:
+        return hits[0]
+    return None
 
 
 def resolve_pump_by_mqtt_external_id(
@@ -155,6 +191,30 @@ def mqtt_external_ids_for_station(station: Station) -> list[str]:
     return ids
 
 
+def ledger_station_match_clause(station: Station):
+    """Match ledger rows for a catalog station without cross-station UUID pollution.
+
+    Prefer MQTT / station_code text ids. ``station_uuid`` alone is accepted only when
+    the row's text ``station_id`` is null/blank or already one of this station's
+    externals — so a US Lab sale with a wrongly-set SAO ``station_uuid`` cannot
+    paint LAST SALE onto SAO.
+    """
+    from app.models import PumpTransaction
+
+    externals = mqtt_external_ids_for_station(station)
+    uuid_ok = and_(
+        PumpTransaction.station_uuid == station.id,
+        or_(
+            PumpTransaction.station_id.is_(None),
+            PumpTransaction.station_id == "",
+            *([PumpTransaction.station_id.in_(externals)] if externals else []),
+        ),
+    )
+    if externals:
+        return or_(PumpTransaction.station_id.in_(externals), uuid_ok)
+    return uuid_ok
+
+
 def mqtt_external_ids_for_pump(pump: Pump, db: Session | None = None) -> list[str]:
     ids: list[str] = []
     if pump.mqtt_pump_id:
@@ -231,11 +291,31 @@ def resolve_station(
 def ledger_station_clause(db: Session, station_id: str):
     """Match pump_transactions for a catalog station (MQTT id, code, or UUID)."""
     keys, uid = station_query_keys(db, station_id)
-    clauses = []
-    if keys:
-        clauses.append(PumpTransaction.station_id.in_(keys))
-    if uid is not None:
-        clauses.append(PumpTransaction.station_uuid == uid)
-    if not clauses:
+    if not keys and uid is None:
         return PumpTransaction.station_id == station_id
-    return or_(*clauses)
+
+    text_ok = PumpTransaction.station_id.in_(keys) if keys else None
+    uuid_ok = None
+    if uid is not None:
+        uuid_ok = and_(
+            PumpTransaction.station_uuid == uid,
+            or_(
+                PumpTransaction.station_id.is_(None),
+                PumpTransaction.station_id == "",
+                *([PumpTransaction.station_id.in_(keys)] if keys else []),
+            ),
+        )
+    if text_ok is not None and uuid_ok is not None:
+        return or_(text_ok, uuid_ok)
+    return text_ok if text_ok is not None else uuid_ok
+
+
+def ledger_stations_clause(db: Session, stations: list[Station]):
+    """OR of ledger_station_clause for each catalog station. Matches nothing if empty."""
+    if not stations:
+        return false()
+    parts = [
+        ledger_station_clause(db, station.station_code or station.mqtt_station_id or str(station.id))
+        for station in stations
+    ]
+    return or_(*parts)

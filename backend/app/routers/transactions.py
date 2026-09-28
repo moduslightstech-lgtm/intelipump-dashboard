@@ -5,26 +5,28 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import PumpTransaction, User
+from app.models import PumpTransaction, Station, User
 from app.schemas import PaginatedTransactions, TransactionOut
 from app.security import get_current_user
-from app.services.identity import ledger_station_clause
+from app.services.identity import ledger_station_clause, resolve_station
+from app.services.rbac import assert_station_access, is_platform_operator, scoped_ledger_clause
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
 _STATUS_LABELS = {
     "COMPLETED": "Complete",
+    "COMPLETE": "Complete",
     "DISPENSING": "Dispensing",
     "IN_PROGRESS": "In progress",
     "PENDING": "Pending",
@@ -32,6 +34,34 @@ _STATUS_LABELS = {
     "FAILED": "Failed",
     "SALE_COMPLETED": "Sale complete",
 }
+
+# Match Executive Overview / Digital Twin inclusion policy for sales KPIs.
+_COMPLETED_STATUSES = ("COMPLETED", "COMPLETE")
+
+
+def _tx_time_col():
+    return func.coalesce(
+        PumpTransaction.transaction_completed_at,
+        PumpTransaction.device_timestamp,
+        PumpTransaction.received_at,
+        PumpTransaction.created_at,
+    )
+
+
+def _status_clause(status: Optional[str]):
+    """Default (empty) and COMPLETED → completed sales only, same as Exec/Twin.
+
+    Pass status=ALL (or *) to browse every ledger status.
+    """
+    key = (status or "").strip().upper()
+    if key in {"", "COMPLETED", "COMPLETE"}:
+        return and_(
+            func.upper(func.coalesce(PumpTransaction.status, "")).in_(_COMPLETED_STATUSES),
+            PumpTransaction.amount.is_not(None),
+        )
+    if key in {"ALL", "*"}:
+        return None
+    return func.upper(func.coalesce(PumpTransaction.status, "")) == key
 
 
 def _parse_hhmm(raw: Optional[str]) -> Optional[time]:
@@ -100,7 +130,16 @@ def resolve_query_window(
         end_utc = _local_bound(day_to, end_clock, tz_name, end_of_minute=end_of_minute or not to_time)
         if start_utc > end_utc:
             raise HTTPException(status_code=400, detail="The selected time range is invalid")
+        # "Today" / open-ended windows match Exec/Twin: count only through now.
+        now_utc = datetime.now(dt_timezone.utc)
+        if end_utc > now_utc:
+            end_utc = now_utc
         return start_utc, end_utc
+    if end is not None:
+        now_utc = datetime.now(dt_timezone.utc)
+        end_aware = end if end.tzinfo is not None else end.replace(tzinfo=dt_timezone.utc)
+        if end_aware > now_utc:
+            end = now_utc
     return start, end
 
 
@@ -118,23 +157,23 @@ def _base_query(
     max_amount: Optional[Decimal] = None,
     min_unit_price: Optional[Decimal] = None,
     max_unit_price: Optional[Decimal] = None,
+    station_clause=None,
 ):
     stmt = select(PumpTransaction)
-    if station_id:
+    if station_clause is not None:
+        stmt = stmt.where(station_clause)
+    elif station_id:
         stmt = stmt.where(ledger_station_clause(db, station_id))
     if pump_id:
         stmt = stmt.where(PumpTransaction.pump_id == pump_id)
     if product:
         stmt = stmt.where(func.upper(PumpTransaction.product) == product.upper())
-    if status:
-        stmt = stmt.where(func.upper(PumpTransaction.status) == status.upper())
+    status_filter = _status_clause(status)
+    if status_filter is not None:
+        stmt = stmt.where(status_filter)
     if q:
         stmt = stmt.where(PumpTransaction.id.ilike(f"%{q}%"))
-    time_col = func.coalesce(
-        PumpTransaction.transaction_completed_at,
-        PumpTransaction.device_timestamp,
-        PumpTransaction.received_at,
-    )
+    time_col = _tx_time_col()
     if start:
         stmt = stmt.where(time_col >= start)
     if end:
@@ -185,6 +224,51 @@ def _status_label(raw: Optional[str]) -> str:
     return key.replace("_", " ").title()
 
 
+def _commanded_unit_price_map(db: Session, rows: list[PumpTransaction]) -> dict[str, Decimal]:
+    """Map station UUID / mqtt id / station_code → admin SET_PRICE face ₦/L."""
+    if not rows:
+        return {}
+    uuids = {r.station_uuid for r in rows if r.station_uuid is not None}
+    texts = {str(r.station_id).strip() for r in rows if r.station_id}
+    stations: list[Station] = []
+    if uuids:
+        stations.extend(db.scalars(select(Station).where(Station.id.in_(uuids))).all())
+    if texts:
+        stations.extend(
+            db.scalars(
+                select(Station).where(
+                    (Station.mqtt_station_id.in_(texts)) | (Station.station_code.in_(texts))
+                )
+            ).all()
+        )
+    out: dict[str, Decimal] = {}
+    for s in stations:
+        if s.commanded_unit_price_raw is None or s.commanded_unit_price_raw <= 0:
+            continue
+        price = Decimal(int(s.commanded_unit_price_raw))
+        out[str(s.id)] = price
+        if s.mqtt_station_id:
+            out[s.mqtt_station_id] = price
+        if s.station_code:
+            out[s.station_code] = price
+    return out
+
+
+def _transaction_out_with_admin_price(
+    row: PumpTransaction, commanded: dict[str, Decimal]
+) -> TransactionOut:
+    """Unit price is the admin station price when set — never amount÷volume."""
+    out = TransactionOut.model_validate(row)
+    for key in (
+        str(row.station_uuid) if row.station_uuid is not None else None,
+        row.station_id,
+    ):
+        if key and key in commanded:
+            out.price_per_liter = commanded[key]
+            break
+    return out
+
+
 @router.get("", response_model=PaginatedTransactions)
 def list_transactions(
     station_id: Optional[str] = None,
@@ -207,7 +291,7 @@ def list_transactions(
     size: int = Query(20, ge=1, le=200),
     sort: str = Query("received_at,desc"),
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> PaginatedTransactions:
     window_start, window_end = resolve_query_window(
         start=start,
@@ -234,6 +318,7 @@ def list_transactions(
         max_amount=hi_amt,
         min_unit_price=lo_price,
         max_unit_price=hi_price,
+        station_clause=scoped_ledger_clause(db, user, station_id),
     )
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     total_amount, total_volume, average_amount = _aggregates(db, stmt)
@@ -242,8 +327,9 @@ def list_transactions(
     col = getattr(PumpTransaction, sort_field, PumpTransaction.received_at)
     order = col.desc() if direction.lower() != "asc" else col.asc()
     rows = db.scalars(stmt.order_by(order).offset((page - 1) * size).limit(size)).all()
+    commanded = _commanded_unit_price_map(db, list(rows))
     return PaginatedTransactions(
-        items=[TransactionOut.model_validate(r) for r in rows],
+        items=[_transaction_out_with_admin_price(r, commanded) for r in rows],
         total=int(total),
         page=page,
         size=size,
@@ -272,7 +358,7 @@ def export_transactions(
     min_unit_price: Optional[str] = None,
     max_unit_price: Optional[str] = None,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     window_start, window_end = resolve_query_window(
         start=start,
@@ -299,8 +385,10 @@ def export_transactions(
         max_amount=hi_amt,
         min_unit_price=lo_price,
         max_unit_price=hi_price,
+        station_clause=scoped_ledger_clause(db, user, station_id),
     ).order_by(PumpTransaction.received_at.desc())
     rows = db.scalars(stmt).all()
+    commanded = _commanded_unit_price_map(db, list(rows))
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -322,21 +410,22 @@ def export_transactions(
         ]
     )
     for t in rows:
+        out = _transaction_out_with_admin_price(t, commanded)
         writer.writerow(
             [
-                t.id,
-                t.station_id,
-                t.device_id,
-                t.pump_id,
-                t.nozzle_id,
-                t.product,
-                t.volume_liters,
-                t.amount,
-                t.currency,
-                t.price_per_liter,
-                _status_label(t.status),
-                t.device_timestamp,
-                t.received_at,
+                out.id,
+                out.station_id,
+                out.device_id,
+                out.pump_id,
+                out.nozzle_id,
+                out.product,
+                out.volume_liters,
+                out.amount,
+                out.currency,
+                out.price_per_liter,
+                _status_label(out.status),
+                out.device_timestamp,
+                out.received_at,
             ]
         )
     buf.seek(0)
@@ -351,9 +440,16 @@ def export_transactions(
 def get_transaction(
     transaction_id: str,
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> TransactionOut:
     tx = db.get(PumpTransaction, transaction_id)
     if tx is None:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    return TransactionOut.model_validate(tx)
+    station = resolve_station(db, tx.station_id)
+    if station is None:
+        if not is_platform_operator(user):
+            raise HTTPException(status_code=404, detail="Transaction not found")
+    else:
+        assert_station_access(db, user, station.id)
+    commanded = _commanded_unit_price_map(db, [tx])
+    return _transaction_out_with_admin_price(tx, commanded)

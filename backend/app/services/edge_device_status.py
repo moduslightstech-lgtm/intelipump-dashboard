@@ -127,8 +127,12 @@ def aggregate_station_availability(device_statuses: list[str]) -> str:
 def pump_communication_label(status: str) -> str:
     mapping = {
         "ACTIVE": "Active",
+        "IDLE": "Idle",
         "NO_RECENT_TRANSACTION": "No recent transaction",
         "NO_TRANSACTION": "No transaction recorded",
+        "SERIAL_PORT_CLOSED": "RS485 down",
+        "NO_SERIAL_DATA": "No pump data",
+        "DEVICE_OFFLINE": "Device offline",
     }
     return mapping.get(status, status.replace("_", " ").title())
 

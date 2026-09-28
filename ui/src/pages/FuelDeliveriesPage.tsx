@@ -14,7 +14,7 @@ import {
 } from '../api/client'
 import { useAuth } from '../context/AuthContext'
 import { formatStatusLabel } from '../lib/enumPresentation'
-import { normalizeRole } from '../lib/roles'
+import { isAdmin, normalizeRole } from '../lib/roles'
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10)
@@ -34,7 +34,7 @@ export default function FuelDeliveriesPage() {
   const qc = useQueryClient()
   const { user } = useAuth()
   const role = normalizeRole(user?.normalizedRole || user?.role)
-  const canWrite = role === 'ADMIN' || role === 'STATION_MANAGER'
+  const canWrite = isAdmin(role) || role === 'STATION_MANAGER'
 
   const stationsQ = useQuery({
     queryKey: ['sm', 'stations'],

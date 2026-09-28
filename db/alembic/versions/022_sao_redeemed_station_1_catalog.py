@@ -191,6 +191,53 @@ def upgrade() -> None:
             """
         )
 
+    # Day-1 PMS tank + nozzle connections (clears schematic "Unconnected").
+    op.execute(
+        f"""
+        INSERT INTO tanks (
+            station_id, tank_code, name, product, capacity_liters,
+            status, current_measurement_source, active
+        )
+        SELECT
+            s.id, 'TANK-PMS-01', 'PMS Tank 1', 'PMS', 45000,
+            'ACTIVE', 'MANUAL', TRUE
+        FROM stations s
+        WHERE (s.mqtt_station_id = '{MQTT_STATION}' OR s.station_code = '{STATION_CODE}')
+          AND NOT EXISTS (
+            SELECT 1 FROM tanks t
+            WHERE t.station_id = s.id AND t.tank_code = 'TANK-PMS-01'
+          )
+        """
+    )
+    op.execute(
+        f"""
+        INSERT INTO tank_pump_connections (
+            station_id, tank_id, pump_id, nozzle_id, product,
+            line_label, active, is_primary, display_order
+        )
+        SELECT
+            s.id, t.id, p.id, n.id, 'PMS',
+            'PMS → Pump 1 Nozzle ' || n.nozzle_number::text,
+            TRUE,
+            (n.nozzle_number = 1),
+            n.nozzle_number
+        FROM stations s
+        JOIN tanks t ON t.station_id = s.id AND t.tank_code = 'TANK-PMS-01'
+        JOIN pumps p ON p.station_id = s.id
+          AND (p.mqtt_pump_id = '{PUMP_CODE}' OR p.pump_code = '{PUMP_CODE}')
+        JOIN nozzles n ON n.pump_id = p.id
+          AND n.mqtt_nozzle_id IN ('nozzle-1', 'nozzle-2')
+        WHERE (s.mqtt_station_id = '{MQTT_STATION}' OR s.station_code = '{STATION_CODE}')
+          AND NOT EXISTS (
+            SELECT 1 FROM tank_pump_connections c
+            WHERE c.station_id = s.id
+              AND c.tank_id = t.id
+              AND c.pump_id = p.id
+              AND c.nozzle_id = n.id
+          )
+        """
+    )
+
 
 def downgrade() -> None:
     # Keep catalog rows; station may already have live transactions.

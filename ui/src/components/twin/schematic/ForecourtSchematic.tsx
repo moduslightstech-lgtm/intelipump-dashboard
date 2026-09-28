@@ -374,6 +374,9 @@ function ForecourtSchematicInner({
     const allowRelayout = previewAuto || !isCustom
     if (!metricsGrew(metricsRef.current, measured) || !allowRelayout || editMode) return true
     metricsRef.current = measured
+    // Relayout changes equipment size — force a fresh fit so the default view
+    // matches "Reset view" instead of staying at the premature zoom.
+    fitKeyRef.current = ''
     setBoxes(buildForecourtNodes(state, { viewportWidth, metrics: measured }))
     return false
   }, [editMode, flow, isCustom, previewAuto, state, viewportWidth])
@@ -392,33 +395,50 @@ function ForecourtSchematicInner({
     [flow],
   )
 
+  /** Same framing as Reset view; waits until tank/island nodes have measured size. */
+  const tryInitialFit = useCallback(() => {
+    if (fitKeyRef.current === topo) return true
+    const equipment = flow.getNodes().filter((n) => n.type === 'tank' || n.type === 'island')
+    if (!equipment.length) return false
+    const dimsOk = equipment.every(
+      (n) => (n.measured?.width || 0) > 0 && (n.measured?.height || 0) > 0,
+    )
+    if (!dimsOk) return false
+    fitAll()
+    fitKeyRef.current = topo
+    return true
+  }, [flow, fitAll, topo])
+
   useEffect(() => {
     let cancelled = false
-    const frame = window.requestAnimationFrame(() => {
+    let attempts = 0
+    const maxAttempts = 30
+
+    const tick = () => {
+      if (cancelled) return
       flow.getNodes().forEach((n) => updateNodeInternals(n.id))
-      window.requestAnimationFrame(() => {
-        if (cancelled) return
-        const ready = applyMeasuredLayout()
-        if (ready && fitKeyRef.current !== topo) {
-          fitKeyRef.current = topo
-          fitAll()
-        }
-      })
-    })
+      const ready = applyMeasuredLayout()
+      if (ready && tryInitialFit()) return
+      attempts += 1
+      if (attempts < maxAttempts) window.requestAnimationFrame(tick)
+    }
+
+    const frame = window.requestAnimationFrame(tick)
     return () => {
       cancelled = true
       window.cancelAnimationFrame(frame)
     }
-  }, [applyMeasuredLayout, fitAll, flow, topo, updateNodeInternals, positionKey])
+  }, [applyMeasuredLayout, tryInitialFit, flow, topo, updateNodeInternals, positionKey])
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
       if (!changes.some((c) => c.type === 'dimensions')) return
       window.requestAnimationFrame(() => {
         applyMeasuredLayout()
+        tryInitialFit()
       })
     },
-    [applyMeasuredLayout],
+    [applyMeasuredLayout, tryInitialFit],
   )
 
   const onNodeClick = useCallback(
@@ -640,6 +660,12 @@ function ForecourtSchematicInner({
             edges={rfEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
+            onInit={() => {
+              window.requestAnimationFrame(() => {
+                applyMeasuredLayout()
+                tryInitialFit()
+              })
+            }}
             onNodesChange={onNodesChange}
             onNodeClick={onNodeClick}
             onEdgeClick={onEdgeClick}

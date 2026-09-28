@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { fmtLiters } from '../../../../api/client'
+import { productPipeColor } from '../../pipe/pipeTheme'
 import { TANK_HEADER_H, TANK_OUTLET_Y } from '../constants'
 import { formatAge, isReadingStale, readingSourceLabel } from '../display'
 import { tankFillPercent, tankLevelKind } from '../tankFill'
@@ -24,6 +25,7 @@ function TankSchematicNode({ data, selected }: NodeProps) {
   const level = tankLevelKind(fill, status)
   const fault = status.includes('FAULT') || status.includes('SENSOR') || status.includes('ERROR')
   const label = `${node.label}, ${node.product || 'unmapped'}, ${Math.round(fill)} percent full, ${status}`
+  const outletColor = productPipeColor(node.product)
   const [reducedMotion, setReducedMotion] = useState(false)
 
   useEffect(() => {
@@ -103,8 +105,16 @@ function TankSchematicNode({ data, selected }: NodeProps) {
         type="source"
         position={Position.Bottom}
         id="out"
-        style={{ top: TANK_OUTLET_Y, left: '50%', bottom: 'auto', transform: 'translate(-50%, -40%)' }}
-        className="!h-2.5 !w-2.5 !border-slate-200 !bg-slate-100"
+        style={{
+          top: TANK_OUTLET_Y,
+          left: '50%',
+          bottom: 'auto',
+          transform: 'translate(-50%, -40%)',
+          background: outletColor,
+          borderColor: outletColor,
+          boxShadow: `0 0 0 2px rgba(2, 6, 23, 0.9), 0 0 8px ${outletColor}`,
+        }}
+        className="!h-2.5 !w-2.5 !border-2"
       />
     </div>
   )

@@ -32,7 +32,9 @@ export default function AdminStationLayout() {
     },
     new Date(),
   )
-  const liveConn = edgeQ.hasMapping ? mapEdgeToConnectivityStatus(edgeQ.primary?.status) : 'UNKNOWN'
+  const liveConn = edgeQ.hasMapping
+    ? mapEdgeToConnectivityStatus(edgeQ.stationAvailability || edgeQ.primary?.status)
+    : 'UNKNOWN'
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-7xl">
