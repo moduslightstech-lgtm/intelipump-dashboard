@@ -1,4 +1,9 @@
-"""MQTT client with reconnect, QoS subscribe, and graceful shutdown."""
+"""MQTT client with reconnect, QoS subscribe, and graceful shutdown.
+
+QoS 1 PUBACK is sent by paho only after on_message returns successfully.
+RecoverableDeliveryError (and any other exception) must propagate so the
+broker does not treat an undelivered Postgres write as acknowledged.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ from typing import Callable, Optional
 import paho.mqtt.client as mqtt
 
 from app.config import Settings
+from app.services.sale_delivery_outbox import RecoverableDeliveryError
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +26,12 @@ class MqttClient:
         self._settings = settings
         self._on_message = on_message
         self._stop = threading.Event()
+        # Persistent session so unacked QoS1 messages are redelivered after reconnect.
         # Callback API v1 for broad paho-mqtt compatibility
-        self._client = mqtt.Client(client_id="intelipump-consumer", clean_session=True)
+        self._client = mqtt.Client(
+            client_id="intelipump-consumer",
+            clean_session=False,
+        )
         self._client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
         self._client.reconnect_delay_set(min_delay=1, max_delay=60)
         self._client.on_connect = self._handle_connect
@@ -54,8 +64,19 @@ class MqttClient:
     def _handle_message(self, client, userdata, msg):  # noqa: ANN001
         try:
             self._on_message(msg.topic, msg.payload, msg.qos, bool(msg.retain))
+        except RecoverableDeliveryError:
+            # Do not PUBACK — broker / local outbox will redeliver.
+            logger.error(
+                "Withholding MQTT PUBACK; sale not durable in PostgreSQL topic=%s",
+                msg.topic,
+            )
+            raise
         except Exception:
-            logger.exception("Unhandled error in MQTT message callback topic=%s", msg.topic)
+            logger.exception(
+                "Unhandled error in MQTT message callback topic=%s; withholding PUBACK",
+                msg.topic,
+            )
+            raise
 
     def start(self) -> None:
         logger.info(

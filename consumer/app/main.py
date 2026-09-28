@@ -276,6 +276,15 @@ class ConsumerApp:
                     )
             except Exception:
                 logger.exception("Edge device status evaluation failed")
+            try:
+                recovered = self.service.replay_pending_deliveries()
+                if recovered:
+                    logger.info(
+                        "Recovered %s pending sale delivery(ies) after connectivity return",
+                        recovered,
+                    )
+            except Exception:
+                logger.exception("Pending sale delivery replay failed")
 
     def run(self) -> None:
         configure_logging()
@@ -286,6 +295,14 @@ class ConsumerApp:
             target=self._timeout_loop, name="heartbeat-timeout", daemon=True
         )
         self._timeout_thread.start()
+        try:
+            recovered = self.service.replay_pending_deliveries()
+            if recovered:
+                logger.info(
+                    "Startup recovered %s pending sale delivery(ies)", recovered
+                )
+        except Exception:
+            logger.exception("Startup pending sale replay failed")
         self.mqtt = MqttClient(self.settings, self.handle_message)
 
         def _shutdown(signum, frame):  # noqa: ANN001

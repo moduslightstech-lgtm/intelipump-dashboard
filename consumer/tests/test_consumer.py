@@ -6,6 +6,8 @@ import json
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.models import ValidationError
 from app.schemas import normalize_transaction, parse_json_payload
 from app.services.transaction_service import TransactionService
@@ -341,12 +343,18 @@ def test_rejected_message_insertion_on_missing_id():
     assert "rejected_messages" in sql
 
 
-def test_postgres_failure_returns_error():
+def test_postgres_failure_raises_recoverable_and_spills(tmp_path):
+    from app.services.sale_delivery_outbox import (
+        RecoverableDeliveryError,
+        SaleDeliveryOutbox,
+    )
+
     class Boom(Exception):
         pgcode = "08006"
 
+    outbox = SaleDeliveryOutbox(tmp_path / "outbox.jsonl")
     db, cur = _mock_db_with_cursor()
-    service = TransactionService(db)
+    service = TransactionService(db, delivery_outbox=outbox)
     tx, _ = normalize_transaction(VALID_PAYLOAD, source_topic="t")
 
     calls = {"n": 0}
@@ -360,16 +368,17 @@ def test_postgres_failure_returns_error():
     cur.execute.side_effect = execute_side_effect
     cur.fetchone.return_value = None
 
-    status = service.process_message(
-        topic="t",
-        raw_payload=json.dumps(VALID_PAYLOAD).encode(),
-        qos=1,
-        retained=False,
-        payload=VALID_PAYLOAD,
-        transaction=tx,
-        validation_error=None,
-    )
-    assert status == "error"
+    with pytest.raises(RecoverableDeliveryError):
+        service.process_message(
+            topic="t",
+            raw_payload=json.dumps(VALID_PAYLOAD).encode(),
+            qos=1,
+            retained=False,
+            payload=VALID_PAYLOAD,
+            transaction=tx,
+            validation_error=None,
+        )
+    assert outbox.pending_count() >= 1
 
 
 def test_reconnect_delay_configured_on_mqtt_client():

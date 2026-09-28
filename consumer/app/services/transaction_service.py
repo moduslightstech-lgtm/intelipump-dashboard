@@ -18,6 +18,12 @@ from app.services.nozzle_identity import (
     live_debug_enabled,
     load_nozzle_catalog,
 )
+from app.services.sale_delivery_outbox import (
+    RecoverableDeliveryError,
+    SaleDeliveryOutbox,
+    default_outbox_path,
+    sale_identity_from_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +31,14 @@ _HANGUP_DUP_WINDOW = timedelta(seconds=120)
 
 
 class TransactionService:
-    def __init__(self, db: Database) -> None:
+    def __init__(
+        self,
+        db: Database,
+        *,
+        delivery_outbox: Optional[SaleDeliveryOutbox] = None,
+    ) -> None:
         self._db = db
+        self._delivery_outbox = delivery_outbox or SaleDeliveryOutbox(default_outbox_path())
 
     def process_message(
         self,
@@ -129,26 +141,79 @@ class TransactionService:
                 transaction.station_id,
                 transaction.pump_id,
             )
+            self._delivery_outbox.mark_done(
+                sale_identity_from_payload(
+                    json_payload if isinstance(json_payload, dict) else payload,
+                    topic,
+                )
+            )
             return status
         except Exception as exc:
             logger.exception("PostgreSQL failure while saving transaction")
-            self._save_rejected(
-                topic=topic,
-                payload=json_payload,
-                error=ValidationError("POSTGRES_ERROR", str(exc)),
-                received_at=received_at,
+            identity = sale_identity_from_payload(
+                json_payload if isinstance(json_payload, dict) else payload,
+                topic,
             )
-            self._save_mqtt_message(
-                topic=topic,
-                payload=json_payload,
-                qos=qos,
-                retained=retained,
-                status="error",
-                transaction_id=transaction.transaction_id,
-                error_message=str(exc),
-                received_at=received_at,
-            )
-            return "error"
+            # Hold locally so recovery is possible even if MQTT session is lost.
+            try:
+                self._delivery_outbox.upsert(
+                    identity_key=identity,
+                    topic=topic,
+                    qos=qos,
+                    retained=retained,
+                    payload=json_payload if isinstance(json_payload, dict) else {"_raw": str(json_payload)},
+                    raw_payload=raw_payload,
+                )
+            except Exception:
+                logger.exception("Failed to spill sale to local delivery outbox")
+            # Do not confuse broker ACK with DB commit — withhold PUBACK.
+            raise RecoverableDeliveryError(
+                f"postgres_unavailable transactionId={transaction.transaction_id}"
+            ) from exc
+
+    def replay_pending_deliveries(self) -> int:
+        """Retry local outbox after PostgreSQL returns. Idempotent inserts."""
+        pending = self._delivery_outbox.list_pending()
+        if not pending:
+            return 0
+        from app.schemas import normalize_transaction
+
+        recovered = 0
+        for item in pending:
+            try:
+                raw = item.raw_utf8.encode("utf-8")
+                transaction, validation_error = normalize_transaction(
+                    item.payload, source_topic=item.topic
+                )
+                status = self.process_message(
+                    topic=item.topic,
+                    raw_payload=raw,
+                    qos=item.qos,
+                    retained=item.retained,
+                    payload=item.payload,
+                    transaction=transaction,
+                    validation_error=validation_error,
+                )
+                if status in {"processed", "duplicate", "rejected", "processed_incident"}:
+                    self._delivery_outbox.mark_done(item.identity_key)
+                    recovered += 1
+                    logger.info(
+                        "Replayed pending sale delivery identity=%s status=%s",
+                        item.identity_key,
+                        status,
+                    )
+            except RecoverableDeliveryError:
+                logger.warning(
+                    "Pending sale replay still blocked by PostgreSQL identity=%s",
+                    item.identity_key,
+                )
+                break
+            except Exception:
+                logger.exception(
+                    "Pending sale replay failed identity=%s", item.identity_key
+                )
+                break
+        return recovered
 
     def _lookup_commanded_unit_price(self, cur, mqtt_station_id: str) -> Optional[Decimal]:
         """Admin SET_PRICE face naira (1400 = ₦1400/L)."""
