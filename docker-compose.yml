@@ -56,6 +56,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Persistent sale-delivery outbox (survives container replace; never /tmp).
+      INTELIPUMP_SALE_OUTBOX_PATH: /var/lib/intelipump/sale_delivery_outbox.jsonl
+    volumes:
+      - consumer_sale_outbox:/var/lib/intelipump
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,3 +150,6 @@ services:
         condition: service_healthy
       dashboard:
         condition: service_started
+volumes:
+  # Durable MQTT→Postgres sale hold; must survive consumer container replacement.
+  consumer_sale_outbox:
