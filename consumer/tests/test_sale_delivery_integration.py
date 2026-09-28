@@ -274,11 +274,32 @@ def test_undurable_sale_withholds_broker_ack(allow_tmp, tmp_path: Path) -> None:
 
 
 def _live_postgres_dsn() -> dict[str, str] | None:
-    host = os.environ.get("INTELIPUMP_TEST_POSTGRES_HOST", "127.0.0.1").strip()
-    port = os.environ.get("INTELIPUMP_TEST_POSTGRES_PORT", "5433").strip()
-    db = os.environ.get("INTELIPUMP_TEST_POSTGRES_DB", "").strip()
-    user = os.environ.get("INTELIPUMP_TEST_POSTGRES_USER", "").strip()
-    password = os.environ.get("INTELIPUMP_TEST_POSTGRES_PASSWORD", "").strip()
+    """Resolve live PG settings from INTELIPUMP_TEST_* or POSTGRES_* env."""
+    host = (
+        os.environ.get("INTELIPUMP_TEST_POSTGRES_HOST")
+        or os.environ.get("POSTGRES_HOST")
+        or "127.0.0.1"
+    ).strip()
+    port = (
+        os.environ.get("INTELIPUMP_TEST_POSTGRES_PORT")
+        or os.environ.get("POSTGRES_PORT")
+        or "5433"
+    ).strip()
+    db = (
+        os.environ.get("INTELIPUMP_TEST_POSTGRES_DB")
+        or os.environ.get("POSTGRES_DB")
+        or ""
+    ).strip()
+    user = (
+        os.environ.get("INTELIPUMP_TEST_POSTGRES_USER")
+        or os.environ.get("POSTGRES_USER")
+        or ""
+    ).strip()
+    password = (
+        os.environ.get("INTELIPUMP_TEST_POSTGRES_PASSWORD")
+        or os.environ.get("POSTGRES_PASSWORD")
+        or ""
+    ).strip()
     if not (db and user and password):
         return None
     return {
@@ -293,16 +314,14 @@ def _live_postgres_dsn() -> dict[str, str] | None:
 def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> None:
     """Live PostgreSQL: outage → durable outbox → recovery insert once → duplicate ignored.
 
-    Requires INTELIPUMP_TEST_POSTGRES_DB/USER/PASSWORD (optional HOST/PORT, default
-    127.0.0.1:5433 matching docker-compose.override.yml). Skips when unavailable.
+    Skips only when PostgreSQL is not configured or not reachable.
+    Once configured and connected, recovery/dedupe failures fail the test.
     """
     dsn = _live_postgres_dsn()
     if dsn is None:
         pytest.skip(
             "real PostgreSQL outage/recovery test cannot run: set "
-            "INTELIPUMP_TEST_POSTGRES_DB, INTELIPUMP_TEST_POSTGRES_USER, and "
-            "INTELIPUMP_TEST_POSTGRES_PASSWORD (and ensure Postgres is reachable, "
-            "e.g. docker-compose.override.yml publishes 127.0.0.1:5433)"
+            "POSTGRES_DB/USER/PASSWORD (or INTELIPUMP_TEST_POSTGRES_*)"
         )
 
     psycopg2 = pytest.importorskip("psycopg2")
@@ -316,7 +335,7 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
             connect_timeout=3,
         )
     except Exception as exc:
-        pytest.skip(f"real PostgreSQL not reachable: {exc}")
+        pytest.skip(f"real PostgreSQL not reachable at {dsn['host']}:{dsn['port']}: {exc}")
 
     tx_id = str(uuid.uuid4())
     sale = json.loads(json.dumps(COMPLETED_SALE))
@@ -348,15 +367,17 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
         db.connect()
     except Exception as exc:
         conn.close()
-        pytest.skip(f"Database.connect failed: {exc}")
+        pytest.fail(f"Database.connect failed with configured PostgreSQL: {exc}")
 
     service = TransactionService(db, delivery_outbox=outbox)
     tx, err = normalize_transaction(sale, source_topic="t/tx")
-    assert err is None
+    assert err is None, f"sale normalization failed: {err}"
 
     # Force outage on insert path while leaving outbox writable.
     with patch.object(
-        service, "_insert_transaction", side_effect=psycopg2.OperationalError("simulated outage")
+        service,
+        "_insert_transaction",
+        side_effect=psycopg2.OperationalError("simulated outage"),
     ):
         status = service.process_message(
             topic="t/tx",
@@ -370,22 +391,14 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
     assert status == "deferred_local"
     assert outbox.pending_count() == 1
 
-    # Recovery: real insert (may fail on schema/identity — then skip with reason).
-    try:
-        recovered = service.replay_pending_deliveries()
-    except Exception as exc:
-        conn.close()
-        db.close() if hasattr(db, "close") else None
-        pytest.skip(f"real PG recovery insert not possible in this schema: {exc}")
-
-    if recovered != 1 and outbox.pending_count() > 0:
-        conn.close()
-        pytest.skip(
-            "real PG recovery left sales pending (schema/identity mapping incomplete "
-            "for lab fixtures); outbox durability path still verified"
-        )
-
+    # Configured recovery must succeed — do not skip on failure.
+    recovered = service.replay_pending_deliveries()
+    assert recovered == 1, (
+        f"expected 1 recovered sale after PostgreSQL returned, got {recovered}; "
+        f"pending={outbox.pending_count()}"
+    )
     assert outbox.pending_count() == 0
+
     # Duplicate delivery of the same sale must not create a second row.
     status2 = service.process_message(
         topic="t/tx",
@@ -396,10 +409,11 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
         transaction=tx,
         validation_error=None,
     )
-    assert status2 in {"duplicate", "processed"}
+    assert status2 in {"duplicate", "processed"}, status2
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM pump_transactions WHERE id = %s", (tx_id,))
         row = cur.fetchone()
         assert row is not None
-        assert int(row[0]) == 1
+        assert int(row[0]) == 1, f"expected exactly one row for {tx_id}, got {row[0]}"
     conn.close()
+    db.close()
