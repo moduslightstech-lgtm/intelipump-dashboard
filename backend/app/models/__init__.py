@@ -197,6 +197,9 @@ class Pump(Base):
         DateTime(timezone=True), nullable=True
     )
     commanded_unit_price_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    price_command_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    price_command_correlation_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    price_command_detail: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
