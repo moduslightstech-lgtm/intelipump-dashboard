@@ -63,6 +63,19 @@ The dashboard image is baked with `VITE_API_BASE_URL=/api`. Nginx publishes `:80
 cp docker-compose.override.example.yml docker-compose.override.yml
 ```
 
+## Isolated LAB stack (same droplet, separate Compose)
+
+For InteliPump-US-Lab pricing tests without touching production volumes or ports, use the LAB project under `lab/`:
+
+```bash
+cd lab
+cp .env.lab.example .env.lab   # LAB secrets only
+./scripts/lab-create-mqtt-passwd.sh
+./scripts/lab-up.sh && ./scripts/lab-migrate.sh && ./scripts/lab-seed-us-lab.sh
+```
+
+See [`lab/README.md`](../lab/README.md) for ports (HTTP `127.0.0.1:8088`, MQTT `1884`), firewall notes, health checks, and rollback. Production `docker compose` / `./postgres` / `./mosquitto` stay untouched.
+
 ## Production caution
 
 - Keep `deployment-reference/` as the known-good baseline.

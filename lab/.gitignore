@@ -1,0 +1,10 @@
+# LAB-only artifacts — never store secrets or live data in git.
+.env.lab
+mosquitto/config/passwd
+mosquitto/data/*
+!mosquitto/data/.gitkeep
+mosquitto/log/*
+!mosquitto/log/.gitkeep
+postgres/data/*
+!postgres/data/.gitkeep
+*.log
