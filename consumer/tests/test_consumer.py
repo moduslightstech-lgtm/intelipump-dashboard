@@ -6,6 +6,8 @@ import json
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from app.models import ValidationError
 from app.schemas import normalize_transaction, parse_json_payload
 from app.services.transaction_service import TransactionService
@@ -341,12 +343,15 @@ def test_rejected_message_insertion_on_missing_id():
     assert "rejected_messages" in sql
 
 
-def test_postgres_failure_returns_error():
+def test_postgres_failure_defers_to_durable_outbox(tmp_path):
+    from app.services.sale_delivery_outbox import SaleDeliveryOutbox
+
     class Boom(Exception):
         pgcode = "08006"
 
+    outbox = SaleDeliveryOutbox(tmp_path / "outbox.jsonl")
     db, cur = _mock_db_with_cursor()
-    service = TransactionService(db)
+    service = TransactionService(db, delivery_outbox=outbox)
     tx, _ = normalize_transaction(VALID_PAYLOAD, source_topic="t")
 
     calls = {"n": 0}
@@ -369,7 +374,8 @@ def test_postgres_failure_returns_error():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "error"
+    assert status == "deferred_local"
+    assert outbox.pending_count() >= 1
 
 
 def test_reconnect_delay_configured_on_mqtt_client():

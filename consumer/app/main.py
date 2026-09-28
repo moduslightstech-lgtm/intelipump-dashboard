@@ -91,7 +91,7 @@ class ConsumerApp:
             topic=topic, payload=payload, retained=retained
         )
 
-    def handle_message(self, topic: str, raw: bytes, qos: int, retained: bool) -> None:
+    def handle_message(self, topic: str, raw: bytes, qos: int, retained: bool) -> str | None:
         payload, json_error = parse_json_payload(raw)
         if json_error is not None:
             if is_phase9_device_status_topic(topic):
@@ -112,11 +112,11 @@ class ConsumerApp:
                     result,
                     retained,
                 )
-                return
+                return result
             logger.warning(
                 "Ignored invalid JSON topic=%s error=%s", topic, json_error.message
             )
-            return
+            return None
 
         assert payload is not None
         kind = classify_phase9_message(topic, payload)
@@ -127,7 +127,7 @@ class ConsumerApp:
                 topic,
                 payload.get("eventType"),
             )
-            return
+            return None
 
         if kind == KIND_HEARTBEAT:
             flat = flatten_device_fields(payload)
@@ -149,14 +149,14 @@ class ConsumerApp:
                             station_id,
                         )
             logger.info("Edge heartbeat topic=%s result=%s", topic, result)
-            return
+            return result
 
         if kind == KIND_DEVICE_STATUS:
             result = self.handle_device_status_message(
                 topic=topic, payload=flatten_device_fields(payload), retained=retained
             )
             logger.info("Edge device status topic=%s result=%s", topic, result)
-            return
+            return result
 
         if kind == KIND_TRANSACTION:
             nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
@@ -192,7 +192,7 @@ class ConsumerApp:
                     topic,
                     tx_id,
                 )
-                return
+                return None
             if validation_error is not None:
                 logger.warning(
                     "live_event_rejected stationId=%s transactionId=%s errorType=%s message=%s",
@@ -232,7 +232,14 @@ class ConsumerApp:
                     transaction.transaction_id,
                     transaction.status,
                 )
-            return
+            elif result == "deferred_local":
+                logger.warning(
+                    "live_event_deferred_local stationId=%s transactionId=%s "
+                    "(ACK after durable outbox)",
+                    getattr(transaction, "station_id", None),
+                    tx_id,
+                )
+            return result
 
         if kind == KIND_COMMAND_RESULT:
             result = handle_command_result(self.db, topic=topic, payload=payload)
@@ -242,7 +249,7 @@ class ConsumerApp:
                 result,
                 payload.get("eventType"),
             )
-            return
+            return result
 
         if kind == KIND_PUMP_ALERT:
             result = handle_pump_alert(self.db, topic=topic, payload=payload)
@@ -252,13 +259,14 @@ class ConsumerApp:
                 result,
                 payload.get("eventType"),
             )
-            return
+            return result
 
         logger.info(
             "Ignored unsupported MQTT topic=%s eventType=%s",
             topic,
             payload.get("eventType"),
         )
+        return None
 
     def _timeout_loop(self) -> None:
         while not self._stop.wait(HEARTBEAT_TIMEOUT_POLL_SECONDS):
@@ -276,6 +284,15 @@ class ConsumerApp:
                     )
             except Exception:
                 logger.exception("Edge device status evaluation failed")
+            try:
+                recovered = self.service.replay_pending_deliveries()
+                if recovered:
+                    logger.info(
+                        "Recovered %s pending sale delivery(ies) after connectivity return",
+                        recovered,
+                    )
+            except Exception:
+                logger.exception("Pending sale delivery replay failed")
 
     def run(self) -> None:
         configure_logging()
@@ -286,6 +303,14 @@ class ConsumerApp:
             target=self._timeout_loop, name="heartbeat-timeout", daemon=True
         )
         self._timeout_thread.start()
+        try:
+            recovered = self.service.replay_pending_deliveries()
+            if recovered:
+                logger.info(
+                    "Startup recovered %s pending sale delivery(ies)", recovered
+                )
+        except Exception:
+            logger.exception("Startup pending sale replay failed")
         self.mqtt = MqttClient(self.settings, self.handle_message)
 
         def _shutdown(signum, frame):  # noqa: ANN001
