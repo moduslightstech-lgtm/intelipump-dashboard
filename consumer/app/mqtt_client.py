@@ -1,15 +1,21 @@
-"""MQTT client with reconnect, QoS subscribe, and graceful shutdown.
+"""MQTT client with reconnect, QoS subscribe, and explicit sale ACK policy.
 
-QoS 1 PUBACK is sent by paho only after on_message returns successfully.
-RecoverableDeliveryError (and any other exception) must propagate so the
-broker does not treat an undelivered Postgres write as acknowledged.
+QoS 1 PUBACK is sent by paho after on_message returns. The consumer ACK
+policy is therefore encoded in the handler return path:
+
+* return normally  → ACK (sale committed to PostgreSQL, or durably queued)
+* raise RecoverableDeliveryError → withhold ACK (sale not durable anywhere)
+
+Normal PostgreSQL outages must durable-spill then return (ACK). Raising is
+only for the undurable failure path — not the primary retry mechanism.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Optional
+from enum import Enum
+from typing import Callable, Optional, Union
 
 import paho.mqtt.client as mqtt
 
@@ -18,7 +24,16 @@ from app.services.sale_delivery_outbox import RecoverableDeliveryError
 
 logger = logging.getLogger(__name__)
 
-MessageHandler = Callable[[str, bytes, int, bool], None]
+
+class SaleAckDecision(str, Enum):
+    """Explicit acknowledgement decision for completed-sale MQTT messages."""
+
+    ACK_COMMITTED = "ack_committed"  # PostgreSQL has the sale
+    ACK_DURABLE_QUEUE = "ack_durable_queue"  # local outbox fsync'd
+    WITHHOLD = "withhold"  # neither durable — no PUBACK
+
+
+MessageHandler = Callable[[str, bytes, int, bool], Optional[Union[str, SaleAckDecision]]]
 
 
 class MqttClient:
@@ -26,8 +41,8 @@ class MqttClient:
         self._settings = settings
         self._on_message = on_message
         self._stop = threading.Event()
-        # Persistent session so unacked QoS1 messages are redelivered after reconnect.
-        # Callback API v1 for broad paho-mqtt compatibility
+        self._last_ack_decision: Optional[SaleAckDecision] = None
+        # Persistent session preserves unacked QoS1 across reconnect when we withhold.
         self._client = mqtt.Client(
             client_id="intelipump-consumer",
             clean_session=False,
@@ -37,6 +52,10 @@ class MqttClient:
         self._client.on_connect = self._handle_connect
         self._client.on_disconnect = self._handle_disconnect
         self._client.on_message = self._handle_message
+
+    @property
+    def last_ack_decision(self) -> Optional[SaleAckDecision]:
+        return self._last_ack_decision
 
     def _handle_connect(self, client, userdata, flags, rc):  # noqa: ANN001
         if rc == 0:
@@ -63,20 +82,50 @@ class MqttClient:
 
     def _handle_message(self, client, userdata, msg):  # noqa: ANN001
         try:
-            self._on_message(msg.topic, msg.payload, msg.qos, bool(msg.retain))
+            result = self._on_message(msg.topic, msg.payload, msg.qos, bool(msg.retain))
         except RecoverableDeliveryError:
-            # Do not PUBACK — broker / local outbox will redeliver.
+            self._last_ack_decision = SaleAckDecision.WITHHOLD
             logger.error(
-                "Withholding MQTT PUBACK; sale not durable in PostgreSQL topic=%s",
+                "Withholding MQTT PUBACK; sale not durable topic=%s decision=%s",
                 msg.topic,
+                SaleAckDecision.WITHHOLD.value,
             )
             raise
         except Exception:
+            self._last_ack_decision = SaleAckDecision.WITHHOLD
             logger.exception(
-                "Unhandled error in MQTT message callback topic=%s; withholding PUBACK",
+                "Unhandled MQTT callback error topic=%s; withholding PUBACK",
                 msg.topic,
             )
             raise
+
+        decision = self._normalize_ack_decision(result)
+        self._last_ack_decision = decision
+        if decision is SaleAckDecision.WITHHOLD:
+            logger.error(
+                "Handler requested WITHHOLD without raise topic=%s — raising",
+                msg.topic,
+            )
+            raise RecoverableDeliveryError("handler_requested_withhold")
+        logger.debug(
+            "MQTT sale ack decision=%s topic=%s", decision.value, msg.topic
+        )
+        # Returning normally → paho sends PUBACK for QoS 1.
+
+    @staticmethod
+    def _normalize_ack_decision(
+        result: Optional[Union[str, SaleAckDecision]],
+    ) -> SaleAckDecision:
+        if isinstance(result, SaleAckDecision):
+            return result
+        if result in {"processed", "duplicate", "processed_incident", "rejected"}:
+            return SaleAckDecision.ACK_COMMITTED
+        if result in {"deferred_local", "ack_durable_queue"}:
+            return SaleAckDecision.ACK_DURABLE_QUEUE
+        if result in {"withhold", "error"}:
+            return SaleAckDecision.WITHHOLD
+        # Non-sale / ignored paths still ACK the MQTT packet (nothing to recover).
+        return SaleAckDecision.ACK_COMMITTED
 
     def start(self) -> None:
         logger.info(

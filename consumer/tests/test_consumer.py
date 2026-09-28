@@ -343,11 +343,8 @@ def test_rejected_message_insertion_on_missing_id():
     assert "rejected_messages" in sql
 
 
-def test_postgres_failure_raises_recoverable_and_spills(tmp_path):
-    from app.services.sale_delivery_outbox import (
-        RecoverableDeliveryError,
-        SaleDeliveryOutbox,
-    )
+def test_postgres_failure_defers_to_durable_outbox(tmp_path):
+    from app.services.sale_delivery_outbox import SaleDeliveryOutbox
 
     class Boom(Exception):
         pgcode = "08006"
@@ -368,16 +365,16 @@ def test_postgres_failure_raises_recoverable_and_spills(tmp_path):
     cur.execute.side_effect = execute_side_effect
     cur.fetchone.return_value = None
 
-    with pytest.raises(RecoverableDeliveryError):
-        service.process_message(
-            topic="t",
-            raw_payload=json.dumps(VALID_PAYLOAD).encode(),
-            qos=1,
-            retained=False,
-            payload=VALID_PAYLOAD,
-            transaction=tx,
-            validation_error=None,
-        )
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(VALID_PAYLOAD).encode(),
+        qos=1,
+        retained=False,
+        payload=VALID_PAYLOAD,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "deferred_local"
     assert outbox.pending_count() >= 1
 
 

@@ -154,22 +154,31 @@ class TransactionService:
                 json_payload if isinstance(json_payload, dict) else payload,
                 topic,
             )
-            # Hold locally so recovery is possible even if MQTT session is lost.
+            # Durable local hold → ACK is safe; replay later. Only withhold ACK
+            # when the outbox write itself fails (sale not durable anywhere).
             try:
                 self._delivery_outbox.upsert(
                     identity_key=identity,
                     topic=topic,
                     qos=qos,
                     retained=retained,
-                    payload=json_payload if isinstance(json_payload, dict) else {"_raw": str(json_payload)},
+                    payload=json_payload
+                    if isinstance(json_payload, dict)
+                    else {"_raw": str(json_payload)},
                     raw_payload=raw_payload,
                 )
-            except Exception:
+            except Exception as outbox_exc:
                 logger.exception("Failed to spill sale to local delivery outbox")
-            # Do not confuse broker ACK with DB commit — withhold PUBACK.
-            raise RecoverableDeliveryError(
-                f"postgres_unavailable transactionId={transaction.transaction_id}"
-            ) from exc
+                raise RecoverableDeliveryError(
+                    f"sale_not_durable transactionId={transaction.transaction_id}"
+                ) from outbox_exc
+            logger.warning(
+                "Sale deferred to durable local queue identity=%s "
+                "transactionId=%s (MQTT ACK allowed)",
+                identity,
+                transaction.transaction_id,
+            )
+            return "deferred_local"
 
     def replay_pending_deliveries(self) -> int:
         """Retry local outbox after PostgreSQL returns. Idempotent inserts."""
@@ -202,9 +211,15 @@ class TransactionService:
                         item.identity_key,
                         status,
                     )
+                elif status == "deferred_local":
+                    logger.warning(
+                        "Pending sale replay still deferred identity=%s",
+                        item.identity_key,
+                    )
+                    break
             except RecoverableDeliveryError:
                 logger.warning(
-                    "Pending sale replay still blocked by PostgreSQL identity=%s",
+                    "Pending sale replay still blocked identity=%s",
                     item.identity_key,
                 )
                 break
