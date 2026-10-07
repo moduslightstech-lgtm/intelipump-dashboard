@@ -28,6 +28,32 @@ from app.services.sale_delivery_outbox import (
 logger = logging.getLogger(__name__)
 
 _HANGUP_DUP_WINDOW = timedelta(seconds=120)
+# Same nozzle + totals within this window are treated as one physical sale even
+# when MQTT carries distinct dedupe keys (fill: vs tx-completed, settle vs complete,
+# or double sidecar-settle). Aligns with Pi find_recent_completed_same_totals(15s).
+_COMPLETED_RACE_WINDOW = timedelta(seconds=15)
+
+
+def _completion_key_kind(key: str | None) -> str:
+    """Classify Pi completion / fill dedupe keys for cross-path twin detection."""
+    if not key:
+        return "other"
+    k = str(key).strip()
+    if k.startswith("fill:"):
+        return "fill"
+    if "sidecar-settle:" in k:
+        return "settle"
+    if k.startswith("tx-completed:") or k.startswith("complete"):
+        return "complete"
+    return "other"
+
+
+def _cross_path_completion_keys(a: str | None, b: str | None) -> bool:
+    """True when keys are different publish paths for the same physical sale."""
+    ka, kb = _completion_key_kind(a), _completion_key_kind(b)
+    if ka == "other" or kb == "other" or ka == kb:
+        return False
+    return {ka, kb} <= {"fill", "settle", "complete"}
 
 
 class SaleIntegrityConflict(Exception):
@@ -898,7 +924,7 @@ class TransactionService:
         try:
             cur.execute(
                 """
-                SELECT id, status, deduplication_key FROM pump_transactions
+                SELECT id, status, deduplication_key, received_at FROM pump_transactions
                 WHERE station_id = %s AND pump_id = %s
                   AND amount IS NOT DISTINCT FROM %s
                   AND volume_liters IS NOT DISTINCT FROM %s
@@ -932,7 +958,7 @@ class TransactionService:
                 try:
                     cur.execute(
                         """
-                        SELECT id, status FROM pump_transactions
+                        SELECT id, status, NULL, received_at FROM pump_transactions
                         WHERE station_id = %s AND pump_id = %s
                           AND amount IS NOT DISTINCT FROM %s
                           AND volume_liters IS NOT DISTINCT FROM %s
@@ -967,11 +993,13 @@ class TransactionService:
         existing_status = str(row[1] or "").upper()
         existing_done = existing_status in {"COMPLETED", "COMPLETE"}
         existing_key = row[2] if len(row) > 2 else None
+        existing_received = row[3] if len(row) > 3 else None
         incoming_key = getattr(tx, "deduplication_key", None)
 
-        # Two completed sales are never amount/time twins.
-        # Distinct keys → legitimate equal-value consecutive customers.
-        # Missing keys → retain both (legacy SAO); do not invent a fold.
+        # Two COMPLETED rows with the same nozzle+totals are usually one physical
+        # sale published twice (fill: + tx-completed, or sidecar-settle + complete).
+        # Keep both only when keys differ, are not cross-path, and are outside the
+        # short race window (possible equal-value consecutive customers).
         if incoming_done and existing_done:
             if (
                 incoming_key
@@ -986,6 +1014,30 @@ class TransactionService:
                     incoming_key,
                 )
                 return True
+            if _cross_path_completion_keys(incoming_key, existing_key):
+                logger.info(
+                    "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
+                    "reason=cross_path_keys key_a=%s key_b=%s",
+                    existing_id,
+                    tx.transaction_id,
+                    existing_key,
+                    incoming_key,
+                )
+                return True
+            if existing_received is not None:
+                try:
+                    delta = abs((received_at - existing_received).total_seconds())
+                except TypeError:
+                    delta = None
+                if delta is not None and delta <= _COMPLETED_RACE_WINDOW.total_seconds():
+                    logger.info(
+                        "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
+                        "reason=completed_race_window delta_s=%.3f",
+                        existing_id,
+                        tx.transaction_id,
+                        delta,
+                    )
+                    return True
             return False
 
         if existing_done or (incoming_live and not incoming_done):

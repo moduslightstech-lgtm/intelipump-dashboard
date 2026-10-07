@@ -288,6 +288,103 @@ def test_hangup_completed_skips_when_live_row_already_complete():
     assert all("UPDATE pump_transactions" not in call.args[0] for call in cur.execute.call_args_list)
 
 
+def test_cross_path_fill_and_tx_completed_are_absorbed():
+    """fill: COMPLETED + tx-completed COMPLETED same totals → keep one (Oct 6 bug)."""
+    from datetime import datetime, timezone
+
+    db, cur = _mock_db_with_cursor()
+    existing_recv = datetime(2026, 10, 6, 6, 43, 50, tzinfo=timezone.utc)
+    cur.fetchone.side_effect = [
+        None,
+        None,
+        None,
+        (
+            "781ce6a8-0d14-437d-9a8b-1adb0a42ea47",
+            "COMPLETED",
+            "fill:781ce6a8-0d14-437d-9a8b-1adb0a42ea47:1:116:157180",
+            existing_recv,
+        ),
+    ]
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "935d6952-5609-4792-88ae-809efd7b739c"
+    payload["deduplicationKey"] = (
+        "tx-completed:SAO-Redeemed-Station-1:complete:51 3b 02"
+    )
+    payload["amount"] = 50026.60
+    payload["volumeLiters"] = 36.92
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+
+
+def test_sidecar_settle_and_complete_are_absorbed():
+    from datetime import datetime, timezone
+
+    db, cur = _mock_db_with_cursor()
+    existing_recv = datetime(2026, 10, 6, 16, 20, 11, tzinfo=timezone.utc)
+    cur.fetchone.side_effect = [
+        None,
+        None,
+        None,
+        (
+            "418017e5-1b83-45b4-b4fb-8c17c16c226d",
+            "COMPLETED",
+            "tx-completed:SAO-Redeemed-Station-1:sidecar-settle:418017e5",
+            existing_recv,
+        ),
+    ]
+    service = TransactionService(db)
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "ec09765c-50cd-403f-bd15-a8afe9eeb5d7"
+    payload["deduplicationKey"] = (
+        "tx-completed:SAO-Redeemed-Station-1:complete:50 3e 02"
+    )
+    payload["amount"] = 47005.00
+    payload["volumeLiters"] = 34.69
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=1,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "duplicate"
+
+
+def test_cross_path_key_helpers():
+    from app.services.transaction_service import (
+        _completion_key_kind,
+        _cross_path_completion_keys,
+    )
+
+    assert _completion_key_kind("fill:uuid:1:1:1") == "fill"
+    assert _completion_key_kind("tx-completed:S:sidecar-settle:u") == "settle"
+    assert _completion_key_kind("tx-completed:S:complete:ab") == "complete"
+    assert _cross_path_completion_keys(
+        "fill:a:1:1:1", "tx-completed:S:complete:x"
+    )
+    assert _cross_path_completion_keys(
+        "tx-completed:S:sidecar-settle:u", "tx-completed:S:complete:x"
+    )
+    assert not _cross_path_completion_keys(
+        "tx-completed:S:complete:a", "tx-completed:S:complete:b"
+    )
+
+
 def test_stale_dispensing_after_complete_is_dropped():
     db, cur = _mock_db_with_cursor()
     cur.fetchone.side_effect = [
