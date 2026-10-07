@@ -15,6 +15,9 @@ import { CompactInput, CompactSelect } from '../components/forms/CompactFields'
 import { useAuth } from '../context/AuthContext'
 import { formatStatusLabel } from '../lib/enumPresentation'
 import {
+  resolveSalesTimeZone,
+  saleInStationInterval,
+  saleOccurrenceIso,
   stationRangeToUtcIso,
   stationToday,
   validateMoneyRange,
@@ -114,7 +117,9 @@ export default function TransactionsPage() {
   )
   const stationFilter =
     applied.stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
-  const tz = selectedStation?.timezone || NIGERIA_TZ
+  // Always filter/display in Nigeria business time for SAO (ignore browser TZ /
+  // mislabeled America/Chicago station rows).
+  const tz = resolveSalesTimeZone(selectedStation?.timezone || NIGERIA_TZ)
 
   const moneyAmt = validateMoneyRange(applied.minAmount, applied.maxAmount, 'Sale amount')
   const moneyPrice = validateMoneyRange(applied.minUnitPrice, applied.maxUnitPrice, 'Unit price')
@@ -132,7 +137,7 @@ export default function TransactionsPage() {
     return {
       page,
       size: pageSize,
-      sort: 'received_at,desc',
+      sort: 'occurrence_at,desc',
       station_id: stationFilter || undefined,
       status: applied.status || undefined,
       q: applied.q || undefined,
@@ -140,6 +145,9 @@ export default function TransactionsPage() {
       date_to: applied.dateTo || undefined,
       from_time: applied.fromTime || undefined,
       to_time: applied.toTime || undefined,
+      // Continuous half-open UTC interval (belt-and-suspenders with date/time parts).
+      start: range.start,
+      end: range.end,
       timezone: tz,
       min_amount: moneyAmt.min != null ? String(moneyAmt.min) : undefined,
       max_amount: moneyAmt.max != null ? String(moneyAmt.max) : undefined,
@@ -159,6 +167,8 @@ export default function TransactionsPage() {
     moneyPrice.min,
     moneyPrice.max,
     range.error,
+    range.start,
+    range.end,
   ])
 
   const txQ = useQuery({
@@ -211,11 +221,12 @@ export default function TransactionsPage() {
       dateTo: draft.dateTo,
       fromTime: draft.fromTime,
       toTime: draft.toTime,
-      timeZone: nextStation?.timezone || NIGERIA_TZ,
+      timeZone: resolveSalesTimeZone(nextStation?.timezone || NIGERIA_TZ),
     })
     const err = amt.error || price.error || win.error || null
     setFilterError(err)
     if (err) return
+    // Always reset to page 1 when applied filters change unless caller overrides.
     const nextPage = opts?.page ?? 1
     setApplied(draft)
     setPage(nextPage)
@@ -277,7 +288,20 @@ export default function TransactionsPage() {
 
   const total = txQ.data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
-  const items = txQ.data?.items || []
+  // Defense: drop any row outside the applied continuous interval (stale cache /
+  // live merge). Totals still come from the API using the same predicates.
+  const items = useMemo(() => {
+    const rows = txQ.data?.items || []
+    if (!range.start || !range.end) return rows
+    return rows.filter((t) => saleInStationInterval(saleOccurrenceIso(t), range.start, range.end))
+  }, [txQ.data?.items, range.start, range.end])
+
+  const rangeHeading = formatSalesRangeHeading(
+    applied.dateFrom,
+    applied.dateTo,
+    applied.fromTime,
+    applied.toTime,
+  )
 
   const downloadCsv = () => {
     if (!params) {
@@ -292,6 +316,8 @@ export default function TransactionsPage() {
       date_to: params.date_to,
       from_time: params.from_time,
       to_time: params.to_time,
+      start: params.start,
+      end: params.end,
       timezone: params.timezone,
       min_amount: params.min_amount,
       max_amount: params.max_amount,
@@ -381,8 +407,7 @@ export default function TransactionsPage() {
         <div>
           <h1 className="section-title">Sales</h1>
           <p className="text-slate-400 text-sm mt-1">
-            Sales for {formatSalesRangeHeading(applied.dateFrom, applied.dateTo)} · Times shown in{' '}
-            {timezonePlainLabel(tz)}
+            Sales for {rangeHeading} · Times shown in {timezonePlainLabel(tz)}
           </p>
         </div>
         <button type="button" className="btn-secondary btn-compact" onClick={downloadCsv}>
@@ -517,7 +542,7 @@ export default function TransactionsPage() {
       </form>
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <Kpi label={`Sales · ${formatSalesRangeHeading(applied.dateFrom, applied.dateTo)}`} value={fmtNaira(txQ.data?.total_amount)} />
+        <Kpi label={`Sales · ${rangeHeading}`} value={fmtNaira(txQ.data?.total_amount)} />
         <Kpi label="Volume" value={fmtLiters(txQ.data?.total_volume)} />
         <Kpi label="Transactions" value={String(params ? total : 0)} />
         <Kpi label="Average" value={fmtNaira(txQ.data?.average_amount)} />
@@ -527,7 +552,7 @@ export default function TransactionsPage() {
         <div className="flex items-start justify-between mb-3 gap-3 flex-wrap">
           <div>
             <h2 className="text-white font-semibold text-sm">{stationLabel(selectedStation)}</h2>
-            <p className="text-xs text-slate-400 mt-0.5">{formatSalesRangeHeading(applied.dateFrom, applied.dateTo)}</p>
+            <p className="text-xs text-slate-400 mt-0.5">{rangeHeading}</p>
             {chips.length > 0 ? (
               <div className="flex flex-wrap gap-1.5 mt-2">
                 {chips.map((c) => (
@@ -614,7 +639,9 @@ export default function TransactionsPage() {
                 const mappedNozzle = Boolean(t.nozzle_id)
                 return (
                   <tr key={t.id} className="border-b border-slate-800" data-testid="tx-row">
-                    <td className="py-2 pr-3 text-slate-400 whitespace-nowrap">{fmtTime(t.received_at, tz)}</td>
+                    <td className="py-2 pr-3 text-slate-400 whitespace-nowrap">
+                      {fmtTime(saleOccurrenceIso(t), tz)}
+                    </td>
                     <td className="py-2 pr-3 truncate" title={t.station_id}>
                       {stationLabel(selectedStation)}
                     </td>
@@ -629,7 +656,19 @@ export default function TransactionsPage() {
                       )}
                     </td>
                     <td className="py-2 pr-3 text-right font-mono tabular-nums">{fmtLiters(t.volume_liters)}</td>
-                    <td className="py-2 pr-3 text-right font-mono tabular-nums">{fmtNaira(t.price_per_liter)}</td>
+                    <td
+                      className="py-2 pr-3 text-right font-mono tabular-nums"
+                      data-testid="tx-unit-price"
+                      title={
+                        t.price_uncertain
+                          ? 'Pump-observed unit price was not stored for this sale'
+                          : undefined
+                      }
+                    >
+                      {t.price_uncertain || t.price_per_liter == null || Number(t.price_per_liter) <= 0
+                        ? 'Unknown'
+                        : fmtNaira(t.price_per_liter)}
+                    </td>
                     <td className="py-2 pr-3 text-right font-mono tabular-nums text-emerald-400" data-testid="tx-amount">
                       {fmtNaira(t.amount)}
                     </td>
@@ -706,7 +745,7 @@ export default function TransactionsPage() {
           <p className="font-mono text-xs text-slate-400 break-all">ID {selected.id}</p>
           <p>Nozzle: {selected.nozzle_id || 'Not mapped'}</p>
           <p>Device: {selected.device_id || '—'}</p>
-          <p>Time: {fmtTime(selected.received_at, tz)}</p>
+          <p>Time: {fmtTime(saleOccurrenceIso(selected), tz)}</p>
         </div>
       )}
     </div>

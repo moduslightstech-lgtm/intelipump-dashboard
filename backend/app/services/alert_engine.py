@@ -135,6 +135,8 @@ def evaluate_edge_device_offline(db: Session, threshold_minutes: int = 3) -> lis
 
     edges = list(db.scalars(select(EdgeDevice)).all())
     for edge in edges:
+        if edge is None:
+            continue
         last = as_utc(edge.last_heartbeat_at or edge.last_seen_at)
         view = calculate_device_status(now=now, last_seen=last)
         if view.status != "OFFLINE":
@@ -252,6 +254,8 @@ def evaluate_edge_serial_health(db: Session) -> dict[str, int]:
 
     edges = list(db.scalars(select(EdgeDevice)).all())
     for edge in edges:
+        if edge is None:
+            continue
         last = as_utc(edge.last_heartbeat_at or edge.last_seen_at)
         view = calculate_device_status(now=now, last_seen=last)
         pump = calculate_pump_communication(

@@ -96,3 +96,19 @@ def test_only_super_admin_can_grant_super_admin():
     super_admin = _user("SUPER_ADMIN", org=None)
     assert assignable_role(super_admin, "SUPER_ADMIN") == "SUPER_ADMIN"
     assert assignable_role(super_admin, "STATION_MANAGER") == "STATION_MANAGER"
+
+
+def test_topic_visibility_scopes_mqtt_monitor():
+    from app.services.rbac import topic_visible_to_user
+
+    sao_keys = {"SAO-Redeemed-Station-1", "SAO-RS-001"}
+    assert topic_visible_to_user(
+        "intelipump/prod/stations/SAO-Redeemed-Station-1/transactions", sao_keys
+    )
+    assert topic_visible_to_user(
+        "intelipump/lab/stations/InteliPump-US-Lab/transactions", sao_keys
+    ) is False
+    assert topic_visible_to_user(
+        "intelipump/prod/devices/EnergySwitch-pi-001/heartbeat", sao_keys
+    ) is False
+    assert topic_visible_to_user("anything", None) is True

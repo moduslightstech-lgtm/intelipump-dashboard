@@ -439,12 +439,16 @@ export default function AdminStationEditPage() {
               .map((p) => {
                 const id = String(p.mqtt_pump_id || p.pump_code || '')
                 const status = String(p.price_command_status || '').toUpperCase()
+                // PARTIAL / SENT_UNVERIFIED = not all dart addresses confirmed yet.
                 const tone =
                   status === 'CONFIRMED'
                     ? 'text-emerald-300'
                     : status === 'FAILED'
                       ? 'text-rose-300'
-                      : status === 'PENDING' || status === 'REQUESTED'
+                      : status === 'PARTIAL' ||
+                          status === 'SENT_UNVERIFIED' ||
+                          status === 'PENDING' ||
+                          status === 'REQUESTED'
                         ? 'text-amber-200'
                         : 'text-slate-300'
                 return (

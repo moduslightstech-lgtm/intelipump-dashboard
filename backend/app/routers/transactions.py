@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import datetime, time, timezone as dt_timezone
+from datetime import datetime, timedelta, time, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -16,7 +16,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import PumpTransaction, Station, User
+from app.models import PumpTransaction, User
 from app.schemas import PaginatedTransactions, TransactionOut
 from app.security import get_current_user
 from app.services.identity import ledger_station_clause, resolve_station
@@ -38,13 +38,46 @@ _STATUS_LABELS = {
 # Match Executive Overview / Digital Twin inclusion policy for sales KPIs.
 _COMPLETED_STATUSES = ("COMPLETED", "COMPLETE")
 
+# Legacy / mislabeled station rows sometimes store America/Chicago while the
+# product surface always presents Nigeria time. Normalize to Africa/Lagos.
+_NIGERIA_TZ_ALIASES = frozenset(
+    {
+        "",
+        "africa/lagos",
+        "wat",
+        "west africa time",
+        "nigeria",
+        "nigeria time",
+        "america/chicago",
+        "us/central",
+    }
+)
+
+
+def resolve_sales_timezone(timezone: Optional[str]) -> str:
+    key = (timezone or "").strip().lower()
+    if key in _NIGERIA_TZ_ALIASES:
+        return "Africa/Lagos"
+    return (timezone or "Africa/Lagos").strip() or "Africa/Lagos"
+
 
 def _tx_time_col():
+    """Sale-occurrence timestamp: completed → device → received → created."""
     return func.coalesce(
         PumpTransaction.transaction_completed_at,
         PumpTransaction.device_timestamp,
         PumpTransaction.received_at,
         PumpTransaction.created_at,
+    )
+
+
+def occurrence_at(row: PumpTransaction) -> Optional[datetime]:
+    """Same coalesce order as ``_tx_time_col`` for display/export/sort."""
+    return (
+        row.transaction_completed_at
+        or row.device_timestamp
+        or row.received_at
+        or row.created_at
     )
 
 
@@ -89,7 +122,8 @@ def _as_decimal(value: Optional[str | float | Decimal], *, field: str) -> Option
     return dec
 
 
-def _local_bound(date_ymd: str, clock: time, tz_name: str, *, end_of_minute: bool = False) -> datetime:
+def _local_bound(date_ymd: str, clock: time, tz_name: str) -> datetime:
+    """Wall-clock local instant → UTC (no end-of-minute expansion)."""
     try:
         tz = ZoneInfo(tz_name)
     except Exception as exc:
@@ -98,10 +132,22 @@ def _local_bound(date_ymd: str, clock: time, tz_name: str, *, end_of_minute: boo
         year, month, day = (int(p) for p in date_ymd.split("-"))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid date '{date_ymd}'") from exc
-    second = 59 if end_of_minute and clock.second == 0 else clock.second
-    micro = 999_000 if end_of_minute else 0
-    local = datetime(year, month, day, clock.hour, clock.minute, second, micro, tzinfo=tz)
+    local = datetime(year, month, day, clock.hour, clock.minute, clock.second, 0, tzinfo=tz)
     return local.astimezone(ZoneInfo("UTC"))
+
+
+def _next_local_midnight_utc(date_ymd: str, tz_name: str) -> datetime:
+    """Exclusive end for a date-only day: next calendar midnight in tz."""
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid timezone '{tz_name}'") from exc
+    try:
+        year, month, day = (int(p) for p in date_ymd.split("-"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid date '{date_ymd}'") from exc
+    local_midnight = datetime(year, month, day, 0, 0, 0, 0, tzinfo=tz)
+    return (local_midnight + timedelta(days=1)).astimezone(ZoneInfo("UTC"))
 
 
 def resolve_query_window(
@@ -114,7 +160,12 @@ def resolve_query_window(
     to_time: Optional[str],
     timezone: Optional[str],
 ) -> tuple[Optional[datetime], Optional[datetime]]:
-    """Build inclusive UTC [start, end] from either absolute ISO or local date/time + tz."""
+    """Build half-open UTC ``[start, end)`` as one continuous local interval.
+
+    - Explicit times: start inclusive at from_time, end exclusive at to_time.
+    - Date-only end: next local midnight exclusive (full calendar day included).
+    - Not a recurring daily time-of-day filter across each date.
+    """
     if date_from or date_to or from_time or to_time:
         day_from = date_from or date_to
         day_to = date_to or date_from
@@ -122,15 +173,21 @@ def resolve_query_window(
             raise HTTPException(status_code=400, detail="date_from and date_to are required with time filters")
         if day_from > day_to:
             raise HTTPException(status_code=400, detail="date_from must be on or before date_to")
-        tz_name = (timezone or "Africa/Lagos").strip() or "Africa/Lagos"
+        tz_name = resolve_sales_timezone(timezone)
         start_clock = _parse_hhmm(from_time) or time(0, 0, 0)
-        end_clock = _parse_hhmm(to_time) or time(23, 59, 59)
-        end_of_minute = bool(to_time) and len(str(to_time).strip()) <= 5
-        start_utc = _local_bound(day_from, start_clock, tz_name, end_of_minute=False)
-        end_utc = _local_bound(day_to, end_clock, tz_name, end_of_minute=end_of_minute or not to_time)
-        if start_utc > end_utc:
-            raise HTTPException(status_code=400, detail="The selected time range is invalid")
-        # "Today" / open-ended windows match Exec/Twin: count only through now.
+        start_utc = _local_bound(day_from, start_clock, tz_name)
+        if to_time and str(to_time).strip():
+            end_clock = _parse_hhmm(to_time) or time(0, 0, 0)
+            end_utc = _local_bound(day_to, end_clock, tz_name)
+        else:
+            # Date-only: include the whole end calendar day via next-midnight exclusive.
+            end_utc = _next_local_midnight_utc(day_to, tz_name)
+        if not (end_utc > start_utc):
+            raise HTTPException(
+                status_code=400,
+                detail="The selected time range is invalid: end must be after start",
+            )
+        # Open-ended "through now" when the exclusive end is still in the future.
         now_utc = datetime.now(dt_timezone.utc)
         if end_utc > now_utc:
             end_utc = now_utc
@@ -140,6 +197,14 @@ def resolve_query_window(
         end_aware = end if end.tzinfo is not None else end.replace(tzinfo=dt_timezone.utc)
         if end_aware > now_utc:
             end = now_utc
+    if start is not None and end is not None:
+        start_aware = start if start.tzinfo is not None else start.replace(tzinfo=dt_timezone.utc)
+        end_aware = end if end.tzinfo is not None else end.replace(tzinfo=dt_timezone.utc)
+        if not (end_aware > start_aware):
+            raise HTTPException(
+                status_code=400,
+                detail="The selected time range is invalid: end must be after start",
+            )
     return start, end
 
 
@@ -174,10 +239,11 @@ def _base_query(
     if q:
         stmt = stmt.where(PumpTransaction.id.ilike(f"%{q}%"))
     time_col = _tx_time_col()
+    # Half-open interval on sale-occurrence time: start inclusive, end exclusive.
     if start:
         stmt = stmt.where(time_col >= start)
     if end:
-        stmt = stmt.where(time_col <= end)
+        stmt = stmt.where(time_col < end)
     if min_amount is not None:
         stmt = stmt.where(PumpTransaction.amount >= min_amount)
     if max_amount is not None:
@@ -224,48 +290,18 @@ def _status_label(raw: Optional[str]) -> str:
     return key.replace("_", " ").title()
 
 
-def _commanded_unit_price_map(db: Session, rows: list[PumpTransaction]) -> dict[str, Decimal]:
-    """Map station UUID / mqtt id / station_code → admin SET_PRICE face ₦/L."""
-    if not rows:
-        return {}
-    uuids = {r.station_uuid for r in rows if r.station_uuid is not None}
-    texts = {str(r.station_id).strip() for r in rows if r.station_id}
-    stations: list[Station] = []
-    if uuids:
-        stations.extend(db.scalars(select(Station).where(Station.id.in_(uuids))).all())
-    if texts:
-        stations.extend(
-            db.scalars(
-                select(Station).where(
-                    (Station.mqtt_station_id.in_(texts)) | (Station.station_code.in_(texts))
-                )
-            ).all()
-        )
-    out: dict[str, Decimal] = {}
-    for s in stations:
-        if s.commanded_unit_price_raw is None or s.commanded_unit_price_raw <= 0:
-            continue
-        price = Decimal(int(s.commanded_unit_price_raw))
-        out[str(s.id)] = price
-        if s.mqtt_station_id:
-            out[s.mqtt_station_id] = price
-        if s.station_code:
-            out[s.station_code] = price
-    return out
+def _transaction_out(row: PumpTransaction) -> TransactionOut:
+    """Serialize a sale with its stored pump-observed unit price only.
 
-
-def _transaction_out_with_admin_price(
-    row: PumpTransaction, commanded: dict[str, Decimal]
-) -> TransactionOut:
-    """Unit price is the admin station price when set — never amount÷volume."""
+    Do not substitute stations/pumps.commanded_unit_price_* — that is the
+    current admin SET_PRICE target, not the price of this completed sale.
+    """
     out = TransactionOut.model_validate(row)
-    for key in (
-        str(row.station_uuid) if row.station_uuid is not None else None,
-        row.station_id,
-    ):
-        if key and key in commanded:
-            out.price_per_liter = commanded[key]
-            break
+    out.occurrence_at = occurrence_at(row)
+    stored = out.price_per_liter
+    out.price_uncertain = stored is None or stored <= 0
+    if out.price_uncertain:
+        out.price_per_liter = None
     return out
 
 
@@ -280,8 +316,8 @@ def list_transactions(
     end: Optional[datetime] = None,
     date_from: Optional[str] = Query(None, description="YYYY-MM-DD in station timezone"),
     date_to: Optional[str] = Query(None, description="YYYY-MM-DD in station timezone"),
-    from_time: Optional[str] = Query(None, description="HH:MM local start time"),
-    to_time: Optional[str] = Query(None, description="HH:MM local end time (inclusive)"),
+    from_time: Optional[str] = Query(None, description="HH:MM local start time (inclusive)"),
+    to_time: Optional[str] = Query(None, description="HH:MM local end time (exclusive)"),
     timezone: Optional[str] = Query(None, description="IANA timezone for date/time filters"),
     min_amount: Optional[str] = None,
     max_amount: Optional[str] = None,
@@ -289,7 +325,7 @@ def list_transactions(
     max_unit_price: Optional[str] = None,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=200),
-    sort: str = Query("received_at,desc"),
+    sort: str = Query("occurrence_at,desc"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> PaginatedTransactions:
@@ -324,12 +360,15 @@ def list_transactions(
     total_amount, total_volume, average_amount = _aggregates(db, stmt)
 
     sort_field, _, direction = sort.partition(",")
-    col = getattr(PumpTransaction, sort_field, PumpTransaction.received_at)
+    time_col = _tx_time_col()
+    if sort_field in {"", "received_at", "occurrence_at", "transaction_completed_at"}:
+        col = time_col
+    else:
+        col = getattr(PumpTransaction, sort_field, time_col)
     order = col.desc() if direction.lower() != "asc" else col.asc()
     rows = db.scalars(stmt.order_by(order).offset((page - 1) * size).limit(size)).all()
-    commanded = _commanded_unit_price_map(db, list(rows))
     return PaginatedTransactions(
-        items=[_transaction_out_with_admin_price(r, commanded) for r in rows],
+        items=[_transaction_out(r) for r in rows],
         total=int(total),
         page=page,
         size=size,
@@ -386,9 +425,8 @@ def export_transactions(
         min_unit_price=lo_price,
         max_unit_price=hi_price,
         station_clause=scoped_ledger_clause(db, user, station_id),
-    ).order_by(PumpTransaction.received_at.desc())
+    ).order_by(_tx_time_col().desc())
     rows = db.scalars(stmt).all()
-    commanded = _commanded_unit_price_map(db, list(rows))
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -404,13 +442,15 @@ def export_transactions(
             "amount",
             "currency",
             "price_per_liter",
+            "price_uncertain",
             "status",
+            "occurrence_at",
             "device_timestamp",
             "received_at",
         ]
     )
     for t in rows:
-        out = _transaction_out_with_admin_price(t, commanded)
+        out = _transaction_out(t)
         writer.writerow(
             [
                 out.id,
@@ -422,8 +462,10 @@ def export_transactions(
                 out.volume_liters,
                 out.amount,
                 out.currency,
-                out.price_per_liter,
+                out.price_per_liter if not out.price_uncertain else "",
+                "true" if out.price_uncertain else "false",
                 _status_label(out.status),
+                out.occurrence_at,
                 out.device_timestamp,
                 out.received_at,
             ]
@@ -451,5 +493,4 @@ def get_transaction(
             raise HTTPException(status_code=404, detail="Transaction not found")
     else:
         assert_station_access(db, user, station.id)
-    commanded = _commanded_unit_price_map(db, [tx])
-    return _transaction_out_with_admin_price(tx, commanded)
+    return _transaction_out(tx)

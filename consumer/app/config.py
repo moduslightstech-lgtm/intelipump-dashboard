@@ -21,6 +21,8 @@ class Settings:
     mqtt_password: str
     mqtt_topic: str
     mqtt_qos: int
+    mqtt_topic_environment: str
+    mqtt_publish_sale_acks: bool
     postgres_host: str
     postgres_port: int
     postgres_db: str
@@ -31,13 +33,30 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        topic = os.getenv("MQTT_TOPIC", "intelipump/#")
+        env = (
+            os.getenv("MQTT_TOPIC_ENVIRONMENT")
+            or os.getenv("MQTT_COMMAND_ENVIRONMENT")
+            or ("lab" if "/lab/" in topic or topic.startswith("intelipump/lab") else "prod")
+        ).strip().lower()
+        if env in {"production", "prod"}:
+            env = "prod"
+        elif env == "lab":
+            env = "lab"
+        else:
+            env = "lab" if "lab" in topic else "prod"
         return cls(
             mqtt_host=_require("MQTT_HOST"),
             mqtt_port=int(os.getenv("MQTT_PORT", "1883")),
             mqtt_username=_require("MQTT_USERNAME"),
             mqtt_password=_require("MQTT_PASSWORD"),
-            mqtt_topic=os.getenv("MQTT_TOPIC", "intelipump/#"),
+            mqtt_topic=topic,
             mqtt_qos=int(os.getenv("MQTT_QOS", "1")),
+            mqtt_topic_environment=env,
+            mqtt_publish_sale_acks=os.getenv(
+                "MQTT_PUBLISH_SALE_ACKS", "true"
+            ).strip().lower()
+            in {"1", "true", "yes", "on"},
             postgres_host=_require("POSTGRES_HOST"),
             postgres_port=int(os.getenv("POSTGRES_PORT", "5432")),
             postgres_db=_require("POSTGRES_DB"),

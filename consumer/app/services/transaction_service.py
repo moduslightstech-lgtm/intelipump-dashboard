@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _HANGUP_DUP_WINDOW = timedelta(seconds=120)
 
 
+class SaleIntegrityConflict(Exception):
+    """Same sale identity already stored with conflicting completed finals."""
+
+
 class TransactionService:
     def __init__(
         self,
@@ -148,6 +152,30 @@ class TransactionService:
                 )
             )
             return status
+        except SaleIntegrityConflict as conflict:
+            self._save_mqtt_message(
+                topic=topic,
+                payload=json_payload,
+                qos=qos,
+                retained=retained,
+                status="integrity_conflict",
+                transaction_id=transaction.transaction_id,
+                error_message=str(conflict),
+                received_at=received_at,
+            )
+            logger.error(
+                "Sale integrity conflict transactionId=%s detail=%s "
+                "(completed finals not overwritten)",
+                transaction.transaction_id,
+                conflict,
+            )
+            self._delivery_outbox.mark_done(
+                sale_identity_from_payload(
+                    json_payload if isinstance(json_payload, dict) else payload,
+                    topic,
+                )
+            )
+            return "integrity_conflict"
         except Exception as exc:
             logger.exception("PostgreSQL failure while saving transaction")
             identity = sale_identity_from_payload(
@@ -275,26 +303,136 @@ class TransactionService:
         return None
 
     def _apply_admin_unit_price(self, tx: NormalizedTransaction) -> None:
-        """Fill missing unit price from admin SET_PRICE — never amount÷volume."""
+        """Do not fill sale unit price from admin SET_PRICE.
+
+        Each sale must keep the pump-observed price from the MQTT payload.
+        Missing/zero price stays missing so the API can mark price_uncertain
+        instead of silently substituting the current commanded station price.
+        """
         if tx.price_per_liter is not None and tx.price_per_liter > 0:
             return
+        logger.warning(
+            "Sale missing pump-observed unit price; leaving unset "
+            "(not substituting commanded SET_PRICE) station=%s pump=%s tx=%s",
+            tx.station_id,
+            tx.pump_id,
+            tx.transaction_id,
+        )
+
+    def _completed_finals_conflict_detail(
+        self, cur, tx: NormalizedTransaction
+    ) -> Optional[str]:
+        """Return detail when same identity already has conflicting completed finals.
+
+        Identical amount/volume replays are duplicates (not conflicts). Matching
+        identity with a different amount or litres must be visible — never
+        silently overwritten. Uses the caller's cursor (same PG connection).
+        """
+        status = (tx.status or "").upper()
+        if status not in {"COMPLETED", "COMPLETE"}:
+            return None
+        rows: list[tuple] = []
         try:
-            with self._db.connection() as conn:
-                with conn.cursor() as cur:
-                    commanded = self._lookup_commanded_unit_price(cur, tx.station_id)
-        except Exception:
-            logger.exception(
-                "Failed looking up commanded unit price station=%s", tx.station_id
+            cur.execute(
+                """
+                SELECT id, amount, volume_liters, status, deduplication_key,
+                       price_per_liter, pump_id, nozzle_id, station_id
+                FROM pump_transactions
+                WHERE id = %s
+                LIMIT 1
+                """,
+                (tx.transaction_id,),
             )
-            return
-        if commanded is not None and commanded > 0:
-            tx.price_per_liter = commanded
-            logger.info(
-                "Applied admin unit price ₦%s/L station=%s tx=%s",
-                commanded,
-                tx.station_id,
-                tx.transaction_id,
+            row = cur.fetchone()
+            if isinstance(row, (tuple, list)) and len(row) >= 4:
+                rows.append(tuple(row))
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return None
+            raise
+        key = getattr(tx, "deduplication_key", None)
+        if key:
+            try:
+                cur.execute(
+                    """
+                    SELECT id, amount, volume_liters, status, deduplication_key,
+                           price_per_liter, pump_id, nozzle_id, station_id
+                    FROM pump_transactions
+                    WHERE station_id = %s
+                      AND deduplication_key = %s
+                      AND id <> %s
+                    LIMIT 1
+                    """,
+                    (tx.station_id, key, tx.transaction_id),
+                )
+                other = cur.fetchone()
+                if isinstance(other, (tuple, list)) and len(other) >= 4:
+                    rows.append(tuple(other))
+            except Exception as exc:
+                if getattr(exc, "pgcode", None) != "42703":
+                    raise
+        for existing in rows:
+            existing_status = str(existing[3] or "").upper()
+            if existing_status not in {"COMPLETED", "COMPLETE"}:
+                continue
+            existing_amount = existing[1]
+            existing_volume = existing[2]
+            existing_price = existing[5] if len(existing) > 5 else None
+            existing_pump = existing[6] if len(existing) > 6 else None
+            existing_nozzle = existing[7] if len(existing) > 7 else None
+            existing_station = existing[8] if len(existing) > 8 else None
+            amount_differs = (
+                existing_amount is not None
+                and tx.amount is not None
+                and existing_amount != tx.amount
             )
+            volume_differs = (
+                existing_volume is not None
+                and tx.volume_liters is not None
+                and existing_volume != tx.volume_liters
+            )
+            price_differs = (
+                existing_price is not None
+                and tx.price_per_liter is not None
+                and existing_price != tx.price_per_liter
+            )
+            mapping_differs = False
+            mapping_parts: list[str] = []
+            if (
+                existing_station is not None
+                and tx.station_id is not None
+                and str(existing_station) != str(tx.station_id)
+            ):
+                mapping_differs = True
+                mapping_parts.append(
+                    f"station {existing_station!s}->{tx.station_id!s}"
+                )
+            if (
+                existing_pump is not None
+                and tx.pump_id is not None
+                and str(existing_pump) != str(tx.pump_id)
+            ):
+                mapping_differs = True
+                mapping_parts.append(f"pump {existing_pump!s}->{tx.pump_id!s}")
+            if (
+                existing_nozzle is not None
+                and tx.nozzle_id is not None
+                and str(existing_nozzle) != str(tx.nozzle_id)
+            ):
+                mapping_differs = True
+                mapping_parts.append(f"nozzle {existing_nozzle!s}->{tx.nozzle_id!s}")
+            if amount_differs or volume_differs or price_differs or mapping_differs:
+                return (
+                    f"existing_id={existing[0]} "
+                    f"existing_amount={existing_amount} "
+                    f"incoming_amount={tx.amount} "
+                    f"existing_volume={existing_volume} "
+                    f"incoming_volume={tx.volume_liters} "
+                    f"existing_price={existing_price} "
+                    f"incoming_price={tx.price_per_liter} "
+                    f"mapping={','.join(mapping_parts) if mapping_parts else 'ok'}"
+                )
+        return None
 
     def _insert_transaction(self, tx: NormalizedTransaction, received_at: datetime) -> bool:
         """Insert transaction. Returns True if a new row was inserted.
@@ -500,6 +638,9 @@ class TransactionService:
                     return False
                 if self._dedupe_key_already_present(cur, tx):
                     return False
+                conflict = self._completed_finals_conflict_detail(cur, tx)
+                if conflict:
+                    raise SaleIntegrityConflict(conflict)
                 pump_uuid = ident.pump_uuid
                 if pump_uuid is None and station_uuid is not None:
                     pump_uuid = resolve_pump_uuid(cur, station_uuid, tx.pump_id)
@@ -828,15 +969,23 @@ class TransactionService:
         existing_key = row[2] if len(row) > 2 else None
         incoming_key = getattr(tx, "deduplication_key", None)
 
-        # Two completed sales with distinct stable identities are legitimate
-        # consecutive customers (e.g. both ₦200 / 0.17 L) — never fold them.
-        if (
-            incoming_done
-            and existing_done
-            and incoming_key
-            and existing_key
-            and incoming_key != existing_key
-        ):
+        # Two completed sales are never amount/time twins.
+        # Distinct keys → legitimate equal-value consecutive customers.
+        # Missing keys → retain both (legacy SAO); do not invent a fold.
+        if incoming_done and existing_done:
+            if (
+                incoming_key
+                and existing_key
+                and incoming_key == existing_key
+            ):
+                logger.info(
+                    "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
+                    "reason=same_dedupe_key key=%s",
+                    existing_id,
+                    tx.transaction_id,
+                    incoming_key,
+                )
+                return True
             return False
 
         if existing_done or (incoming_live and not incoming_done):

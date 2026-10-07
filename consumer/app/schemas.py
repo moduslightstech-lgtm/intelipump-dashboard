@@ -121,7 +121,7 @@ def normalize_transaction(
         return None, ValidationError("MISSING_AMOUNT", amount_err)
 
     # Never derive unit price from amount/volume — rounding makes ₦/L drift.
-    # Missing price is filled from stations.commanded_unit_price_raw on persist.
+    # Never fill from stations.commanded_unit_price_* (that is current SET_PRICE).
     price_raw = _first(payload, "pricePerLiter", "price_per_liter")
     if price_raw is None:
         price_per_liter = Decimal("0")

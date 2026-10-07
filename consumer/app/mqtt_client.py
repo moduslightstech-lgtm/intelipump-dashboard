@@ -118,7 +118,13 @@ class MqttClient:
     ) -> SaleAckDecision:
         if isinstance(result, SaleAckDecision):
             return result
-        if result in {"processed", "duplicate", "processed_incident", "rejected"}:
+        if result in {
+            "processed",
+            "duplicate",
+            "processed_incident",
+            "rejected",
+            "integrity_conflict",
+        }:
             return SaleAckDecision.ACK_COMMITTED
         if result in {"deferred_local", "ack_durable_queue"}:
             return SaleAckDecision.ACK_DURABLE_QUEUE
@@ -126,6 +132,15 @@ class MqttClient:
             return SaleAckDecision.WITHHOLD
         # Non-sale / ignored paths still ACK the MQTT packet (nothing to recover).
         return SaleAckDecision.ACK_COMMITTED
+
+    def publish(self, topic: str, payload: bytes, *, qos: int = 1, retain: bool = False) -> None:
+        """Best-effort publish (used for SALE_COMMITTED application ACKs)."""
+        try:
+            info = self._client.publish(topic, payload, qos=qos, retain=retain)
+            if hasattr(info, "wait_for_publish"):
+                info.wait_for_publish(timeout=5)
+        except Exception:
+            logger.exception("MQTT publish failed topic=%s", topic)
 
     def start(self) -> None:
         logger.info(

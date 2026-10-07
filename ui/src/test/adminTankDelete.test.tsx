@@ -105,7 +105,13 @@ describe('Transactions table', () => {
   })
 
   it('renders Amount and Status in separate cells', async () => {
-    render(wrap(<MemoryRouter><TransactionsPage /></MemoryRouter>))
+    render(
+      wrap(
+        <MemoryRouter initialEntries={['/transactions?from=2026-09-07&to=2026-09-07']}>
+          <TransactionsPage />
+        </MemoryRouter>,
+      ),
+    )
     expect(await screen.findByTestId('tx-amount')).toBeInTheDocument()
     expect(screen.getByTestId('tx-status')).toBeInTheDocument()
     expect(screen.getByTestId('tx-amount').textContent).not.toEqual(screen.getByTestId('tx-status').textContent)
@@ -114,7 +120,13 @@ describe('Transactions table', () => {
   })
 
   it('switches the station dropdown to SAO redeemed station 1', async () => {
-    render(wrap(<MemoryRouter><TransactionsPage /></MemoryRouter>))
+    render(
+      wrap(
+        <MemoryRouter initialEntries={['/transactions?from=2026-09-07&to=2026-09-07']}>
+          <TransactionsPage />
+        </MemoryRouter>,
+      ),
+    )
     const stationSelect = await screen.findByLabelText('Station')
     await waitFor(() => expect(stationSelect).toHaveValue('US-LAB-001'))
     fireEvent.change(stationSelect, { target: { value: 'SAO-RS-001' } })

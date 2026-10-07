@@ -36,17 +36,38 @@ scp \
 ssh "$HOST" "mkdir -p '$REMOTE/seed-src'"
 scp -r "$ROOT/backend/app/seed/." "$HOST:$REMOTE/seed-src/"
 
-ssh "$HOST" "chmod +x '$REMOTE/scripts/'*.sh && rm -f '$REMOTE/docker-compose.override.yml'"
+# Isolated LAB stack (does not touch production compose/volumes)
+ssh "$HOST" "mkdir -p '$REMOTE/lab/scripts' '$REMOTE/lab/nginx' \
+  '$REMOTE/lab/mosquitto/config' '$REMOTE/lab/mosquitto/data' '$REMOTE/lab/mosquitto/log' \
+  '$REMOTE/lab/postgres/data'"
+scp "$ROOT/lab/docker-compose.yml" \
+  "$ROOT/lab/.env.lab.example" \
+  "$ROOT/lab/.gitignore" \
+  "$ROOT/lab/README.md" \
+  "$HOST:$REMOTE/lab/"
+scp "$ROOT/lab/nginx/lab.conf" "$HOST:$REMOTE/lab/nginx/"
+scp "$ROOT/lab/mosquitto/config/mosquitto.conf" \
+  "$ROOT/lab/mosquitto/config/acl.conf" \
+  "$HOST:$REMOTE/lab/mosquitto/config/"
+scp "$ROOT/lab/scripts/"*.sh "$HOST:$REMOTE/lab/scripts/"
+
+ssh "$HOST" "chmod +x '$REMOTE/scripts/'*.sh '$REMOTE/lab/scripts/'*.sh && rm -f '$REMOTE/docker-compose.override.yml'"
 
 echo
-echo "Copied compose, nginx (incl. TLS), db migrations, tenancy seeder, and scripts to $HOST:$REMOTE"
-echo "Not copied (keep the droplet originals): .env, mosquitto/, postgres/data/, certbot/"
+echo "Copied compose, nginx (incl. TLS), db migrations, tenancy seeder, LAB stack, and scripts to $HOST:$REMOTE"
+echo "Not copied (keep the droplet originals): .env, mosquitto/, postgres/data/, certbot/, lab/.env.lab, lab passwd/data"
 echo
 echo "Next, SSH in and run:"
 echo "  ssh $HOST"
 echo "  cd $REMOTE"
 echo "  # add JWT_SECRET to .env if missing: openssl rand -hex 32"
 echo "  ./scripts/droplet-cutover.sh"
+echo
+echo "LAB stack (separate from production):"
+echo "  cd $REMOTE/lab"
+echo "  cp .env.lab.example .env.lab   # set LAB secrets"
+echo "  ./scripts/lab-create-mqtt-passwd.sh"
+echo "  ./scripts/lab-up.sh && ./scripts/lab-migrate.sh && ./scripts/lab-seed-us-lab.sh"
 echo
 echo "To enable HTTPS (after DNS points here):"
 echo "  PUBLIC_HOST=app.intellixxx.com LETSENCRYPT_EMAIL=you@example.com ./scripts/enable-https.sh"

@@ -32,11 +32,32 @@ export function formatCalendarDate(ymd?: string | null): string {
   })
 }
 
-export function formatSalesRangeHeading(dateFrom?: string | null, dateTo?: string | null): string {
+export function formatSalesRangeHeading(
+  dateFrom?: string | null,
+  dateTo?: string | null,
+  fromTime?: string | null,
+  toTime?: string | null,
+): string {
   if (!dateFrom && !dateTo) return 'All dates'
-  if (dateFrom && dateTo && dateFrom === dateTo) return formatCalendarDate(dateFrom)
-  if (dateFrom && dateTo) return `${formatCalendarDate(dateFrom)} – ${formatCalendarDate(dateTo)}`
-  return formatCalendarDate(dateFrom || dateTo)
+  const fromLabel = formatCalendarDate(dateFrom || dateTo)
+  const toLabel = formatCalendarDate(dateTo || dateFrom)
+  const hasTimes = Boolean((fromTime && fromTime.trim()) || (toTime && toTime.trim()))
+  if (!hasTimes) {
+    if (dateFrom && dateTo && dateFrom === dateTo) return fromLabel
+    if (dateFrom && dateTo) return `${fromLabel} – ${toLabel}`
+    return fromLabel
+  }
+  const startClock = formatClockLabel(fromTime || '00:00')
+  const endClock = formatClockLabel(toTime || '00:00')
+  const endIsNextMidnight = !(toTime && toTime.trim())
+  // Date-only end is next-midnight exclusive; say "through <end date>" when no toTime.
+  if (endIsNextMidnight) {
+    if (dateFrom && dateTo && dateFrom === dateTo) {
+      return `${fromLabel} ${startClock} – end of day`
+    }
+    return `${fromLabel} ${startClock} – through ${toLabel}`
+  }
+  return `${fromLabel} ${startClock} – ${toLabel} ${endClock}`
 }
 
 export function formatClockLabel(hhmm?: string | null): string {

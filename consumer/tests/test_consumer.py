@@ -137,7 +137,7 @@ def test_invalid_json():
 
 
 def test_price_not_derived_from_amount_when_missing():
-    """Unit price must come from MQTT or admin SET_PRICE — never amount÷volume."""
+    """Unit price must come from MQTT — never amount÷volume or commanded SET_PRICE."""
     payload = dict(VALID_PAYLOAD)
     del payload["pricePerLiter"]
     tx, err = normalize_transaction(payload)
@@ -146,7 +146,8 @@ def test_price_not_derived_from_amount_when_missing():
     assert tx.price_per_liter == Decimal("0")
 
 
-def test_apply_admin_unit_price_from_station():
+def test_apply_admin_unit_price_does_not_substitute_commanded():
+    """Missing observed price must stay missing — do not stamp station commanded."""
     db, cur = _mock_db_with_cursor(fetchone_result=(1400,))
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
@@ -155,8 +156,8 @@ def test_apply_admin_unit_price_from_station():
     assert err is None
     assert tx is not None
     service._apply_admin_unit_price(tx)
-    assert tx.price_per_liter == Decimal("1400")
-    assert cur.execute.called
+    assert tx.price_per_liter == Decimal("0")
+    assert not cur.execute.called
 
 
 def _mock_db_with_cursor(fetchone_result=None, execute_side_effect=None):
@@ -238,16 +239,18 @@ def test_hangup_completed_merges_into_live_fill_row():
 
 
 def test_hangup_completed_skips_when_live_row_already_complete():
+    """Same stable dedupe key → absorb; do not invent folds without keys."""
     db, cur = _mock_db_with_cursor()
     cur.fetchone.side_effect = [
         None,
         None,
         None,
-        ("tx-live", "COMPLETED"),
+        ("tx-live", "COMPLETED", "tx-completed:station-001:complete:shared"),
     ]
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-hangup"
+    payload["deduplicationKey"] = "tx-completed:station-001:complete:shared"
     tx, err = normalize_transaction(payload, source_topic="t")
     assert err is None
     status = service.process_message(
@@ -389,6 +392,8 @@ def test_reconnect_delay_configured_on_mqtt_client():
         mqtt_password="p",
         mqtt_topic="intelipump/#",
         mqtt_qos=1,
+        mqtt_topic_environment="lab",
+        mqtt_publish_sale_acks=False,
         postgres_host="postgres",
         postgres_port=5432,
         postgres_db="intelipump",

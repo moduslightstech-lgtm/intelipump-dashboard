@@ -61,7 +61,20 @@ def _station_today_start_utc(db: Session, station_id: str) -> tuple[datetime, st
     return start_local.astimezone(timezone.utc), tz_name
 
 
+def _as_decimal_str(value: Decimal | float | int | None) -> Optional[str]:
+    """Authoritative money/volume for reports — avoid binary float drift."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    try:
+        return format(Decimal(str(value)), "f")
+    except Exception:
+        return str(value)
+
+
 def _as_float(value: Decimal | float | int | None) -> Optional[float]:
+    """Live UI / SSE only — prefer ``_as_decimal_str`` for authoritative totals."""
     if value is None:
         return None
     return float(value)
@@ -272,11 +285,13 @@ def sales_summary(
         "stationId": station_id,
         "period": "TODAY",
         "transactionCount": 0,
-        "totalAmount": 0.0,
-        "totalVolumeLiters": 0.0,
-        "averageTransactionAmount": 0.0,
+        "totalAmount": "0",
+        "totalVolumeLiters": "0",
+        "averageTransactionAmount": "0",
         "latestTransactionAt": None,
         "timezone": "Africa/Lagos",
+        "totalAmountNumber": 0.0,
+        "totalVolumeLitersNumber": 0.0,
     }
     stmt = sales_filter(db, station_id=station_id)
     if stmt is None:
@@ -301,16 +316,21 @@ def sales_summary(
     ).one()
 
     count = int(row.transaction_count or 0)
-    total_amount = _as_float(row.total_amount) or 0.0
+    total_amount_s = _as_decimal_str(row.total_amount) or "0"
+    total_volume_s = _as_decimal_str(row.total_volume) or "0"
+    avg_s = _as_decimal_str(row.average_amount) or "0"
     return {
         "stationId": station_id,
         "period": "TODAY",
         "transactionCount": count,
-        "totalAmount": total_amount,
-        "totalVolumeLiters": _as_float(row.total_volume) or 0.0,
-        "averageTransactionAmount": (total_amount / count) if count else 0.0,
+        "totalAmount": total_amount_s,
+        "totalVolumeLiters": total_volume_s,
+        "averageTransactionAmount": avg_s if count else "0",
         "latestTransactionAt": row.latest_at.isoformat() if row.latest_at else None,
         "timezone": tz_name,
+        # Exact decimal strings are authoritative; float mirrors are UI-only.
+        "totalAmountNumber": float(total_amount_s),
+        "totalVolumeLitersNumber": float(total_volume_s),
     }
 
 

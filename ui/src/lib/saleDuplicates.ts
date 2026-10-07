@@ -20,6 +20,15 @@ export function isHangupDuplicateSale(
   if (existingSource && incomingSource && existingSource !== incomingSource) return false
   if (Number(existing.amount) !== Number(incoming.amount)) return false
   if (Number(existing.volumeLiters) !== Number(incoming.volumeLiters)) return false
+  // Two distinct COMPLETED sales with equal totals are legitimate consecutive
+  // customers — never collapse them by amount/time alone.
+  const existingDone = isCompletedSale(existing.status)
+  const incomingDone = isCompletedSale(incoming.status)
+  if (existingDone && incomingDone) return false
+  // Hangup twin: live fill + holster completion (or the reverse ordering).
+  if (!(isInProgressSale(existing.status) || isInProgressSale(incoming.status))) {
+    return false
+  }
   const a = Date.parse(existing.receivedAt)
   const b = Date.parse(incoming.receivedAt)
   if (!Number.isFinite(a) || !Number.isFinite(b)) return true

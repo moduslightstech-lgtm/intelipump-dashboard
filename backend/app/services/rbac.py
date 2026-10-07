@@ -171,6 +171,48 @@ def accessible_stations(db: Session, user: User) -> list[Station]:
     return []
 
 
+def accessible_station_mqtt_keys(db: Session, user: User) -> set[str] | None:
+    """MQTT / catalog station + device keys the user may see.
+
+    Returns ``None`` for unrestricted (platform / super admin). Used to scope
+    edge_devices and mqtt_messages that key by mqtt_station_id / device_id text.
+    """
+    if is_platform_operator(user) or is_super_admin(user):
+        return None
+    from app.models import Device
+
+    stations = accessible_stations(db, user)
+    keys: set[str] = set()
+    station_ids: list[UUID] = []
+    for station in stations:
+        station_ids.append(station.id)
+        if station.mqtt_station_id:
+            keys.add(station.mqtt_station_id)
+        if station.station_code:
+            keys.add(station.station_code)
+    if station_ids:
+        devices = db.scalars(
+            select(Device).where(Device.station_id.in_(station_ids))
+        ).all()
+        for device in devices:
+            if device.device_code:
+                keys.add(device.device_code)
+            if device.external_device_id:
+                keys.add(device.external_device_id)
+            if device.mqtt_client_id:
+                keys.add(device.mqtt_client_id)
+    return keys
+
+
+def topic_visible_to_user(topic: str | None, allowed_keys: set[str] | None) -> bool:
+    """True if an MQTT topic belongs to a station the user can access."""
+    if allowed_keys is None:
+        return True
+    if not topic or not allowed_keys:
+        return False
+    return any(key in topic for key in allowed_keys)
+
+
 def assert_station_access(
     db: Session,
     user: User,

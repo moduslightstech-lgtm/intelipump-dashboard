@@ -7,6 +7,8 @@ services:
     image: eclipse-mosquitto:2
     container_name: intelipump-lab-mqtt
     restart: unless-stopped
+    # LAB-only: avoid uid-1883 permission exits on passwd/data bind mounts.
+    user: "0:0"
     ports:
       # Non-production broker port for LAB Pi only. Firewall to Pi IPs.
       - "${LAB_MQTT_HOST_BIND:-0.0.0.0}:${LAB_MQTT_HOST_PORT:-1884}:1883"
@@ -148,8 +150,9 @@ services:
     container_name: intelipump-lab-nginx
     restart: unless-stopped
     ports:
-      # Local / SSH-tunnel only — does not take production :80/:443.
-      - "127.0.0.1:${LAB_HTTP_HOST_PORT:-8088}:80"
+      # Default: loopback only. Set LAB_HTTP_HOST_BIND=0.0.0.0 to reach from outside.
+      # Still not production :80/:443.
+      - "${LAB_HTTP_HOST_BIND:-127.0.0.1}:${LAB_HTTP_HOST_PORT:-8088}:80"
     volumes:
       - ./nginx/lab.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:

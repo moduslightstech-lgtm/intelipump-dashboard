@@ -141,7 +141,7 @@ def test_sales_summary_empty_when_station_unresolved(monkeypatch):
     monkeypatch.setattr(sales_svc, "sales_filter", lambda *_a, **_k: None)
     out = sales_svc.sales_summary(MagicMock(), station_id="missing")
     assert out["transactionCount"] == 0
-    assert out["totalAmount"] == 0.0
+    assert out["totalAmount"] in (0.0, "0", "0.0")
     assert out["timezone"] == "Africa/Lagos"
 
 

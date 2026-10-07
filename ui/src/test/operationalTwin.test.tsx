@@ -193,7 +193,8 @@ describe('hang-up duplicate collapse', () => {
       transactionId: 'tx-minute-later',
       receivedAt: '2026-09-07T16:45:01Z',
     }
-    expect(isHangupDuplicateSale({ ...hangup, status: 'COMPLETED' }, later)).toBe(true)
+    // Two COMPLETED equal-value sales must remain distinct.
+    expect(isHangupDuplicateSale({ ...hangup, status: 'COMPLETED' }, later)).toBe(false)
   })
 
   it('does not overlay DISPENSING on a completed hang-up', () => {

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -19,6 +19,9 @@ from app.schemas import (
 )
 from app.services.edge_device_status import calculate_device_status
 from app.services.identity import ledger_station_clause, mqtt_external_ids_for_station, resolve_station
+
+# Match sales/executive inclusion — live fills must not inflate dashboard totals.
+_COMPLETED_STATUSES = ("COMPLETED", "COMPLETE")
 
 
 def _day_bounds(tz_name: str) -> tuple[datetime, datetime]:
@@ -34,6 +37,13 @@ def _tx_time_col():
         PumpTransaction.transaction_completed_at,
         PumpTransaction.device_timestamp,
         PumpTransaction.received_at,
+    )
+
+
+def _completed_sale_clause():
+    return and_(
+        func.upper(func.coalesce(PumpTransaction.status, "")).in_(_COMPLETED_STATUSES),
+        PumpTransaction.amount.is_not(None),
     )
 
 
@@ -70,7 +80,7 @@ def get_summary(
 ) -> DashboardSummary:
     start, end, tz_name = _day_bounds_for(db, settings, station_id)
     time_col = _tx_time_col()
-    filters = [time_col >= start, time_col < end]
+    filters = [_completed_sale_clause(), time_col >= start, time_col < end]
     _apply_station_scope(db, filters, station_id, extra_where)
 
     amount = db.scalar(
@@ -133,7 +143,7 @@ def hourly_sales(
     start, end, _tz = _day_bounds_for(db, settings, station_id)
     time_col = _tx_time_col()
     hour = func.date_trunc("hour", time_col)
-    filters = [time_col >= start, time_col < end]
+    filters = [_completed_sale_clause(), time_col >= start, time_col < end]
     _apply_station_scope(db, filters, station_id, extra_where)
     stmt = (
         select(
@@ -165,7 +175,7 @@ def product_breakdown(
     start, end, _tz = _day_bounds_for(db, settings, station_id)
     time_col = _tx_time_col()
     product = func.coalesce(PumpTransaction.product, "Not mapped")
-    filters = [time_col >= start, time_col < end]
+    filters = [_completed_sale_clause(), time_col >= start, time_col < end]
     _apply_station_scope(db, filters, station_id, extra_where)
     stmt = (
         select(
@@ -195,7 +205,7 @@ def station_performance(
 ) -> list[StationPerformanceItem]:
     start, end = _day_bounds(settings.default_timezone)
     time_col = _tx_time_col()
-    filters = [time_col >= start, time_col < end]
+    filters = [_completed_sale_clause(), time_col >= start, time_col < end]
     if extra_where is not None:
         filters.append(extra_where)
     rows = db.execute(

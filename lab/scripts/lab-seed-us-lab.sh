@@ -109,18 +109,66 @@ WHERE p.station_id = s.id
   AND (p.mqtt_pump_id = '${PUMP_CODE}' OR p.pump_code = '${PUMP_CODE}');
 
 INSERT INTO nozzles (
-  station_id, pump_id, nozzle_code, mqtt_nozzle_id, name, nozzle_number,
-  product, display_order, status, active
+  station_id, pump_id, pump_code, nozzle_code, mqtt_nozzle_id, name, nozzle_number,
+  product, display_order, status, active, source_identifier, controller_address
 )
 SELECT
-  s.id, p.id, 'nozzle-1', 'nozzle-1', 'LAB Nozzle 1', 1, 'PMS', 1, 'ACTIVE', TRUE
+  s.id, p.id, p.pump_code, 'nozzle-1', 'nozzle-1', 'Nozzle 1', 1,
+  'PMS', 1, 'ACTIVE', TRUE, 'pump-1', '1'
 FROM stations s
 JOIN pumps p ON p.station_id = s.id
   AND (p.mqtt_pump_id = '${PUMP_CODE}' OR p.pump_code = '${PUMP_CODE}')
 WHERE (s.mqtt_station_id = '${STATION_MQTT}' OR s.station_code = '${STATION_CODE}')
   AND NOT EXISTS (
-    SELECT 1 FROM nozzles n WHERE n.pump_id = p.id AND n.nozzle_code = 'nozzle-1'
+    SELECT 1 FROM nozzles n WHERE n.pump_id = p.id
+      AND (n.nozzle_code = 'nozzle-1' OR n.mqtt_nozzle_id = 'nozzle-1' OR n.source_identifier = 'pump-1')
   );
+
+INSERT INTO nozzles (
+  station_id, pump_id, pump_code, nozzle_code, mqtt_nozzle_id, name, nozzle_number,
+  product, display_order, status, active, source_identifier, controller_address
+)
+SELECT
+  s.id, p.id, p.pump_code, 'nozzle-2', 'nozzle-2', 'Nozzle 2', 2,
+  'PMS', 2, 'ACTIVE', TRUE, 'pump-2', '2'
+FROM stations s
+JOIN pumps p ON p.station_id = s.id
+  AND (p.mqtt_pump_id = '${PUMP_CODE}' OR p.pump_code = '${PUMP_CODE}')
+WHERE (s.mqtt_station_id = '${STATION_MQTT}' OR s.station_code = '${STATION_CODE}')
+  AND NOT EXISTS (
+    SELECT 1 FROM nozzles n WHERE n.pump_id = p.id
+      AND (n.nozzle_code = 'nozzle-2' OR n.mqtt_nozzle_id = 'nozzle-2' OR n.source_identifier = 'pump-2')
+  );
+
+UPDATE nozzles n
+SET mqtt_nozzle_id = 'nozzle-1',
+    nozzle_code = 'nozzle-1',
+    source_identifier = 'pump-1',
+    controller_address = COALESCE(n.controller_address, '1'),
+    product = COALESCE(n.product, 'PMS'),
+    active = TRUE,
+    status = 'ACTIVE',
+    updated_at = NOW()
+FROM stations s
+JOIN pumps p ON p.station_id = s.id AND (p.mqtt_pump_id = '${PUMP_CODE}' OR p.pump_code = '${PUMP_CODE}')
+WHERE n.pump_id = p.id
+  AND (s.mqtt_station_id = '${STATION_MQTT}' OR s.station_code = '${STATION_CODE}')
+  AND (n.nozzle_number = 1 OR n.source_identifier = 'pump-1' OR n.mqtt_nozzle_id IN ('nozzle-1', '1'));
+
+UPDATE nozzles n
+SET mqtt_nozzle_id = 'nozzle-2',
+    nozzle_code = 'nozzle-2',
+    source_identifier = 'pump-2',
+    controller_address = COALESCE(n.controller_address, '2'),
+    product = COALESCE(n.product, 'PMS'),
+    active = TRUE,
+    status = 'ACTIVE',
+    updated_at = NOW()
+FROM stations s
+JOIN pumps p ON p.station_id = s.id AND (p.mqtt_pump_id = '${PUMP_CODE}' OR p.pump_code = '${PUMP_CODE}')
+WHERE n.pump_id = p.id
+  AND (s.mqtt_station_id = '${STATION_MQTT}' OR s.station_code = '${STATION_CODE}')
+  AND (n.nozzle_number = 2 OR n.source_identifier = 'pump-2' OR n.mqtt_nozzle_id IN ('nozzle-2', '2'));
 
 INSERT INTO mqtt_identity_map (
   entity_type, internal_id, mqtt_external_id, is_primary, notes
@@ -138,6 +186,6 @@ WHERE s.mqtt_station_id = '${STATION_MQTT}';
 SQL
 
 echo "Seeded LAB: station=${STATION_MQTT} device=${DEVICE_CODE} pump=${PUMP_CODE}"
-echo "Admin user (LAB API via local nginx):"
-echo "  TWIN_API_BASE=http://127.0.0.1:${LAB_HTTP_HOST_PORT:-8088} \\\\"
-echo "    ../scripts/create_admin_via_api.sh admin@lab.local 'choose-a-password'"
+echo "Admin user (LAB API container — not production):"
+echo "  API_CONTAINER=intelipump-lab-api ../scripts/create_admin_via_api.sh admin@lab.local 'choose-a-password'"
+echo "Login URL: http://DROPLET_IP:8088/  (or http://127.0.0.1:8088/ via tunnel)"

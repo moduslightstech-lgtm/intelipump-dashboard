@@ -24,7 +24,8 @@ def test_resolve_query_window_nigeria_morning():
         timezone="Africa/Lagos",
     )
     assert start == datetime(2026, 9, 10, 7, 0, tzinfo=ZoneInfo("UTC"))
-    assert end == datetime(2026, 9, 10, 11, 0, 59, 999000, tzinfo=ZoneInfo("UTC"))
+    # Exclusive end at local 12:00 → 11:00 UTC
+    assert end == datetime(2026, 9, 10, 11, 0, tzinfo=ZoneInfo("UTC"))
 
 
 def test_resolve_query_window_clamps_future_end_to_now():

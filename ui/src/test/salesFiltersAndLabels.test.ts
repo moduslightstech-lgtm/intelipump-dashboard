@@ -57,7 +57,7 @@ describe('sales time and money filters', () => {
     })
     expect(range.error).toBeUndefined()
     expect(range.start).toBe('2026-09-10T07:00:00.000Z')
-    expect(range.end).toBe('2026-09-10T11:00:59.999Z')
+    expect(range.end).toBe('2026-09-10T11:00:00.000Z')
   })
 
   it('rejects inverted same-day times', () => {
@@ -68,7 +68,7 @@ describe('sales time and money filters', () => {
       toTime: '08:00',
       timeZone: 'Africa/Lagos',
     })
-    expect(range.error).toMatch(/time/i)
+    expect(range.error).toMatch(/end must be after start|time/i)
   })
 
   it('parses and validates amount ranges', () => {

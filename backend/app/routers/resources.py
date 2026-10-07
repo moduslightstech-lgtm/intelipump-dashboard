@@ -26,7 +26,14 @@ from app.schemas import (
     StationUpdate,
 )
 from app.security import get_current_user
-from app.services.rbac import accessible_stations, assert_station_access, is_platform_operator, is_super_admin
+from app.services.rbac import (
+    accessible_station_mqtt_keys,
+    accessible_stations,
+    assert_station_access,
+    is_platform_operator,
+    is_super_admin,
+    topic_visible_to_user,
+)
 from app.services.station_search import (
     list_critical_alert_stations,
     list_favorite_stations,
@@ -364,20 +371,28 @@ def update_pump(
 @mqtt_router.get("/messages", response_model=list[MqttMessageOut])
 def list_mqtt_messages(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[MqttMessage]:
-    return list(
-        db.scalars(select(MqttMessage).order_by(MqttMessage.received_at.desc()).limit(200)).all()
+    rows = list(
+        db.scalars(select(MqttMessage).order_by(MqttMessage.received_at.desc()).limit(500)).all()
     )
+    allowed = accessible_station_mqtt_keys(db, user)
+    if allowed is None:
+        return rows[:200]
+    return [m for m in rows if topic_visible_to_user(m.topic, allowed)][:200]
 
 
 @mqtt_router.get("/rejected", response_model=list[RejectedMessageOut])
 def list_rejected(
     db: Session = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ) -> list[RejectedMessage]:
-    return list(
+    rows = list(
         db.scalars(
-            select(RejectedMessage).order_by(RejectedMessage.received_at.desc()).limit(200)
+            select(RejectedMessage).order_by(RejectedMessage.received_at.desc()).limit(500)
         ).all()
     )
+    allowed = accessible_station_mqtt_keys(db, user)
+    if allowed is None:
+        return rows[:200]
+    return [m for m in rows if topic_visible_to_user(m.topic, allowed)][:200]

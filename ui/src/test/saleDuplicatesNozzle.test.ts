@@ -41,4 +41,14 @@ describe('isHangupDuplicateSale nozzle scope', () => {
     })
     expect(isHangupDuplicateSale(live, hangup)).toBe(true)
   })
+
+  it('keeps two equal-value completed sales distinct', () => {
+    const first = sale({ transactionId: 'tx-a', status: 'COMPLETED' })
+    const second = sale({
+      transactionId: 'tx-b',
+      status: 'COMPLETED',
+      receivedAt: '2026-09-10T18:51:30.000Z',
+    })
+    expect(isHangupDuplicateSale(first, second)).toBe(false)
+  })
 })

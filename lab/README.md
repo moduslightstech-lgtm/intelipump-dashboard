@@ -27,13 +27,37 @@ cd lab
 ./scripts/lab-seed-us-lab.sh # idempotent: InteliPump-US-Lab + InteliPump-Lab-pi-001 + pump-1
 ```
 
-Create a LAB admin (points at LAB nginx, not production :80):
+Create a LAB admin (into `intelipump-lab-api` / LAB DB — not production):
 
 ```bash
-TWIN_API_BASE=http://127.0.0.1:8088 ../scripts/create_admin_via_api.sh admin@lab.local 'strong-lab-password'
+API_CONTAINER=intelipump-lab-api ../scripts/create_admin_via_api.sh admin@lab.intelipump.com 'strong-lab-password'
+```
+
+Map device / pump / nozzles to the LAB Pi (`channel_map.us-lab.json`):
+
+```bash
+export TWIN_API_BASE=http://127.0.0.1:8088
+export TWIN_ADMIN_EMAIL='admin@lab.intelipump.com'
+export TWIN_ADMIN_PASSWORD='strong-lab-password'
+./scripts/provision_us_lab_hardware.sh
 ```
 
 Dashboard: `http://127.0.0.1:8088/` (Host `lab.intelipump.local`).
+
+### Expose LAB HTTP outside the droplet
+
+```bash
+# in .env.lab
+LAB_HTTP_HOST_BIND=0.0.0.0
+LAB_HTTP_HOST_PORT=8088
+
+docker compose --env-file .env.lab up -d nginx
+# firewall (prefer your IP only):
+#   ufw allow from YOUR.IP.HERE to any port 8088 proto tcp
+# then open: http://DROPLET_IP:8088/
+```
+
+Revert with `LAB_HTTP_HOST_BIND=127.0.0.1` and recreate nginx. Do not put LAB on :80/:443.
 
 ## Health checks
 

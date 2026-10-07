@@ -85,7 +85,11 @@ class TransactionOut(BaseModel):
     volume_liters: Optional[Decimal] = None
     amount: Optional[Decimal] = None
     currency: Optional[str] = None
+    # Immutable pump-observed unit price stored on the sale row. Never replaced
+    # by current station/pump commanded SET_PRICE.
     price_per_liter: Optional[Decimal] = None
+    # True when no authoritative observed unit price was stored on the sale.
+    price_uncertain: bool = False
     raw_frame: Optional[str] = None
     status: Optional[str] = None
     source_topic: Optional[str] = None
@@ -95,6 +99,9 @@ class TransactionOut(BaseModel):
     raw_payload: Optional[dict[str, Any]] = None
     received_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    # Sale-occurrence time (completed → device → received → created). Used for
+    # filtering, sorting, and Sales table display — not cloud ingest time alone.
+    occurrence_at: Optional[datetime] = None
 
 
 class PaginatedTransactions(BaseModel):

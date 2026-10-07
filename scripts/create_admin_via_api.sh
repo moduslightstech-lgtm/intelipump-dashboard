@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
-# Create or reset an ADMIN user inside the running intelipump-api container.
+# Create or reset an ADMIN user inside a running intelipump-api container.
 # Run on the droplet after cutover:
 #   ./scripts/create_admin_via_api.sh admin@example.com 'your-strong-password'
+# LAB stack:
+#   API_CONTAINER=intelipump-lab-api ./scripts/create_admin_via_api.sh admin@lab.local 'lab-password'
 set -euo pipefail
 
 EMAIL="${1:-}"
 PASSWORD="${2:-}"
 FIRST="${3:-Admin}"
 LAST="${4:-User}"
+API_CONTAINER="${API_CONTAINER:-intelipump-api}"
 
 if [[ -z "$EMAIL" || -z "$PASSWORD" ]]; then
   echo "Usage: $0 <email> <password> [first_name] [last_name]" >&2
+  echo "  API_CONTAINER=intelipump-lab-api $0 ...   # LAB DB" >&2
   exit 1
 fi
 
-if [[ "$(docker inspect -f '{{.State.Running}}' intelipump-api 2>/dev/null || true)" != "true" ]]; then
-  echo "ERROR: intelipump-api is not running." >&2
+if [[ "$(docker inspect -f '{{.State.Running}}' "$API_CONTAINER" 2>/dev/null || true)" != "true" ]]; then
+  echo "ERROR: $API_CONTAINER is not running." >&2
   exit 1
 fi
+
+echo "Using container: $API_CONTAINER"
 
 docker exec \
   -e ADMIN_EMAIL="$EMAIL" \
   -e ADMIN_PASSWORD="$PASSWORD" \
   -e ADMIN_FIRST="$FIRST" \
   -e ADMIN_LAST="$LAST" \
-  intelipump-api \
+  "$API_CONTAINER" \
   python -c "
 from app.database import SessionLocal
 from app.models import User

@@ -37,9 +37,14 @@ case "${MQTT_TOPIC:-}" in
 esac
 
 HTTP_PORT="${LAB_HTTP_HOST_PORT:-8088}"
+HTTP_BIND="${LAB_HTTP_HOST_BIND:-127.0.0.1}"
 MQTT_PORT_HOST="${LAB_MQTT_HOST_PORT:-1884}"
 [[ "$HTTP_PORT" != "80" && "$HTTP_PORT" != "443" ]] || die "LAB_HTTP_HOST_PORT must not be 80/443"
 [[ "$MQTT_PORT_HOST" != "1883" ]] || die "LAB_MQTT_HOST_PORT must not be 1883 (production)"
+case "$HTTP_BIND" in
+  127.0.0.1|0.0.0.0|localhost) ;;
+  *) die "LAB_HTTP_HOST_BIND must be 127.0.0.1 or 0.0.0.0 (got '$HTTP_BIND')" ;;
+esac
 
 # Paths must live under lab/
 for rel in postgres/data mosquitto/data mosquitto/log; do

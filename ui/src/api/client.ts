@@ -239,6 +239,8 @@ export type Transaction = {
   amount: number | null
   currency: string | null
   price_per_liter: number | null
+  /** True when API has no authoritative pump-observed unit price for this sale. */
+  price_uncertain?: boolean
   raw_frame: string | null
   status: string | null
   source_topic: string | null
@@ -246,6 +248,9 @@ export type Transaction = {
   transaction_completed_at: string | null
   raw_payload: Record<string, unknown> | null
   received_at: string | null
+  created_at?: string | null
+  /** Sale-occurrence time (completed → device → received → created). */
+  occurrence_at?: string | null
 }
 
 export type Station = {

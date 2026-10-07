@@ -136,3 +136,74 @@ def test_old_correlation_does_not_update_via_station_pump_fallback():
     assert "mqtt_station_id" not in sqls[0]
     assert "mqtt_pump_id" not in sqls[0]
     alert.assert_called_once()
+
+
+def test_sent_unverified_then_confirmed_updates_same_correlation():
+    """Late DC3 upgrade COMMAND_RESULT must move dashboard to CONFIRMED."""
+    db = MagicMock()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    db.connection.return_value.__enter__.return_value = conn
+    cur.rowcount = 1
+
+    corr = "cca2e75a-5b6f-4085-b72b-2d4066fb73c2"
+    unverified = _envelope(
+        correlation=corr,
+        pump_id="pump-1",
+        status="SENT_UNVERIFIED",
+        accepted=True,
+        detail="cd5_link_ack_dc3_idle_or_timeout",
+    )
+    confirmed = _envelope(
+        correlation=corr,
+        pump_id="pump-1",
+        status="PRICE_CONFIRMED",
+        accepted=True,
+        detail="dc3_late_match_after_sent_unverified",
+    )
+    with patch("app.services.alert_writer.upsert_alert") as alert:
+        r1 = handle_command_result(db, topic="t/1", payload=unverified)
+        r2 = handle_command_result(db, topic="t/2", payload=confirmed)
+
+    assert "status_sent_unverified" in r1
+    assert "status_confirmed" in r2
+    alert.assert_not_called()
+    updates = [
+        call.args
+        for call in cur.execute.call_args_list
+        if call.args and "price_command_status" in str(call.args[0])
+    ]
+    assert [u[1][0] for u in updates] == ["SENT_UNVERIFIED", "CONFIRMED"]
+    assert [u[1][3] for u in updates] == [corr, corr]
+
+
+def test_price_partial_does_not_map_to_confirmed():
+    """One dart address DC3 match must not mark the pump fully CONFIRMED."""
+    db = MagicMock()
+    conn = MagicMock()
+    cur = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    db.connection.return_value.__enter__.return_value = conn
+    cur.rowcount = 1
+
+    partial = _envelope(
+        correlation="partial-corr-1",
+        pump_id="pump-5",
+        status="PRICE_PARTIAL",
+        accepted=True,
+        detail="dc3_late_partial_after_sent_unverified",
+    )
+    with patch("app.services.alert_writer.upsert_alert") as alert:
+        result = handle_command_result(db, topic="t/partial", payload=partial)
+
+    assert "status_partial" in result
+    alert.assert_not_called()
+    updates = [
+        call.args
+        for call in cur.execute.call_args_list
+        if call.args and "price_command_status" in str(call.args[0])
+    ]
+    assert updates
+    assert updates[0][1][0] == "PARTIAL"
+

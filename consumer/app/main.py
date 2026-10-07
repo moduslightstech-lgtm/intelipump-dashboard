@@ -91,6 +91,69 @@ class ConsumerApp:
             topic=topic, payload=payload, retained=retained
         )
 
+    def _maybe_publish_sale_committed(self, transaction, payload: dict) -> None:
+        """Publish application ACK after PostgreSQL has the completed sale.
+
+        Pi controllers with ``require_application_sale_ack`` wait for this
+        before marking sync_queue DELIVERED. Broker PUBACK alone is not enough.
+        Deferred-local (consumer outbox only) must NOT emit this ACK.
+        """
+        if self.mqtt is None or not self.settings.mqtt_publish_sale_acks:
+            return
+        status = (getattr(transaction, "status", None) or "").upper()
+        if status not in {"COMPLETED", "COMPLETE"}:
+            return
+        device_id = str(
+            getattr(transaction, "device_id", None)
+            or payload.get("deviceId")
+            or ""
+        ).strip()
+        if not device_id:
+            return
+        nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        dedupe = str(
+            getattr(transaction, "deduplication_key", None)
+            or nested.get("deduplicationKey")
+            or payload.get("deduplicationKey")
+            or ""
+        ).strip()
+        env = self.settings.mqtt_topic_environment
+        topic = f"intelipump/{env}/devices/{device_id}/sale-acks"
+        body = {
+            "eventType": "SALE_COMMITTED",
+            "environment": env.upper() if env == "lab" else "PRODUCTION",
+            "deviceId": device_id,
+            "stationId": transaction.station_id,
+            "transactionId": transaction.transaction_id,
+            "deduplicationKey": dedupe or None,
+            "amount": str(transaction.amount) if transaction.amount is not None else None,
+            "volumeLiters": (
+                str(transaction.volume_liters)
+                if transaction.volume_liters is not None
+                else None
+            ),
+        }
+        try:
+            import json
+
+            self.mqtt.publish(
+                topic,
+                json.dumps(body, separators=(",", ":")).encode("utf-8"),
+                qos=1,
+                retain=False,
+            )
+            logger.info(
+                "Published SALE_COMMITTED deviceId=%s transactionId=%s dedupe=%s",
+                device_id,
+                transaction.transaction_id,
+                dedupe or None,
+            )
+        except Exception:
+            logger.exception(
+                "Failed publishing SALE_COMMITTED transactionId=%s",
+                transaction.transaction_id,
+            )
+
     def handle_message(self, topic: str, raw: bytes, qos: int, retained: bool) -> str | None:
         payload, json_error = parse_json_payload(raw)
         if json_error is not None:
@@ -239,6 +302,8 @@ class ConsumerApp:
                     getattr(transaction, "station_id", None),
                     tx_id,
                 )
+            if result in {"processed", "duplicate"} and transaction is not None:
+                self._maybe_publish_sale_committed(transaction, payload)
             return result
 
         if kind == KIND_COMMAND_RESULT:

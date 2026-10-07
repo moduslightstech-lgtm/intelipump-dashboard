@@ -37,6 +37,7 @@ STATUS_FROM_EXECUTION = {
     "QUEUED_FOR_CONTROLLER": "PENDING",
     "PRICE_CONFIRMED": "CONFIRMED",
     "PRICE_PARTIAL": "PARTIAL",
+    "SENT_UNVERIFIED": "SENT_UNVERIFIED",
     "PRICE_FAILED": "FAILED",
     "REJECTED": "FAILED",
     "ENQUEUE_FAILED": "FAILED",
@@ -186,7 +187,12 @@ def command_result_failed(payload: dict[str, Any]) -> bool:
     nested = inner_payload(payload)
     accepted = nested.get("accepted", payload.get("accepted"))
     status = _execution_status(payload)
-    if status in {"PENDING_CONTROLLER", "PRICE_CONFIRMED", "PRICE_PARTIAL"}:
+    if status in {
+        "PENDING_CONTROLLER",
+        "PRICE_CONFIRMED",
+        "PRICE_PARTIAL",
+        "SENT_UNVERIFIED",
+    }:
         return False
     if accepted is False:
         return True
