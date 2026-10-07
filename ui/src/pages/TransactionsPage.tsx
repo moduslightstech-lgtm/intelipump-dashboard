@@ -6,6 +6,7 @@ import {
   fmtLiters,
   fmtNaira,
   fmtTime,
+  getPumps,
   getStations,
   getTransactions,
   stationLabel,
@@ -69,6 +70,7 @@ export default function TransactionsPage() {
   const [toTime, setToTime] = useState(() => readParam(searchParams, 'toTime'))
   const [status, setStatus] = useState(() => readParam(searchParams, 'status', 'COMPLETED'))
   const [product, setProduct] = useState(() => readParam(searchParams, 'product'))
+  const [pumpId, setPumpId] = useState(() => readParam(searchParams, 'pump'))
   const [q, setQ] = useState(() => readParam(searchParams, 'q'))
   const [minAmount, setMinAmount] = useState(() => readParam(searchParams, 'minAmount'))
   const [maxAmount, setMaxAmount] = useState(() => readParam(searchParams, 'maxAmount'))
@@ -89,6 +91,7 @@ export default function TransactionsPage() {
     toTime: readParam(searchParams, 'toTime'),
     status: readParam(searchParams, 'status', 'COMPLETED'),
     product: readParam(searchParams, 'product'),
+    pumpId: readParam(searchParams, 'pump'),
     q: readParam(searchParams, 'q'),
     minAmount: readParam(searchParams, 'minAmount'),
     maxAmount: readParam(searchParams, 'maxAmount'),
@@ -99,6 +102,10 @@ export default function TransactionsPage() {
   const stationsQ = useQuery({
     queryKey: ['stations'],
     queryFn: async () => (await getStations()).data,
+  })
+  const pumpsQ = useQuery({
+    queryKey: ['pumps'],
+    queryFn: async () => (await getPumps()).data,
   })
 
   const catalogStations = stationsQ.data || []
@@ -119,6 +126,32 @@ export default function TransactionsPage() {
   )
   const stationFilter =
     applied.stationId || selectedStation?.station_code || selectedStation?.mqtt_station_id || ''
+  const pumpOptions = useMemo(() => {
+    const station = selectedStation
+    const rows = (pumpsQ.data || []).filter((p) => {
+      if (p.active === false) return false
+      if (!station) return true
+      return (
+        p.station_id === station.id ||
+        p.station_id === station.station_code ||
+        p.station_id === station.mqtt_station_id
+      )
+    })
+    const ids = new Set<string>()
+    for (const p of rows) {
+      const id = (p.mqtt_pump_id || p.pump_code || '').trim()
+      if (id) ids.add(id)
+    }
+    // Keep a URL-selected pump visible even if catalog is slow/incomplete.
+    if (pumpId) ids.add(pumpId)
+    if (applied.pumpId) ids.add(applied.pumpId)
+    return Array.from(ids).sort((a, b) => {
+      const na = Number(a.replace(/\D+/g, '')) || 0
+      const nb = Number(b.replace(/\D+/g, '')) || 0
+      if (na !== nb) return na - nb
+      return a.localeCompare(b)
+    })
+  }, [pumpsQ.data, selectedStation, pumpId, applied.pumpId])
   // Always filter/display in Nigeria business time for SAO (ignore browser TZ /
   // mislabeled America/Chicago station rows).
   const tz = resolveSalesTimeZone(selectedStation?.timezone || NIGERIA_TZ)
@@ -143,6 +176,7 @@ export default function TransactionsPage() {
       station_id: stationFilter || undefined,
       status: applied.status || undefined,
       product: applied.product || undefined,
+      pump_id: applied.pumpId || undefined,
       q: applied.q || undefined,
       date_from: applied.dateFrom || undefined,
       date_to: applied.dateTo || undefined,
@@ -190,6 +224,7 @@ export default function TransactionsPage() {
       if (next.toTime) sp.set('toTime', next.toTime)
       if (next.status) sp.set('status', next.status)
       if (next.product) sp.set('product', next.product)
+      if (next.pumpId) sp.set('pump', next.pumpId)
       if (next.q) sp.set('q', next.q)
       if (next.minAmount) sp.set('minAmount', next.minAmount)
       if (next.maxAmount) sp.set('maxAmount', next.maxAmount)
@@ -211,6 +246,7 @@ export default function TransactionsPage() {
       toTime,
       status,
       product,
+      pumpId,
       q: q.trim(),
       minAmount: minAmount.trim(),
       maxAmount: maxAmount.trim(),
@@ -247,6 +283,7 @@ export default function TransactionsPage() {
     setToTime('')
     setStatus('COMPLETED')
     setProduct('')
+    setPumpId('')
     setQ('')
     setMinAmount('')
     setMaxAmount('')
@@ -261,6 +298,7 @@ export default function TransactionsPage() {
       toTime: '',
       status: 'COMPLETED',
       product: '',
+      pumpId: '',
       q: '',
       minAmount: '',
       maxAmount: '',
@@ -319,6 +357,7 @@ export default function TransactionsPage() {
       station_id: params.station_id,
       status: params.status,
       product: params.product,
+      pump_id: params.pump_id,
       q: params.q,
       date_from: params.date_from,
       date_to: params.date_to,
@@ -414,6 +453,19 @@ export default function TransactionsPage() {
       },
     })
   }
+  if (applied.pumpId) {
+    chips.push({
+      key: 'pump',
+      label: `Pump: ${applied.pumpId}`,
+      clear: () => {
+        setPumpId('')
+        const draft = { ...applied, pumpId: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
 
   const onFilterKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -497,6 +549,20 @@ export default function TransactionsPage() {
             <option value="">All products</option>
             <option value="PMS">PMS</option>
             <option value="AGO">AGO</option>
+          </CompactSelect>
+          <CompactSelect
+            id="transactions-pump"
+            name="pump"
+            label="Pump"
+            value={pumpId}
+            onChange={(e) => setPumpId(e.target.value)}
+          >
+            <option value="">All pumps</option>
+            {pumpOptions.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
           </CompactSelect>
           <CompactInput
             label="Transaction ID"

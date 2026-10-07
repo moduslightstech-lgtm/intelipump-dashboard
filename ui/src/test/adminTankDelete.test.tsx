@@ -78,6 +78,38 @@ describe('Transactions table', () => {
         },
       ],
     } as any)
+    vi.spyOn(client, 'getPumps').mockResolvedValue({
+      data: [
+        {
+          id: 'p1',
+          station_id: 'st2',
+          pump_code: 'pump-1',
+          mqtt_pump_id: 'pump-1',
+          pump_number: 1,
+          manufacturer: null,
+          model: null,
+          protocol: null,
+          status: 'ACTIVE',
+          active: true,
+          created_at: '',
+          updated_at: '',
+        },
+        {
+          id: 'p3',
+          station_id: 'st2',
+          pump_code: 'pump-3',
+          mqtt_pump_id: 'pump-3',
+          pump_number: 3,
+          manufacturer: null,
+          model: null,
+          protocol: null,
+          status: 'ACTIVE',
+          active: true,
+          created_at: '',
+          updated_at: '',
+        },
+      ],
+    } as any)
     vi.spyOn(client, 'getTransactions').mockResolvedValue({
       data: {
         items: [
@@ -153,6 +185,27 @@ describe('Transactions table', () => {
     await waitFor(() => {
       expect(client.getTransactions).toHaveBeenCalledWith(
         expect.objectContaining({ product: 'PMS' }),
+      )
+    })
+  })
+
+  it('filters by pump-1 and sends pump_id to the API for totals', async () => {
+    render(
+      wrap(
+        <MemoryRouter
+          initialEntries={['/transactions?station=SAO-RS-001&from=2026-09-07&to=2026-09-07']}
+        >
+          <TransactionsPage />
+        </MemoryRouter>,
+      ),
+    )
+    const pumpSelect = await screen.findByLabelText('Pump')
+    await waitFor(() => expect(pumpSelect).toContainHTML('pump-1'))
+    fireEvent.change(pumpSelect, { target: { value: 'pump-1' } })
+    fireEvent.click(screen.getByRole('button', { name: /apply filters/i }))
+    await waitFor(() => {
+      expect(client.getTransactions).toHaveBeenCalledWith(
+        expect.objectContaining({ pump_id: 'pump-1' }),
       )
     })
   })
