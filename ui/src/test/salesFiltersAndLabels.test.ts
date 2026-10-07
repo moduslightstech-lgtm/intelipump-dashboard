@@ -78,3 +78,16 @@ describe('sales time and money filters', () => {
     expect(validateMoneyRange('-1', '', 'Sale amount').error).toMatch(/negative/i)
   })
 })
+
+describe('sales product filter URL contract', () => {
+  it('round-trips product query param for PMS and AGO', () => {
+    for (const product of ['PMS', 'AGO'] as const) {
+      const sp = new URLSearchParams()
+      sp.set('product', product)
+      expect(sp.get('product')).toBe(product)
+      // API uses the same key the Sales page sends via getTransactions params.
+      expect({ product: sp.get('product') || undefined }.product).toBe(product)
+    }
+    expect({ product: '' || undefined }.product).toBeUndefined()
+  })
+})

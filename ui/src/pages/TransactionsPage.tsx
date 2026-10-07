@@ -68,6 +68,7 @@ export default function TransactionsPage() {
   const [fromTime, setFromTime] = useState(() => readParam(searchParams, 'fromTime'))
   const [toTime, setToTime] = useState(() => readParam(searchParams, 'toTime'))
   const [status, setStatus] = useState(() => readParam(searchParams, 'status', 'COMPLETED'))
+  const [product, setProduct] = useState(() => readParam(searchParams, 'product'))
   const [q, setQ] = useState(() => readParam(searchParams, 'q'))
   const [minAmount, setMinAmount] = useState(() => readParam(searchParams, 'minAmount'))
   const [maxAmount, setMaxAmount] = useState(() => readParam(searchParams, 'maxAmount'))
@@ -87,6 +88,7 @@ export default function TransactionsPage() {
     fromTime: readParam(searchParams, 'fromTime'),
     toTime: readParam(searchParams, 'toTime'),
     status: readParam(searchParams, 'status', 'COMPLETED'),
+    product: readParam(searchParams, 'product'),
     q: readParam(searchParams, 'q'),
     minAmount: readParam(searchParams, 'minAmount'),
     maxAmount: readParam(searchParams, 'maxAmount'),
@@ -140,6 +142,7 @@ export default function TransactionsPage() {
       sort: 'occurrence_at,desc',
       station_id: stationFilter || undefined,
       status: applied.status || undefined,
+      product: applied.product || undefined,
       q: applied.q || undefined,
       date_from: applied.dateFrom || undefined,
       date_to: applied.dateTo || undefined,
@@ -186,6 +189,7 @@ export default function TransactionsPage() {
       if (next.fromTime) sp.set('fromTime', next.fromTime)
       if (next.toTime) sp.set('toTime', next.toTime)
       if (next.status) sp.set('status', next.status)
+      if (next.product) sp.set('product', next.product)
       if (next.q) sp.set('q', next.q)
       if (next.minAmount) sp.set('minAmount', next.minAmount)
       if (next.maxAmount) sp.set('maxAmount', next.maxAmount)
@@ -206,6 +210,7 @@ export default function TransactionsPage() {
       fromTime,
       toTime,
       status,
+      product,
       q: q.trim(),
       minAmount: minAmount.trim(),
       maxAmount: maxAmount.trim(),
@@ -241,6 +246,7 @@ export default function TransactionsPage() {
     setFromTime('')
     setToTime('')
     setStatus('COMPLETED')
+    setProduct('')
     setQ('')
     setMinAmount('')
     setMaxAmount('')
@@ -254,6 +260,7 @@ export default function TransactionsPage() {
       fromTime: '',
       toTime: '',
       status: 'COMPLETED',
+      product: '',
       q: '',
       minAmount: '',
       maxAmount: '',
@@ -311,6 +318,7 @@ export default function TransactionsPage() {
     const url = exportTransactionsUrl({
       station_id: params.station_id,
       status: params.status,
+      product: params.product,
       q: params.q,
       date_from: params.date_from,
       date_to: params.date_to,
@@ -393,6 +401,19 @@ export default function TransactionsPage() {
       },
     })
   }
+  if (applied.product) {
+    chips.push({
+      key: 'product',
+      label: `Product: ${applied.product}`,
+      clear: () => {
+        setProduct('')
+        const draft = { ...applied, product: '' }
+        setApplied(draft)
+        setPage(1)
+        syncUrl(draft, 1, pageSize)
+      },
+    })
+  }
 
   const onFilterKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -423,7 +444,7 @@ export default function TransactionsPage() {
         }}
         onKeyDown={onFilterKeyDown}
       >
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 items-end">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 items-end">
           <CompactSelect
             id="transactions-station"
             name="station"
@@ -465,6 +486,17 @@ export default function TransactionsPage() {
             <option value="DISPENSING">Dispensing</option>
             <option value="PENDING">Pending</option>
             <option value="REJECTED">Rejected</option>
+          </CompactSelect>
+          <CompactSelect
+            id="transactions-product"
+            name="product"
+            label="Product"
+            value={product}
+            onChange={(e) => setProduct(e.target.value)}
+          >
+            <option value="">All products</option>
+            <option value="PMS">PMS</option>
+            <option value="AGO">AGO</option>
           </CompactSelect>
           <CompactInput
             label="Transaction ID"

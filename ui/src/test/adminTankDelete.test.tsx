@@ -137,6 +137,25 @@ describe('Transactions table', () => {
       )
     })
   })
+
+  it('filters by product PMS and sends product to the API for totals', async () => {
+    render(
+      wrap(
+        <MemoryRouter initialEntries={['/transactions?from=2026-09-07&to=2026-09-07']}>
+          <TransactionsPage />
+        </MemoryRouter>,
+      ),
+    )
+    const productSelect = await screen.findByLabelText('Product')
+    expect(productSelect).toHaveValue('')
+    fireEvent.change(productSelect, { target: { value: 'PMS' } })
+    fireEvent.click(screen.getByRole('button', { name: /apply filters/i }))
+    await waitFor(() => {
+      expect(client.getTransactions).toHaveBeenCalledWith(
+        expect.objectContaining({ product: 'PMS' }),
+      )
+    })
+  })
 })
 
 describe('Admin tank delete', () => {
