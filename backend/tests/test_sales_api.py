@@ -156,6 +156,12 @@ def test_recent_sales_requires_station_id(monkeypatch):
 
 
 def test_recent_sales_returns_generic_station_payload(monkeypatch):
+    """Unmapped MQTT station id still returns sales (Phase 9 generic path).
+
+    Fixture note: ``db.scalars`` is used both for Station suffix resolution and
+    for the PumpTransaction listing. Returning sale rows for Station lookups is
+    a stale mock (sale rows lack ``station_code``) — not a runtime defect.
+    """
     _env(monkeypatch)
     received = datetime(2026, 9, 6, 3, 10, tzinfo=timezone.utc)
     row = SimpleNamespace(
@@ -175,6 +181,17 @@ def test_recent_sales_returns_generic_station_payload(monkeypatch):
         device_timestamp=received,
     )
 
+    def _entity_name(stmt) -> str | None:
+        try:
+            descriptions = getattr(stmt, "column_descriptions", None) or []
+            if descriptions:
+                ent = descriptions[0].get("entity")
+                if ent is not None:
+                    return getattr(ent, "__name__", None) or getattr(ent, "name", None)
+        except Exception:
+            return None
+        return None
+
     class _DB:
         def get(self, *_args, **_kwargs):
             return None
@@ -182,8 +199,12 @@ def test_recent_sales_returns_generic_station_payload(monkeypatch):
         def scalar(self, *_args, **_kwargs):
             return None
 
-        def scalars(self, _stmt):
-            return SimpleNamespace(all=lambda: [row])
+        def scalars(self, stmt):
+            # Identity resolution queries Station / aliases — empty here.
+            # Only PumpTransaction listing returns the sale row.
+            if _entity_name(stmt) == "PumpTransaction":
+                return SimpleNamespace(all=lambda: [row])
+            return SimpleNamespace(all=lambda: [])
 
     app = create_app()
     app.dependency_overrides[get_db] = lambda: _DB()
