@@ -120,9 +120,15 @@ def normalize_transaction(
     if amount_err:
         return None, ValidationError("MISSING_AMOUNT", amount_err)
 
-    # Never derive unit price from amount/volume — rounding makes ₦/L drift.
-    # Never fill from stations.commanded_unit_price_* (that is current SET_PRICE).
-    price_raw = _first(payload, "pricePerLiter", "price_per_liter")
+    # Never derive unit price from amount/volume — rounding makes ₦/L drift
+    # (e.g. 100000/74→1351 for a genuine 1355 sale). Never use
+    # estimatedUnitPriceRaw. Never fill from commanded SET_PRICE.
+    # priceUncertain / missing pricePerLiter stay as 0 so the API marks
+    # price_uncertain without inventing a figure.
+    if payload.get("priceUncertain") is True:
+        price_raw = None
+    else:
+        price_raw = _first(payload, "pricePerLiter", "price_per_liter")
     if price_raw is None:
         price_per_liter = Decimal("0")
     else:

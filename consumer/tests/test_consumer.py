@@ -146,6 +146,28 @@ def test_price_not_derived_from_amount_when_missing():
     assert tx.price_per_liter == Decimal("0")
 
 
+def test_price_uncertain_and_estimated_raw_are_not_authoritative():
+    """priceUncertain / estimatedUnitPriceRaw must not become sale unit price."""
+    payload = dict(VALID_PAYLOAD)
+    payload["pricePerLiter"] = "1351.00"
+    payload["priceUncertain"] = True
+    payload["estimatedUnitPriceRaw"] = 1351
+    tx, err = normalize_transaction(payload)
+    assert err is None
+    assert tx is not None
+    assert tx.price_per_liter == Decimal("0")
+
+    payload2 = dict(VALID_PAYLOAD)
+    del payload2["pricePerLiter"]
+    payload2["estimatedUnitPriceRaw"] = 1358
+    payload2["amount"] = "1100.00"
+    payload2["volumeLiters"] = "0.81"
+    tx2, err2 = normalize_transaction(payload2)
+    assert err2 is None
+    assert tx2 is not None
+    assert tx2.price_per_liter == Decimal("0")
+
+
 def test_apply_admin_unit_price_does_not_substitute_commanded():
     """Missing observed price must stay missing — do not stamp station commanded."""
     db, cur = _mock_db_with_cursor(fetchone_result=(1400,))
