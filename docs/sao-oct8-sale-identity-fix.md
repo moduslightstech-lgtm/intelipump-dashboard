@@ -1,51 +1,34 @@
-# SAO Oct-8 sale identity fix — review, deploy & acceptance
+# SAO Oct-8 sale identity fix — release runbook
 
-**Pinned release commits (do not deploy unpinned `latest`):**
+**Do not enable application sale ACK. Do not rewrite Oct-8 historical rows. Do not point test traffic at SAO.**
 
-| Repo | Branch | Commit | Role |
-|------|--------|--------|------|
-| `intelipump-dashboard` | `prod_feature` | `3510426f6ee5126531c76749d3c810c5c6e4e192` | Cloud consumer + 028 harden (build this) |
-| `intelipump` | `prod_feature` | `7c07c4b9159eea0fd87871e476bd836c4cd284e0` | Pi UUID/reopen + zero-gate fix (install this) |
+## Pinned release
 
-Feature bases reviewed: cloud `767f856`, Pi `955aea1`.  
-`IMAGE_TAG=prod_feature-3510426f6ee5`; Pi package = full `PI_SHA` above.
+| Artifact | Value |
+|----------|--------|
+| Cloud repo | `/Users/babatundealaraje/Documents/moduslights/DigitalTwin` (`intelipump-dashboard`) |
+| Cloud SHA | `3023dd0e69bcb9dbd641005e61f1a3a94428b752` |
+| Pi repo | `/Users/babatundealaraje/Documents/moduslights/intelipump-fdc` (`intelipump`) |
+| Pi SHA | `74d0d3052fb11f2b4e2cab6eadf5ae1655b9bfdf` |
+| `IMAGE_TAG` | `prod_feature-3023dd0e69bc` |
+| Consumer image | `kacytunde/intelipump-consumer:prod_feature-3023dd0e69bc` |
+| API migrate runtime | `kacytunde/intelipump-api:prod_feature-3023dd0e69bc` |
+| Identity fallback tag | `kacytunde/intelipump-consumer:sale-identity-028-fallback` (same digest as pinned consumer) |
 
-**Do not enable application sale ACK. Do not rewrite Oct-8 historical rows.**
-
----
-
-## Remote availability (gate before deploy)
-
-| Artifact | Status (checked pre-deploy prep) |
-|----------|----------------------------------|
-| Cloud commit `3510426` on `origin/prod_feature` | **Not on remote yet** — `origin/prod_feature` is still `0ca7ef3`. Push before build. |
-| Pi commit `7c07c4b` on `origin/prod_feature` | **Not on remote yet** — `origin/prod_feature` is still `81222bd`. Push before Pi install. |
-| Hub `kacytunde/intelipump-consumer:prod_feature-3510426f6ee5` | **Missing** (404) — build+push required. |
-| Hub `kacytunde/intelipump-api:prod_feature-3510426f6ee5` | **Missing** (404) — build+push required (migration runtime). |
-| Prior Hub tags present | `latest`, `price-enrich-0ca7ef3`, lab-stage1-* |
+Feature bases reviewed earlier: cloud `767f856`, Pi `955aea1`.
+Docs tip (runbook only): cloud `e4ef82c` / Pi `45de804` may sit above these pins; **build/install the table SHAs**.
 
 ```bash
-# Confirm remotes after you push/build (do not skip):
-git -C /Users/babatundealaraje/Documents/moduslights/DigitalTwin ls-remote origin 3510426f6ee5126531c76749d3c810c5c6e4e192
-git -C /Users/babatundealaraje/Documents/moduslights/intelipump-fdc ls-remote origin 7c07c4b9159eea0fd87871e476bd836c4cd284e0
-curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-consumer/tags/prod_feature-3510426f6ee5"
-curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-api/tags/prod_feature-3510426f6ee5"
+export CLOUD_SHA=3023dd0e69bcb9dbd641005e61f1a3a94428b752
+export PI_SHA=74d0d3052fb11f2b4e2cab6eadf5ae1655b9bfdf
+export IMAGE_TAG=prod_feature-3023dd0e69bc
+export DOCKERHUB_NAMESPACE=kacytunde
+export FALLBACK_CONSUMER_TAG=sale-identity-028-fallback
 ```
 
 ---
 
-## Pre-deploy review
-
-| # | Requirement | Layer | Verdict |
-|---|-------------|-------|---------|
-| 1 | UUID scope + station/device/nozzle | Reviewed | Authoritative id = `pump_transactions.id`; soft catalog → `REQUIRES_MAPPING`; same-id mapping clash → `integrity_conflict` |
-| 2 | Conflicting finals → durable conflict | Reviewed + tested | `integrity_conflict` + decisions + mqtt evidence |
-| 3 | Reopen only provisional | Reviewed + tested | `sidecar-settle:` only; verified COMPLETED refused |
-| 4 | Stale DC1 / preset / late / restart | Reviewed + tested | Suites green; duplicate-completion + zero-gate fixed this session |
-| 5 | Migration 028 | Reviewed | History preserved; safe downgrade keeps stable unique; **migrate via api image + host `db/` bind-mount** |
-| 6 | Atomic sale + decision | Reviewed | Same connection commit |
-| 7 | Broader Pi regression | Tested | See results below |
-| 8 | Audit survives container replace | Reviewed | Postgres `sale_ingestion_decisions` |
+## Verification layers
 
 | Layer | Meaning |
 |-------|---------|
@@ -55,166 +38,161 @@ curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-api/tags/p
 
 ---
 
-## Requirement checklist
+## Exact test results (this session)
 
-| ID | Requirement | Reviewed | Automated | Physical |
-|----|-------------|----------|-----------|----------|
-| C1–C9 | Cloud identity / conflict / absorb / 028 / atomicity | Yes | Yes | Pending |
-| C10 | ACK unchanged | Yes | N/A | N/A |
-| P1–P3 | UUID keys, provisional sidecar, reopen | Yes | Yes | Pending canary |
-| P4 | Pre-auth zero gate fails closed on live non-zero DC2 | Yes | Yes (fixed defect) | Pending |
-| P5 | Duplicate completion idempotent for real sale | Yes | Yes (test updated) | Pending |
-| R1–R2 | Runbook + attended recon | Docs | N/A | **Required** |
+### Cloud isolated LAB PG + MQTT (not SAO)
+
+Containers: `intelipump-it-pg` (`127.0.0.1:55432`, db `intelipump_lab`), `intelipump-it-mqtt` (`127.0.0.1:18884`).
+
+```text
+3 passed
+  test_lab_pg_mqtt_identity_set_outage_and_restart PASSED
+  test_real_postgres_outage_recovery_and_dedupe PASSED
+  test_identity_consumer_on_schema_028_keeps_distinct_legacy_keys_and_decisions PASSED
+```
+
+**Identity / outage / replay totals (representative run):**
+
+| UUID | Amount | Volume L | Notes |
+|------|--------|----------|-------|
+| `1225cc01-42f6-447a-bef9-67b09a84a242` | 5000.00 | 3.65 | equal-value sale A |
+| `56d57492-14ac-4b99-9907-c13ea2aea172` | 5000.00 | 3.65 | equal-value sale B |
+| `88cff144-f4d5-4ba5-90c9-64ff7c4ef632` | 1370.00 | 1.00 | deferred during PG outage → recovered |
+
+- Count: **3** COMPLETED rows  
+- Sum amount: **11370.00**  
+- Sum volume: **8.30**  
+- Duplicate replay of A → `duplicate`  
+- Sale-delivery IT: outage → outbox → recover **1** → duplicate ignored; single row `b20a0d36-95e8-4a54-97f4-8b392b460383` amount **5000.00** vol **3.65**
+
+### Pi regression (post zero-meter fix)
+
+```text
+63 passed  (durability / shutdown / equal-value / restart / verified_dispensing /
+            completion_timeout / completion_persistence / reopen / duplicate-completion)
+4 passed   test_pre_auth_zero_gate.py
+             blocks persistent non-zero
+             recovers after genuine fresh zero (not stuck)
+```
+
+### Cloud unit suite
+
+```text
+97 passed + integration extras when LAB env set
+```
 
 ---
 
-## Exact automated test results
+## Consumer rollback / fallback (usable, identity-preserving)
 
-### Cloud (`DigitalTwin/consumer`)
+**Do not roll back to `price-enrich-0ca7ef3` / `0ca7ef3`.** That build still has `_absorb_hangup_duplicate` and will drop distinct hang-ups even on schema 028.
 
-```text
-97 passed, 2 skipped
+**Usable fallback:** redeploy the identity-preserving consumer digest under tag `sale-identity-028-fallback` (same image as `prod_feature-3023dd0e69bc`).
 
-SKIPPED tests/test_lab_pg_mqtt_identity_integration.py::test_lab_pg_mqtt_identity_set_outage_and_restart
-  reason: set INTELIPUMP_LAB_INTEGRATION=1 for LAB PG+MQTT integration
-SKIPPED tests/test_sale_delivery_integration.py::… (Postgres outage/recovery)
-  reason: set POSTGRES_DB/USER/PASSWORD (or INTELIPUMP_TEST_POSTGRES_*)
-```
+Compatible with schema 028 because that consumer:
 
-### Pi
+- uses UUID identity (not legacy frame unique absorb)
+- writes `sale_ingestion_decisions` + `mqtt_messages` evidence
+- expects stable partial unique only (no all-key unique)
 
-```text
-# Broad regression (durability/shutdown/ACK/equal-value/restart/…)
-119 passed
-
-# Zero-gate + duplicate completion (post-fix)
-4 passed
-  test_duplicate_data_does_not_duplicate_transaction PASSED
-  test_verify_zero_allows_when_no_fresh_dc2_after_invalidate PASSED
-  test_verify_zero_blocks_on_fresh_nonzero_dc2 PASSED
-  test_verify_zero_accepts_fresh_zero_dc2 PASSED
-```
-
-### Test investigation notes
-
-| Test | Was | Cause | Resolution |
-|------|-----|-------|------------|
-| `test_duplicate_data…` | Failed (0 COMPLETED) | Payload had no volume → verified book `CANCELLED_NO_SALE`; expectation obsolete for zero-volume hang-up | Updated test to seed DC2 volume + authoritative `FILLING_COMPLETED` twice; asserts one `complete:{uuid}` COMPLETED |
-| `test_verify_zero_blocks…` | Failed (returned True) | **Defect:** after first fresh non-zero DC2, unchanged same totals took `reset_without_fresh_dc2` and authorized | Fixed `_verify_zero_meter_before_auth` to keep waiting / fail closed on persistent non-zero |
-
----
-
-## Which image runs migration 028?
-
-**Neither consumer nor api bake Alembic revision files.** Migration SQL lives in the droplet host tree `/opt/intelipump-cloud/db/alembic/` (synced from the laptop). The **pinned `intelipump-api` image** is only the Alembic *runtime* (`alembic` in `backend/requirements.txt`); `scripts/migrate.sh` / `droplet-cutover.sh` run:
-
-```text
-docker run --rm --network <postgres-net> \
-  -v /opt/intelipump-cloud/db:/db -w /db \
-  kacytunde/intelipump-api:$IMAGE_TAG \
-  alembic -c alembic.ini upgrade head
-```
-
-`docker compose run --rm api alembic …` is **wrong** for this stack (api container has no `/db` mount and no revision files).
-
-Consumer image does **not** run migrations.
-
----
-
-## Manual cloud-first deployment (do not run from this agent)
+Proven by `test_schema_028_fallback_compat.py` (distinct legacy keys both kept; conflicting same-UUID → `integrity_conflict` + decision row).
 
 ```bash
-export CLOUD_SHA=3510426f6ee5126531c76749d3c810c5c6e4e192
-export PI_SHA=7c07c4b9159eea0fd87871e476bd836c4cd284e0
-export IMAGE_TAG=prod_feature-3510426f6ee5
-export DOCKERHUB_NAMESPACE=kacytunde
-export PREV_CONSUMER_TAG=price-enrich-0ca7ef3   # known prior Hub tag; confirm on droplet first
-# Do not enable application sale ACK. Do not rewrite Oct-8 historical rows.
+# Emergency fallback (consumer only; leave alembic at 028)
+ssh root@157.230.215.93
+cd /opt/intelipump-cloud
+# Prefer explicit fallback tag (same digest as release):
+export IMAGE_TAG=sale-identity-028-fallback
+# or: export IMAGE_TAG=prod_feature-3023dd0e69bc
+grep -q '^IMAGE_TAG=' .env && sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_TAG}|" .env \
+  || echo "IMAGE_TAG=${IMAGE_TAG}" >> .env
+docker compose pull consumer
+docker compose config | grep 'intelipump-consumer'
+docker compose up -d --no-build consumer
+docker ps --filter name=intelipump-consumer --format '{{.Image}} {{.Status}}'
+# Leave DB at 028. Do not recreate uq_pump_transactions_station_dedupe.
 ```
 
-### A. Push pins, build & push Hub images (Mac)
+Limitations: fallback does not auto-retract bad historical rows; it only stops further wrong absorbs.
+
+---
+
+## Manual cloud-first deployment (you run — agent does not deploy)
+
+### 0. Mac — confirm pins and Hub digests already published
 
 ```bash
 cd /Users/babatundealaraje/Documents/moduslights/DigitalTwin
-git checkout prod_feature
-git push origin prod_feature   # publishes 3510426 (+ docs tips)
-git checkout "$CLOUD_SHA"
-git rev-parse HEAD   # must be 3510426f6ee5126531c76749d3c810c5c6e4e192
+git fetch origin && git checkout prod_feature && git checkout "$CLOUD_SHA"
+git rev-parse HEAD   # 3023dd0e69bcb9dbd641005e61f1a3a94428b752
 
 cd /Users/babatundealaraje/Documents/moduslights/intelipump-fdc
-git checkout prod_feature
-git push origin prod_feature   # publishes 7c07c4b
-git checkout "$PI_SHA"
-git rev-parse HEAD   # must be 7c07c4b9159eea0fd87871e476bd836c4cd284e0
+git fetch origin && git checkout prod_feature && git checkout "$PI_SHA"
+git rev-parse HEAD   # 74d0d3052fb11f2b4e2cab6eadf5ae1655b9bfdf
 
-cd /Users/babatundealaraje/Documents/moduslights/DigitalTwin
-git checkout "$CLOUD_SHA"
-export IMAGE_TAG=prod_feature-3510426f6ee5
-export DOCKERHUB_NAMESPACE=kacytunde
-./scripts/build-push-images.sh --push
-# Builds/pushes:
-#   kacytunde/intelipump-consumer:prod_feature-3510426f6ee5
-#   kacytunde/intelipump-api:prod_feature-3510426f6ee5
-#   kacytunde/intelipump-dashboard:prod_feature-3510426f6ee5
+curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-consumer/tags/prod_feature-3023dd0e69bc" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['images'][0]['digest'])"
+curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-api/tags/prod_feature-3023dd0e69bc" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['images'][0]['digest'])"
+curl -sS "https://hub.docker.com/v2/repositories/kacytunde/intelipump-consumer/tags/sale-identity-028-fallback" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['images'][0]['digest'])"
 ```
 
-### B. Sync migration files + compose to droplet (Mac)
+### 1. Mac — sync **db/** from `CLOUD_SHA` (before any migrate)
 
 ```bash
 cd /Users/babatundealaraje/Documents/moduslights/DigitalTwin
 git checkout "$CLOUD_SHA"
+test -f db/alembic/versions/028_sale_identity_decisions.py
 ./scripts/sync-cloud-to-droplet.sh root@157.230.215.93
 scp scripts/migration_028_preflight.sql root@157.230.215.93:/tmp/
-# Confirm 028 is on the droplet host (not inside an image):
-ssh root@157.230.215.93 'test -f /opt/intelipump-cloud/db/alembic/versions/028_sale_identity_decisions.py && echo OK_028'
+ssh root@157.230.215.93 'test -f /opt/intelipump-cloud/db/alembic/versions/028_sale_identity_decisions.py && sha256sum /opt/intelipump-cloud/db/alembic/versions/028_sale_identity_decisions.py'
 ```
 
-### C. Droplet — pin IMAGE_TAG, pull migration-capable api + consumer, migrate, verify
+### 2. Droplet — backup + preflight (before schema/app change)
 
 ```bash
 ssh root@157.230.215.93
 cd /opt/intelipump-cloud
+set -a && source .env && set +a
 
-# Record currently running tags BEFORE change (for rollback)
-docker ps --format '{{.Names}} {{.Image}}' \
-  --filter name=intelipump-consumer \
-  --filter name=intelipump-api
+# Record running images
+docker ps --format '{{.Names}} {{.Image}}' | tee /tmp/pre-028-running-images.txt
 
-export IMAGE_TAG=prod_feature-3510426f6ee5
+# Database backup (custom format; keep until canary passes)
+mkdir -p /opt/intelipump-cloud/backups
+BACKUP=/opt/intelipump-cloud/backups/intelipump-pre-028-$(date -u +%Y%m%dT%H%M%SZ).dump
+docker exec -e PGPASSWORD="$POSTGRES_PASSWORD" intelipump-postgres \
+  pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/pre028.dump
+docker cp intelipump-postgres:/tmp/pre028.dump "$BACKUP"
+ls -lh "$BACKUP"
+
+# Preflight (read-only)
+docker exec -i intelipump-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -f - < /tmp/migration_028_preflight.sql | tee /tmp/migration_028_preflight.out
+```
+
+### 3. Droplet — pin Compose, pull **api** (migrate runtime) + consumer, verify IMAGE_TAG
+
+```bash
+export IMAGE_TAG=prod_feature-3023dd0e69bc
 export DOCKERHUB_NAMESPACE=kacytunde
-
-# Persist IMAGE_TAG for compose resolution (edit .env; do not recreate postgres)
 grep -q '^IMAGE_TAG=' .env && sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_TAG}|" .env \
   || echo "IMAGE_TAG=${IMAGE_TAG}" >> .env
 grep -q '^DOCKERHUB_NAMESPACE=' .env || echo "DOCKERHUB_NAMESPACE=${DOCKERHUB_NAMESPACE}" >> .env
 
-# Prove Compose resolves the intended images (must show :prod_feature-3510426f6ee5)
 docker compose config | grep -E 'image:.*(consumer|api|dashboard)'
-# Expect exactly:
-#   kacytunde/intelipump-consumer:prod_feature-3510426f6ee5
-#   kacytunde/intelipump-api:prod_feature-3510426f6ee5
-#   kacytunde/intelipump-dashboard:prod_feature-3510426f6ee5
+# Must show :prod_feature-3023dd0e69bc for consumer and api
 
-# Pull BOTH consumer (app) and api (alembic runtime). Dashboard optional for this stage.
 docker compose pull consumer api
+docker image inspect "kacytunde/intelipump-api:${IMAGE_TAG}" --format '{{.Id}} {{.RepoDigests}}'
+docker image inspect "kacytunde/intelipump-consumer:${IMAGE_TAG}" --format '{{.Id}} {{.RepoDigests}}'
+```
 
-# Preflight (read-only)
-docker exec -i intelipump-postgres psql -U intelipump -d intelipump \
-  -f - < /tmp/migration_028_preflight.sql | tee /tmp/migration_028_preflight.out
+### 4. Droplet — migrate with pinned API runtime + host `db/`, confirm revision 028
 
-# Migrate using pinned api image + host-mounted /opt/intelipump-cloud/db
+```bash
+# Uses kacytunde/intelipump-api:$IMAGE_TAG and -v /opt/intelipump-cloud/db:/db
 ./scripts/migrate.sh
-# Equivalent explicit form (what migrate.sh does when postgres is up):
-# PG_NETWORK=$(docker inspect intelipump-postgres --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-# docker run --rm --network "$PG_NETWORK" \
-#   -e POSTGRES_HOST=intelipump-postgres -e POSTGRES_PORT=5432 \
-#   -e POSTGRES_DB="$POSTGRES_DB" -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
-#   -v /opt/intelipump-cloud/db:/db -w /db \
-#   kacytunde/intelipump-api:prod_feature-3510426f6ee5 \
-#   alembic -c alembic.ini upgrade head
 
-# Verify alembic revision 028 and indexes
-docker exec -i intelipump-postgres psql -U intelipump -d intelipump <<'SQL'
+docker exec -i intelipump-postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'SQL'
 SELECT version_num FROM alembic_version;
 SELECT indexname FROM pg_indexes
 WHERE indexname IN (
@@ -223,84 +201,27 @@ WHERE indexname IN (
 );
 SELECT to_regclass('public.sale_ingestion_decisions');
 SQL
-# Expect: version_num = 028_sale_identity_decisions
-# Expect: stable_dedupe present; legacy uq_pump_transactions_station_dedupe ABSENT
+# Expect: 028_sale_identity_decisions
+# Expect: stable_dedupe present; legacy station_dedupe ABSENT
 # Expect: sale_ingestion_decisions present
+```
 
-# Consumer only for Stage 1 (leave api/dashboard on prior tags until canary OK if preferred)
+### 5. Droplet — start consumer only after 028 confirmed
+
+```bash
 docker compose up -d --no-build consumer
 docker ps --filter name=intelipump-consumer --format '{{.Image}} {{.Status}}'
-# Image MUST be kacytunde/intelipump-consumer:prod_feature-3510426f6ee5
-docker logs intelipump-consumer --tail 30
+# Must be kacytunde/intelipump-consumer:prod_feature-3023dd0e69bc
+docker logs intelipump-consumer --tail 40
 ```
 
-### D. Cloud smoke (read-only)
+### 6. Pump-5 canary
 
-```bash
-docker exec -i intelipump-postgres psql -U intelipump -d intelipump <<'SQL'
-SELECT decision, reason_code, COUNT(*)
-FROM sale_ingestion_decisions
-WHERE received_at > NOW() - INTERVAL '30 minutes'
-GROUP BY 1, 2 ORDER BY 3 DESC;
-SQL
-```
-
-### E. Pump-5 Pi canary install (after cloud smoke)
-
-See `intelipump-fdc/docs/sao-oct8-pi-canary.md` (exact commands for `/home/intelipump/intelipump-fdc/intelipump`).
-
-### F. Application rollback vs schema 028
-
-**Prior consumer (`price-enrich-0ca7ef3` / `0ca7ef3`) still contains `_absorb_hangup_duplicate`.**  
-Rolling the **consumer image** back onto schema 028 **reintroduces legacy-key hang-up drops in application code**, even though the old station-wide unique index is gone.
-
-Safer rollback:
-
-```bash
-# Prefer: keep pinned consumer; fix forward only.
-# Emergency consumer rollback (accept hang-up collision risk again):
-cd /opt/intelipump-cloud
-export IMAGE_TAG=price-enrich-0ca7ef3   # or the tag you recorded in step C
-# update .env IMAGE_TAG to match
-docker compose pull consumer
-docker compose up -d --no-build consumer
-# Leave alembic at 028. Do NOT alembic downgrade.
-# Do NOT recreate uq_pump_transactions_station_dedupe.
-```
-
-Limitations of emergency consumer rollback:
-
-- Hang-ups that share Wayne frame dedupe keys can be absorbed/dropped again.
-- `sale_ingestion_decisions` may stop receiving new decision rows (old image lacks writers) but historical decision rows remain.
-- Schema 028 stable partial unique remains compatible with old UUID/fill/tx-started keys.
+See `/Users/babatundealaraje/Documents/moduslights/intelipump-fdc/docs/sao-oct8-pi-canary.md`  
+(`PI_SHA=74d0d3052fb11f2b4e2cab6eadf5ae1655b9bfdf`, path `/home/intelipump/intelipump-fdc/intelipump`).
 
 ---
 
-## Standard read-only sale trace
+## Migration runtime note
 
-1. Pi ledger UUID + `source_completion_key` + raw vol/amt  
-2. sync_queue / outbox (DELIVERED ≠ cloud commit while ACK off)  
-3. MQTT `transactionId` + `deduplicationKey`  
-4. `sale_ingestion_decisions`  
-5. `pump_transactions`  
-6. Dashboard Sales window **Africa/Lagos**, start-inclusive / end-exclusive  
-
-Compare **gross dispensing** separately from manager net.  
-Aged DISPENSING with volume > 0 = candidate, not auto missing sale.
-
-### Diagnostic retention
-
-| Store | Policy |
-|-------|--------|
-| `sale_ingestion_decisions` | ≥ 90 days (Postgres; survives container replace) |
-| `mqtt_messages` | ≥ 14 days |
-| Consumer docker logs | json-file 50m × 7 |
-| Pi journal + sync_queue | Do not vacuum unresolved rows |
-
----
-
-## Residuals
-
-- Pins / Hub tags must be pushed before droplet pull.  
-- Sidecar COMPLETED already on cloud before local reopen: no auto-retract.  
-- Overall objective **incomplete** until attended SAO tests + transaction-level recon pass.
+Neither consumer nor api **bake** Alembic revision files. Revisions come from the host tree synced at `CLOUD_SHA`. The pinned **api** image only supplies the Alembic Python runtime. `docker compose run --rm api alembic` is incorrect (no `/db` mount).
