@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import signal
 import sys
@@ -119,6 +120,23 @@ class ConsumerApp:
         ).strip()
         env = self.settings.mqtt_topic_environment
         topic = f"intelipump/{env}/devices/{device_id}/sale-acks"
+        amount_s = str(transaction.amount) if transaction.amount is not None else None
+        volume_s = (
+            str(transaction.volume_liters)
+            if transaction.volume_liters is not None
+            else None
+        )
+        # Verifiable final-values digest for Pi ACK validation (not a second identity).
+        digest_src = "|".join(
+            [
+                str(transaction.station_id or ""),
+                device_id,
+                str(transaction.transaction_id or ""),
+                dedupe or "",
+                amount_s or "",
+                volume_s or "",
+            ]
+        )
         body = {
             "eventType": "SALE_COMMITTED",
             "environment": env.upper() if env == "lab" else "PRODUCTION",
@@ -126,12 +144,12 @@ class ConsumerApp:
             "stationId": transaction.station_id,
             "transactionId": transaction.transaction_id,
             "deduplicationKey": dedupe or None,
-            "amount": str(transaction.amount) if transaction.amount is not None else None,
-            "volumeLiters": (
-                str(transaction.volume_liters)
-                if transaction.volume_liters is not None
-                else None
-            ),
+            "amount": amount_s,
+            "volumeLiters": volume_s,
+            "committedPayloadDigest": hashlib.sha256(
+                digest_src.encode("utf-8")
+            ).hexdigest()[:32],
+            "committedPayloadVersion": 1,
         }
         try:
             import json
