@@ -1313,7 +1313,23 @@ class TransactionService:
                     gate = _IngestDecision(
                         decision="integrity_conflict",
                         reason_code="same_identity_conflicting_finals",
-                        evidence={"detail": detail},
+                        evidence={
+                            "detail": detail,
+                            "incoming_amount": str(transaction.amount),
+                            "incoming_volume": str(transaction.volume_liters),
+                            "incoming_price": str(transaction.price_per_liter),
+                            "incoming_status": transaction.status,
+                            "incoming_dedupe_key": getattr(
+                                transaction, "deduplication_key", None
+                            ),
+                            "station_id": transaction.station_id,
+                            "device_id": transaction.device_id,
+                            "pump_id": transaction.pump_id,
+                            "nozzle_id": transaction.nozzle_id,
+                            "incoming_payload": payload
+                            if isinstance(payload, dict)
+                            else {"_raw": str(payload)[:2000]},
+                        },
                         suppress_insert=True,
                     )
                     self._write_ingest_decision(

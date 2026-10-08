@@ -135,14 +135,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """App rollback is image-pin first. Schema downgrade is best-effort.
+
+    Do **not** recreate the old station-wide unique index on all dedupe keys:
+    Oct-8 legacy frame collisions still exist in history and would make
+    ``alembic downgrade`` fail or block inserts again. Stable partial unique
+    remains the safe shape; drop only the decisions table if explicitly
+    rolling the schema back.
+    """
     op.execute("DROP INDEX IF EXISTS idx_pump_transactions_station_dedupe_lookup")
-    op.execute("DROP INDEX IF EXISTS uq_pump_transactions_station_stable_dedupe")
-    # Restore prior uniqueness (may fail if legacy collisions exist — preflight first).
-    op.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_pump_transactions_station_dedupe
-            ON pump_transactions (station_id, deduplication_key)
-            WHERE deduplication_key IS NOT NULL
-        """
-    )
+    # Keep uq_pump_transactions_station_stable_dedupe — compatible with both
+    # old and new consumers for UUID/fill/tx-started/sidecar keys.
     op.execute("DROP TABLE IF EXISTS sale_ingestion_decisions CASCADE")
