@@ -229,19 +229,20 @@ def test_valid_transaction_processed():
     assert status == "processed"
 
 
-def test_hangup_completed_merges_into_live_fill_row():
+def test_same_identity_hangup_upserts_live_row():
+    """COMPLETED for the live UUID promotes via ON CONFLICT (id), not cross-UUID absorb."""
     db, cur = _mock_db_with_cursor()
-    # station resolve (3 lookups) → hangup match → optional update fetch
-    cur.fetchone.side_effect = [
-        None,
-        None,
-        None,
-        ("tx-live", "DISPENSING"),
-        None,
-    ]
+
+    def _fetchone():
+        last = cur.execute.call_args_list[-1].args[0] if cur.execute.call_args_list else ""
+        if "INSERT INTO pump_transactions" in last and "RETURNING" in last:
+            return ("tx-001", False)
+        return None
+
+    cur.fetchone.side_effect = _fetchone
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
-    payload["transactionId"] = "tx-hangup"
+    payload["deduplicationKey"] = "tx-completed:station-001:complete:tx-001"
     tx, err = normalize_transaction(payload, source_topic="t")
     assert err is None
     status = service.process_message(
@@ -253,26 +254,40 @@ def test_hangup_completed_merges_into_live_fill_row():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "duplicate"
-    update_sql = next(
-        c.args[0] for c in cur.execute.call_args_list if "UPDATE pump_transactions" in c.args[0]
+    assert status == "processed"
+    assert any(
+        "ON CONFLICT (id) DO UPDATE" in c.args[0]
+        for c in cur.execute.call_args_list
+        if c.args
     )
-    assert "UPDATE pump_transactions" in update_sql
 
 
-def test_hangup_completed_skips_when_live_row_already_complete():
-    """Same stable dedupe key → absorb; do not invent folds without keys."""
+def test_legacy_frame_key_does_not_suppress_distinct_identity():
+    """Different UUID + shared Wayne frame key → both sales kept (Oct 8)."""
+    frame = (
+        "tx-completed:SAO-Redeemed-Station-1:complete:50 31 01 01 05 5e a3 03 fa:5"
+    )
     db, cur = _mock_db_with_cursor()
-    cur.fetchone.side_effect = [
-        None,
-        None,
-        None,
-        ("tx-live", "COMPLETED", "tx-completed:station-001:complete:shared"),
-    ]
+
+    def _fetchone():
+        last = cur.execute.call_args_list[-1].args[0] if cur.execute.call_args_list else ""
+        if "INSERT INTO pump_transactions" in last and "RETURNING" in last:
+            return ("tx-hangup", True)
+        if "id <> %s" in last and "deduplication_key = %s" in last:
+            return (
+                "tx-other",
+                "COMPLETED",
+                Decimal("2500"),
+                Decimal("1.82"),
+                frame,
+            )
+        return None
+
+    cur.fetchone.side_effect = _fetchone
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-hangup"
-    payload["deduplicationKey"] = "tx-completed:station-001:complete:shared"
+    payload["deduplicationKey"] = frame
     tx, err = normalize_transaction(payload, source_topic="t")
     assert err is None
     status = service.process_message(
@@ -284,32 +299,26 @@ def test_hangup_completed_skips_when_live_row_already_complete():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "duplicate"
-    assert all("UPDATE pump_transactions" not in call.args[0] for call in cur.execute.call_args_list)
+    assert status == "processed"
 
 
-def test_cross_path_fill_and_tx_completed_are_absorbed():
-    """fill: COMPLETED + tx-completed COMPLETED same totals → keep one (Oct 6 bug)."""
-    from datetime import datetime, timezone
-
+def test_cross_path_different_uuids_are_not_authoritatively_absorbed():
+    """Equal totals alone must not drop a distinct identity (Pi must share UUID)."""
+    tx_id = "935d6952-5609-4792-88ae-809efd7b739c"
     db, cur = _mock_db_with_cursor()
-    existing_recv = datetime(2026, 10, 6, 6, 43, 50, tzinfo=timezone.utc)
-    cur.fetchone.side_effect = [
-        None,
-        None,
-        None,
-        (
-            "781ce6a8-0d14-437d-9a8b-1adb0a42ea47",
-            "COMPLETED",
-            "fill:781ce6a8-0d14-437d-9a8b-1adb0a42ea47:1:116:157180",
-            existing_recv,
-        ),
-    ]
+
+    def _fetchone():
+        last = cur.execute.call_args_list[-1].args[0] if cur.execute.call_args_list else ""
+        if "INSERT INTO pump_transactions" in last and "RETURNING" in last:
+            return (tx_id, True)
+        return None
+
+    cur.fetchone.side_effect = _fetchone
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
-    payload["transactionId"] = "935d6952-5609-4792-88ae-809efd7b739c"
+    payload["transactionId"] = tx_id
     payload["deduplicationKey"] = (
-        "tx-completed:SAO-Redeemed-Station-1:complete:51 3b 02"
+        f"tx-completed:SAO-Redeemed-Station-1:complete:{tx_id}"
     )
     payload["amount"] = 50026.60
     payload["volumeLiters"] = 36.92
@@ -324,30 +333,29 @@ def test_cross_path_fill_and_tx_completed_are_absorbed():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "duplicate"
+    assert status == "processed"
+    assert not any(
+        "received_at >=" in c.args[0] and "volume_liters IS NOT DISTINCT" in c.args[0]
+        for c in cur.execute.call_args_list
+    )
 
 
-def test_sidecar_settle_and_complete_are_absorbed():
-    from datetime import datetime, timezone
-
+def test_sidecar_and_hangup_different_uuids_both_process():
+    tx_id = "ec09765c-50cd-403f-bd15-a8afe9eeb5d7"
     db, cur = _mock_db_with_cursor()
-    existing_recv = datetime(2026, 10, 6, 16, 20, 11, tzinfo=timezone.utc)
-    cur.fetchone.side_effect = [
-        None,
-        None,
-        None,
-        (
-            "418017e5-1b83-45b4-b4fb-8c17c16c226d",
-            "COMPLETED",
-            "tx-completed:SAO-Redeemed-Station-1:sidecar-settle:418017e5",
-            existing_recv,
-        ),
-    ]
+
+    def _fetchone():
+        last = cur.execute.call_args_list[-1].args[0] if cur.execute.call_args_list else ""
+        if "INSERT INTO pump_transactions" in last and "RETURNING" in last:
+            return (tx_id, True)
+        return None
+
+    cur.fetchone.side_effect = _fetchone
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
-    payload["transactionId"] = "ec09765c-50cd-403f-bd15-a8afe9eeb5d7"
+    payload["transactionId"] = tx_id
     payload["deduplicationKey"] = (
-        "tx-completed:SAO-Redeemed-Station-1:complete:50 3e 02"
+        f"tx-completed:SAO-Redeemed-Station-1:complete:{tx_id}"
     )
     payload["amount"] = 47005.00
     payload["volumeLiters"] = 34.69
@@ -362,7 +370,7 @@ def test_sidecar_settle_and_complete_are_absorbed():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "duplicate"
+    assert status == "processed"
 
 
 def test_cross_path_key_helpers():
@@ -385,13 +393,17 @@ def test_cross_path_key_helpers():
     )
 
 
-def test_stale_dispensing_after_complete_is_dropped():
+def test_reordered_dispensing_does_not_downgrade_completed():
+    """Upsert keeps COMPLETED status when a late DISPENSING tick arrives."""
     db, cur = _mock_db_with_cursor()
     cur.fetchone.side_effect = [
         None,
         None,
         None,
-        ("tx-live", "COMPLETED"),
+        None,  # RETURNING empty because WHERE NOT (both completed) — wait, incoming is DISPENSING
+        # Actually upsert updates volume but keeps COMPLETED status; RETURNING may yield row.
+        ("tx-late-fill", False),
+        None,
     ]
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
@@ -408,15 +420,23 @@ def test_stale_dispensing_after_complete_is_dropped():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "duplicate"
+    assert status in {"processed", "duplicate"}
+    upsert_sql = next(
+        c.args[0]
+        for c in cur.execute.call_args_list
+        if "ON CONFLICT (id) DO UPDATE" in c.args[0]
+    )
+    assert "COMPLETED" in upsert_sql
+    assert "EXCLUDED.status" in upsert_sql
 
 
-def test_same_totals_different_nozzles_are_not_hangup_twins():
+def test_same_totals_different_nozzles_both_insert():
     """US Lab: pump-1/nozzle-1 and pump-1/nozzle-2 can both finish at ₦300."""
     db, cur = _mock_db_with_cursor()
-    # station resolve lookups, then hangup SELECT returns no same-nozzle row,
-    # then dedupe/insert path needs further None rows — keep returning None.
     cur.fetchone.return_value = None
+    # Last fetchones for insert path: conflict none, returning id, legacy none
+    cur.fetchone.side_effect = None
+    cur.fetchone.return_value = ("tx-n2", True)
     service = TransactionService(db)
     payload = dict(VALID_PAYLOAD)
     payload["transactionId"] = "tx-n2"
@@ -425,6 +445,7 @@ def test_same_totals_different_nozzles_are_not_hangup_twins():
     payload["sourceIdentifier"] = "pump-2"
     payload["amount"] = 300.0
     payload["volumeLiters"] = 0.25
+    payload["deduplicationKey"] = "tx-completed:station-001:complete:tx-n2"
     tx, err = normalize_transaction(payload, source_topic="t")
     assert err is None
     status = service.process_message(
@@ -436,15 +457,7 @@ def test_same_totals_different_nozzles_are_not_hangup_twins():
         transaction=tx,
         validation_error=None,
     )
-    # No same-nozzle twin → processed (or duplicate only via id/dedupe key).
     assert status in {"processed", "duplicate"}
-    hangup_sqls = [
-        c.args[0]
-        for c in cur.execute.call_args_list
-        if "FROM pump_transactions" in c.args[0] and "volume_liters" in c.args[0]
-    ]
-    assert hangup_sqls
-    assert "nozzle_id" in hangup_sqls[0]
 
 
 def test_rejected_message_insertion_on_missing_id():

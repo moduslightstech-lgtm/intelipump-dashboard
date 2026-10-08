@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
 from psycopg2.extras import Json
 
+from app import __version__ as CONSUMER_VERSION
 from app.database import Database
 from app.models import NormalizedTransaction, ValidationError
 from app.services.identity import resolve_nozzle_uuid, resolve_pump_uuid, resolve_station_uuid
@@ -24,18 +26,17 @@ from app.services.sale_delivery_outbox import (
     default_outbox_path,
     sale_identity_from_payload,
 )
+from app.services.sale_identity import (
+    is_legacy_frame_completion_key,
+    is_stable_uuid_completion_key,
+    uuid_from_stable_key,
+)
 
 logger = logging.getLogger(__name__)
 
-_HANGUP_DUP_WINDOW = timedelta(seconds=120)
-# Same nozzle + totals within this window are treated as one physical sale even
-# when MQTT carries distinct dedupe keys (fill: vs tx-completed, settle vs complete,
-# or double sidecar-settle). Aligns with Pi find_recent_completed_same_totals(15s).
-_COMPLETED_RACE_WINDOW = timedelta(seconds=15)
 
-
+# Kept for test imports / diagnostics only — not used for authoritative dedupe.
 def _completion_key_kind(key: str | None) -> str:
-    """Classify Pi completion / fill dedupe keys for cross-path twin detection."""
     if not key:
         return "other"
     k = str(key).strip()
@@ -43,21 +44,34 @@ def _completion_key_kind(key: str | None) -> str:
         return "fill"
     if "sidecar-settle:" in k:
         return "settle"
+    if is_legacy_frame_completion_key(k):
+        return "legacy_frame"
     if k.startswith("tx-completed:") or k.startswith("complete"):
         return "complete"
     return "other"
 
 
 def _cross_path_completion_keys(a: str | None, b: str | None) -> bool:
-    """True when keys are different publish paths for the same physical sale."""
+    """Diagnostic helper only — not used to suppress sales."""
     ka, kb = _completion_key_kind(a), _completion_key_kind(b)
     if ka == "other" or kb == "other" or ka == kb:
         return False
-    return {ka, kb} <= {"fill", "settle", "complete"}
+    return {ka, kb} <= {"fill", "settle", "complete", "legacy_frame"}
 
 
 class SaleIntegrityConflict(Exception):
     """Same sale identity already stored with conflicting completed finals."""
+
+
+@dataclass
+class _IngestDecision:
+    decision: str
+    reason_code: str
+    related_transaction_id: Optional[str] = None
+    prior_status: Optional[str] = None
+    evidence: Optional[dict[str, Any]] = None
+    suppress_insert: bool = False
+    inserted: bool = False
 
 
 class TransactionService:
@@ -148,28 +162,44 @@ class TransactionService:
             return "processed_incident"
         try:
             self._apply_admin_unit_price(transaction)
-            inserted = self._insert_transaction(transaction, received_at)
+            insert_result = self._insert_transaction(
+                transaction,
+                received_at,
+                mqtt_topic=topic,
+                mqtt_payload=json_payload,
+                mqtt_qos=qos,
+                mqtt_retained=retained,
+            )
+            # Support legacy mocks that return a bare bool.
+            if isinstance(insert_result, tuple):
+                inserted, ingest = insert_result
+            else:
+                inserted = bool(insert_result)
+                ingest = _IngestDecision(
+                    decision="processed" if inserted else "duplicate",
+                    reason_code="legacy_bool_result",
+                    inserted=inserted,
+                )
             # deviceId is optional on the Pi payload; only touch devices when present
             if transaction.device_id:
                 self._touch_device(transaction, received_at)
-            status = "processed" if inserted else "duplicate"
-            self._save_mqtt_message(
-                topic=topic,
-                payload=json_payload,
-                qos=qos,
-                retained=retained,
-                status=status,
-                transaction_id=transaction.transaction_id,
-                error_message=None,
-                received_at=received_at,
-            )
+            if ingest.decision == "integrity_conflict":
+                status = "integrity_conflict"
+            elif inserted:
+                status = "processed"
+            else:
+                status = "duplicate"
             logger.info(
-                "Transaction %s topic=%s status=%s station=%s pump=%s",
+                "sale_ingest_decision transactionId=%s topic=%s status=%s "
+                "decision=%s reason=%s station=%s pump=%s related=%s",
                 transaction.transaction_id,
                 topic,
                 status,
+                ingest.decision,
+                ingest.reason_code,
                 transaction.station_id,
                 transaction.pump_id,
+                ingest.related_transaction_id,
             )
             self._delivery_outbox.mark_done(
                 sale_identity_from_payload(
@@ -179,15 +209,14 @@ class TransactionService:
             )
             return status
         except SaleIntegrityConflict as conflict:
-            self._save_mqtt_message(
+            self._persist_conflict_audit(
+                transaction=transaction,
                 topic=topic,
                 payload=json_payload,
                 qos=qos,
                 retained=retained,
-                status="integrity_conflict",
-                transaction_id=transaction.transaction_id,
-                error_message=str(conflict),
                 received_at=received_at,
+                detail=str(conflict),
             )
             logger.error(
                 "Sale integrity conflict transactionId=%s detail=%s "
@@ -257,7 +286,13 @@ class TransactionService:
                     transaction=transaction,
                     validation_error=validation_error,
                 )
-                if status in {"processed", "duplicate", "rejected", "processed_incident"}:
+                if status in {
+                    "processed",
+                    "duplicate",
+                    "rejected",
+                    "processed_incident",
+                    "integrity_conflict",
+                }:
                     self._delivery_outbox.mark_done(item.identity_key)
                     recovered += 1
                     logger.info(
@@ -350,14 +385,13 @@ class TransactionService:
     ) -> Optional[str]:
         """Return detail when same identity already has conflicting completed finals.
 
-        Identical amount/volume replays are duplicates (not conflicts). Matching
-        identity with a different amount or litres must be visible — never
-        silently overwritten. Uses the caller's cursor (same PG connection).
+        Authoritative identity is transaction id only. Legacy dedupe-key owners
+        with a different id are never treated as integrity conflicts here —
+        those are recorded as legacy_key_collision and both sales are kept.
         """
         status = (tx.status or "").upper()
         if status not in {"COMPLETED", "COMPLETE"}:
             return None
-        rows: list[tuple] = []
         try:
             cur.execute(
                 """
@@ -369,102 +403,94 @@ class TransactionService:
                 """,
                 (tx.transaction_id,),
             )
-            row = cur.fetchone()
-            if isinstance(row, (tuple, list)) and len(row) >= 4:
-                rows.append(tuple(row))
+            existing = cur.fetchone()
         except Exception as exc:
             if getattr(exc, "pgcode", None) == "42703":
                 return None
             raise
-        key = getattr(tx, "deduplication_key", None)
-        if key:
-            try:
-                cur.execute(
-                    """
-                    SELECT id, amount, volume_liters, status, deduplication_key,
-                           price_per_liter, pump_id, nozzle_id, station_id
-                    FROM pump_transactions
-                    WHERE station_id = %s
-                      AND deduplication_key = %s
-                      AND id <> %s
-                    LIMIT 1
-                    """,
-                    (tx.station_id, key, tx.transaction_id),
-                )
-                other = cur.fetchone()
-                if isinstance(other, (tuple, list)) and len(other) >= 4:
-                    rows.append(tuple(other))
-            except Exception as exc:
-                if getattr(exc, "pgcode", None) != "42703":
-                    raise
-        for existing in rows:
-            existing_status = str(existing[3] or "").upper()
-            if existing_status not in {"COMPLETED", "COMPLETE"}:
-                continue
-            existing_amount = existing[1]
-            existing_volume = existing[2]
-            existing_price = existing[5] if len(existing) > 5 else None
-            existing_pump = existing[6] if len(existing) > 6 else None
-            existing_nozzle = existing[7] if len(existing) > 7 else None
-            existing_station = existing[8] if len(existing) > 8 else None
-            amount_differs = (
-                existing_amount is not None
-                and tx.amount is not None
-                and existing_amount != tx.amount
+        if not isinstance(existing, (tuple, list)) or len(existing) < 4:
+            return None
+        existing_status = str(existing[3] or "").upper()
+        if existing_status not in {"COMPLETED", "COMPLETE"}:
+            return None
+        existing_amount = existing[1]
+        existing_volume = existing[2]
+        existing_price = existing[5] if len(existing) > 5 else None
+        existing_pump = existing[6] if len(existing) > 6 else None
+        existing_nozzle = existing[7] if len(existing) > 7 else None
+        existing_station = existing[8] if len(existing) > 8 else None
+        amount_differs = (
+            existing_amount is not None
+            and tx.amount is not None
+            and existing_amount != tx.amount
+        )
+        volume_differs = (
+            existing_volume is not None
+            and tx.volume_liters is not None
+            and existing_volume != tx.volume_liters
+        )
+        # Face-price enrich 0 → observed is not a conflict.
+        price_differs = False
+        if (
+            existing_price is not None
+            and tx.price_per_liter is not None
+            and existing_price != tx.price_per_liter
+        ):
+            existing_zero = existing_price == 0 or existing_price == Decimal("0")
+            incoming_positive = tx.price_per_liter > 0
+            if not (existing_zero and incoming_positive):
+                price_differs = True
+        mapping_differs = False
+        mapping_parts: list[str] = []
+        if (
+            existing_station is not None
+            and tx.station_id is not None
+            and str(existing_station) != str(tx.station_id)
+        ):
+            mapping_differs = True
+            mapping_parts.append(f"station {existing_station!s}->{tx.station_id!s}")
+        if (
+            existing_pump is not None
+            and tx.pump_id is not None
+            and str(existing_pump) != str(tx.pump_id)
+        ):
+            mapping_differs = True
+            mapping_parts.append(f"pump {existing_pump!s}->{tx.pump_id!s}")
+        if (
+            existing_nozzle is not None
+            and tx.nozzle_id is not None
+            and str(existing_nozzle) != str(tx.nozzle_id)
+        ):
+            mapping_differs = True
+            mapping_parts.append(f"nozzle {existing_nozzle!s}->{tx.nozzle_id!s}")
+        if amount_differs or volume_differs or price_differs or mapping_differs:
+            return (
+                f"existing_id={existing[0]} "
+                f"existing_amount={existing_amount} "
+                f"incoming_amount={tx.amount} "
+                f"existing_volume={existing_volume} "
+                f"incoming_volume={tx.volume_liters} "
+                f"existing_price={existing_price} "
+                f"incoming_price={tx.price_per_liter} "
+                f"mapping={','.join(mapping_parts) if mapping_parts else 'ok'}"
             )
-            volume_differs = (
-                existing_volume is not None
-                and tx.volume_liters is not None
-                and existing_volume != tx.volume_liters
-            )
-            price_differs = (
-                existing_price is not None
-                and tx.price_per_liter is not None
-                and existing_price != tx.price_per_liter
-            )
-            mapping_differs = False
-            mapping_parts: list[str] = []
-            if (
-                existing_station is not None
-                and tx.station_id is not None
-                and str(existing_station) != str(tx.station_id)
-            ):
-                mapping_differs = True
-                mapping_parts.append(
-                    f"station {existing_station!s}->{tx.station_id!s}"
-                )
-            if (
-                existing_pump is not None
-                and tx.pump_id is not None
-                and str(existing_pump) != str(tx.pump_id)
-            ):
-                mapping_differs = True
-                mapping_parts.append(f"pump {existing_pump!s}->{tx.pump_id!s}")
-            if (
-                existing_nozzle is not None
-                and tx.nozzle_id is not None
-                and str(existing_nozzle) != str(tx.nozzle_id)
-            ):
-                mapping_differs = True
-                mapping_parts.append(f"nozzle {existing_nozzle!s}->{tx.nozzle_id!s}")
-            if amount_differs or volume_differs or price_differs or mapping_differs:
-                return (
-                    f"existing_id={existing[0]} "
-                    f"existing_amount={existing_amount} "
-                    f"incoming_amount={tx.amount} "
-                    f"existing_volume={existing_volume} "
-                    f"incoming_volume={tx.volume_liters} "
-                    f"existing_price={existing_price} "
-                    f"incoming_price={tx.price_per_liter} "
-                    f"mapping={','.join(mapping_parts) if mapping_parts else 'ok'}"
-                )
         return None
 
-    def _insert_transaction(self, tx: NormalizedTransaction, received_at: datetime) -> bool:
-        """Insert transaction. Returns True if a new row was inserted.
+    def _insert_transaction(
+        self,
+        tx: NormalizedTransaction,
+        received_at: datetime,
+        *,
+        mqtt_topic: str = "",
+        mqtt_payload: Any = None,
+        mqtt_qos: int = 0,
+        mqtt_retained: bool = False,
+    ) -> tuple[bool, _IngestDecision]:
+        """Insert/upsert by transaction id. Returns (inserted_or_updated, decision).
 
         External MQTT station_id / pump_id are always stored exactly as received.
         station_uuid / pump_uuid are optional resolved catalog FKs.
+        Sale row, ingestion decision, and mqtt_messages audit commit atomically.
         """
         upsert_live = """
             ON CONFLICT (id) DO UPDATE SET
@@ -660,12 +686,49 @@ class TransactionService:
                         ident.mapped,
                         ident.warning,
                     )
-                if self._absorb_hangup_duplicate(cur, tx, received_at):
-                    return False
-                if self._dedupe_key_already_present(cur, tx):
-                    return False
+                # Diagnostic only: log equal-totals candidates; never suppress.
+                self._log_diagnostic_totals_candidate(cur, tx, received_at)
+
+                gate = self._evaluate_identity_gate(cur, tx, received_at)
+                if gate.decision == "integrity_conflict":
+                    self._write_ingest_decision(
+                        cur, tx, received_at, gate, event_type=(tx.status or "")
+                    )
+                    self._write_mqtt_on_cursor(
+                        cur,
+                        topic=mqtt_topic,
+                        payload=mqtt_payload if mqtt_payload is not None else tx.raw_payload,
+                        qos=mqtt_qos,
+                        retained=mqtt_retained,
+                        status="integrity_conflict",
+                        transaction_id=tx.transaction_id,
+                        error_message=gate.reason_code
+                        + (f" {gate.evidence}" if gate.evidence else ""),
+                        received_at=received_at,
+                    )
+                    return False, gate
+                if gate.suppress_insert:
+                    self._maybe_fold_face_price(cur, tx, gate)
+                    self._write_ingest_decision(
+                        cur, tx, received_at, gate, event_type=(tx.status or "")
+                    )
+                    self._write_mqtt_on_cursor(
+                        cur,
+                        topic=mqtt_topic,
+                        payload=mqtt_payload if mqtt_payload is not None else tx.raw_payload,
+                        qos=mqtt_qos,
+                        retained=mqtt_retained,
+                        status="duplicate",
+                        transaction_id=tx.transaction_id,
+                        error_message=f"{gate.reason_code}",
+                        received_at=received_at,
+                    )
+                    return False, gate
+
                 conflict = self._completed_finals_conflict_detail(cur, tx)
                 if conflict:
+                    # Raise so the connection rolls back any partial work;
+                    # process_message persists the conflict audit in a new txn.
                     raise SaleIntegrityConflict(conflict)
                 pump_uuid = ident.pump_uuid
                 if pump_uuid is None and station_uuid is not None:
@@ -764,18 +827,29 @@ class TransactionService:
                 except Exception as exc:
                     pgcode = getattr(exc, "pgcode", None)
                     if pgcode == "23505":
-                        # Concurrent insert with same id or deduplication_key.
+                        # Concurrent insert with same id or stable dedupe key.
                         conn.rollback()
+                        decision = _IngestDecision(
+                            decision="duplicate",
+                            reason_code="unique_constraint_race",
+                            evidence={
+                                "deduplicationKey": getattr(
+                                    tx, "deduplication_key", None
+                                )
+                            },
+                            suppress_insert=True,
+                        )
                         logger.info(
                             "event=duplicate_transaction_ignored stationId=%s pumpId=%s "
-                            "nozzleId=%s transactionId=%s deduplicationKey=%s source=consumer_retry",
+                            "nozzleId=%s transactionId=%s deduplicationKey=%s "
+                            "source=consumer_retry reason=unique_constraint_race",
                             tx.station_id,
                             tx.pump_id,
                             tx.nozzle_id,
                             tx.transaction_id,
                             getattr(tx, "deduplication_key", None),
                         )
-                        return False
+                        return False, decision
                     if pgcode != "42703":
                         raise
                     conn.rollback()
@@ -789,7 +863,11 @@ class TransactionService:
                         pgcode2 = getattr(exc2, "pgcode", None)
                         if pgcode2 == "23505":
                             conn.rollback()
-                            return False
+                            return False, _IngestDecision(
+                                decision="duplicate",
+                                reason_code="unique_constraint_race",
+                                suppress_insert=True,
+                            )
                         if pgcode2 != "42703":
                             raise
                         conn.rollback()
@@ -803,7 +881,11 @@ class TransactionService:
                             pgcode3 = getattr(exc3, "pgcode", None)
                             if pgcode3 == "23505":
                                 conn.rollback()
-                                return False
+                                return False, _IngestDecision(
+                                    decision="duplicate",
+                                    reason_code="unique_constraint_race",
+                                    suppress_insert=True,
+                                )
                             if pgcode3 != "42703":
                                 raise
                             conn.rollback()
@@ -813,130 +895,260 @@ class TransactionService:
                             )
                             cur.execute(legacy_sql, legacy_params)
                 row = cur.fetchone()
-                if row is None:
-                    return False
-                # Fresh insert or meaningful live update (incl. DISPENSING→COMPLETED).
-                # Already-complete same-id retries hit the WHERE filter → no row.
-                return True
-
-    def _dedupe_key_already_present(self, cur, tx: NormalizedTransaction) -> bool:
-        """Return True when another row already owns this business key.
-
-        Prefer the unique index + 23505 for races; this is a fast path that
-        avoids INSERT when the duplicate is already visible.
-
-        When the existing row is still DISPENSING and this message is COMPLETED,
-        merge completion into that live row so SSE still emits the hang-up.
-        """
-        key = getattr(tx, "deduplication_key", None)
-        if not key:
-            return False
-        status = (tx.status or "").upper()
-        # Live fills may share a key across updates with the same transaction id;
-        # only enforce cross-id dedupe for completed sales.
-        if status not in {"COMPLETED", "COMPLETE"}:
-            return False
-        try:
-            cur.execute(
-                """
-                SELECT id, status FROM pump_transactions
-                WHERE station_id = %s
-                  AND deduplication_key = %s
-                LIMIT 1
-                """,
-                (tx.station_id, key),
-            )
-        except Exception as exc:
-            if getattr(exc, "pgcode", None) == "42703":
-                return False
-            raise
-        row = cur.fetchone()
-        if not row:
-            return False
-        existing_id = str(row[0])
-        if existing_id == str(tx.transaction_id):
-            return False
-        existing_status = str(row[1] or "").upper() if len(row) > 1 else ""
-        if existing_status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}:
-            try:
-                cur.execute(
-                    """
-                    UPDATE pump_transactions SET
-                        status = %s,
-                        amount = COALESCE(%s, amount),
-                        volume_liters = COALESCE(%s, volume_liters),
-                        price_per_liter = COALESCE(%s, price_per_liter),
-                        transaction_completed_at = COALESCE(%s, transaction_completed_at),
-                        raw_payload = %s,
-                        received_at = %s
-                    WHERE id = %s
-                    """,
-                    (
-                        tx.status,
-                        tx.amount,
+                # Record legacy-key collision evidence (non-blocking) after upsert.
+                collision = self._legacy_key_owner(cur, tx)
+                if collision and str(collision[0]) != str(tx.transaction_id):
+                    self._write_ingest_decision(
+                        cur,
+                        tx,
+                        received_at,
+                        _IngestDecision(
+                            decision="legacy_key_collision",
+                            reason_code="legacy_frame_key_shared",
+                            related_transaction_id=str(collision[0]),
+                            prior_status=str(collision[1] or ""),
+                            evidence={
+                                "owner_id": str(collision[0]),
+                                "owner_status": str(collision[1] or ""),
+                                "owner_amount": str(collision[2])
+                                if len(collision) > 2
+                                else None,
+                                "owner_volume": str(collision[3])
+                                if len(collision) > 3
+                                else None,
+                                "incoming_amount": str(tx.amount),
+                                "incoming_volume": str(tx.volume_liters),
+                                "legacy_key": getattr(tx, "deduplication_key", None),
+                            },
+                        ),
+                        event_type=(tx.status or ""),
+                    )
+                    logger.warning(
+                        "legacy_key_collision owner_id=%s incoming_id=%s key=%s "
+                        "owner_L=%s incoming_L=%s (both sales preserved)",
+                        collision[0],
+                        tx.transaction_id,
+                        getattr(tx, "deduplication_key", None),
+                        collision[3] if len(collision) > 3 else None,
                         tx.volume_liters,
-                        tx.price_per_liter,
-                        tx.transaction_completed_at,
-                        Json(tx.raw_payload),
-                        datetime.now(timezone.utc),
-                        existing_id,
-                    ),
+                    )
+
+                if row is None:
+                    # Already-complete same-id retry (idempotent) or no-op upsert.
+                    decision = _IngestDecision(
+                        decision="duplicate",
+                        reason_code="same_identity_idempotent_replay",
+                        suppress_insert=True,
+                        inserted=False,
+                    )
+                    self._maybe_fold_face_price(cur, tx, decision)
+                    self._write_ingest_decision(
+                        cur, tx, received_at, decision, event_type=(tx.status or "")
+                    )
+                    self._write_mqtt_on_cursor(
+                        cur,
+                        topic=mqtt_topic,
+                        payload=mqtt_payload
+                        if mqtt_payload is not None
+                        else tx.raw_payload,
+                        qos=mqtt_qos,
+                        retained=mqtt_retained,
+                        status="duplicate",
+                        transaction_id=tx.transaction_id,
+                        error_message=decision.reason_code,
+                        received_at=received_at,
+                    )
+                    return False, decision
+
+                decision = _IngestDecision(
+                    decision="processed",
+                    reason_code="upsert_by_transaction_id",
+                    inserted=True,
                 )
-            except Exception as exc:
-                if getattr(exc, "pgcode", None) == "42703":
-                    return True
-                raise
+                self._write_ingest_decision(
+                    cur, tx, received_at, decision, event_type=(tx.status or "")
+                )
+                self._write_mqtt_on_cursor(
+                    cur,
+                    topic=mqtt_topic,
+                    payload=mqtt_payload if mqtt_payload is not None else tx.raw_payload,
+                    qos=mqtt_qos,
+                    retained=mqtt_retained,
+                    status="processed",
+                    transaction_id=tx.transaction_id,
+                    error_message=None,
+                    received_at=received_at,
+                )
+                return True, decision
+
+    def _evaluate_identity_gate(
+        self, cur, tx: NormalizedTransaction, received_at: datetime
+    ) -> _IngestDecision:
+        """Authoritative gate: transaction id first; legacy keys never drop sales."""
+        key = getattr(tx, "deduplication_key", None)
+        status = (tx.status or "").upper()
+
+        # Stable UUID key that names a *different* sale → conflict only when
+        # totals disagree; identical totals = idempotent cross-path on same sale
+        # identity embedded in the key.
+        if key and is_stable_uuid_completion_key(key) and status in {
+            "COMPLETED",
+            "COMPLETE",
+        }:
+            key_uuid = uuid_from_stable_key(key)
+            if key_uuid and key_uuid != str(tx.transaction_id).lower():
+                owner = self._row_by_id(cur, key_uuid)
+                if owner is not None:
+                    owner_status = str(owner[1] or "").upper()
+                    if owner_status in {"COMPLETED", "COMPLETE"}:
+                        if self._totals_match(owner, tx):
+                            return _IngestDecision(
+                                decision="duplicate",
+                                reason_code="stable_key_same_totals_other_id",
+                                related_transaction_id=str(owner[0]),
+                                prior_status=owner_status,
+                                suppress_insert=True,
+                                evidence={"stable_key": key},
+                            )
+                        return _IngestDecision(
+                            decision="integrity_conflict",
+                            reason_code="stable_key_points_to_other_identity",
+                            related_transaction_id=str(owner[0]),
+                            prior_status=owner_status,
+                            suppress_insert=True,
+                            evidence={
+                                "stable_key": key,
+                                "owner_amount": str(owner[2]),
+                                "owner_volume": str(owner[3]),
+                                "incoming_amount": str(tx.amount),
+                                "incoming_volume": str(tx.volume_liters),
+                            },
+                        )
+
+            # Another row already stores this exact stable key.
+            owner = self._row_by_dedupe(cur, tx.station_id, key)
+            if owner is not None and str(owner[0]) != str(tx.transaction_id):
+                if self._totals_match(owner, tx):
+                    return _IngestDecision(
+                        decision="duplicate",
+                        reason_code="stable_key_owned_identical_totals",
+                        related_transaction_id=str(owner[0]),
+                        prior_status=str(owner[1] or ""),
+                        suppress_insert=True,
+                        evidence={"stable_key": key},
+                    )
+                return _IngestDecision(
+                    decision="integrity_conflict",
+                    reason_code="stable_key_owned_conflicting_totals",
+                    related_transaction_id=str(owner[0]),
+                    prior_status=str(owner[1] or ""),
+                    suppress_insert=True,
+                    evidence={
+                        "stable_key": key,
+                        "owner_amount": str(owner[2]),
+                        "owner_volume": str(owner[3]),
+                        "incoming_amount": str(tx.amount),
+                        "incoming_volume": str(tx.volume_liters),
+                    },
+                )
+
+        # Legacy frame keys: never suppress; collision recorded after upsert.
+        if key and is_legacy_frame_completion_key(key):
             logger.info(
-                "merged_completion_into_live_by_dedupe_key into_id=%s dropped_id=%s key=%s",
-                existing_id,
+                "legacy_frame_key_accepted transactionId=%s key=%s "
+                "(not used for authoritative dedupe)",
                 tx.transaction_id,
                 key,
             )
-            return True
-        logger.info(
-            "event=duplicate_transaction_ignored stationId=%s pumpId=%s nozzleId=%s "
-            "transactionId=%s existingId=%s deduplicationKey=%s source=mqtt_retry",
-            tx.station_id,
-            tx.pump_id,
-            tx.nozzle_id,
-            tx.transaction_id,
-            existing_id,
-            key,
+
+        return _IngestDecision(
+            decision="continue",
+            reason_code="identity_gate_pass",
+            suppress_insert=False,
         )
-        return True
 
-    def _absorb_hangup_duplicate(
-        self, cur, tx: NormalizedTransaction, received_at: datetime
-    ) -> bool:
-        """Fold holster twins into the live-fill row. Returns True if skipped.
-
-        Must be nozzle-scoped: US Lab maps both DART addresses onto pump-1
-        (nozzle-1 vs nozzle-2). Matching only pump+amount+volume drops the
-        second hose's live ticks and completions.
-        """
-        status = (tx.status or "").upper()
-        incoming_done = status in {"COMPLETED", "COMPLETE"}
-        incoming_live = status in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
-        if not incoming_done and not incoming_live:
-            return False
-        nozzle = getattr(tx, "nozzle_id", None)
-        source = getattr(tx, "source_identifier", None)
+    def _row_by_id(self, cur, tx_id: str) -> Optional[tuple]:
         try:
             cur.execute(
                 """
-                SELECT id, status, deduplication_key, received_at FROM pump_transactions
+                SELECT id, status, amount, volume_liters, deduplication_key
+                FROM pump_transactions WHERE id = %s LIMIT 1
+                """,
+                (tx_id,),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return None
+            raise
+        row = cur.fetchone()
+        return tuple(row) if isinstance(row, (tuple, list)) else None
+
+    def _row_by_dedupe(
+        self, cur, station_id: str, key: str
+    ) -> Optional[tuple]:
+        try:
+            cur.execute(
+                """
+                SELECT id, status, amount, volume_liters, deduplication_key
+                FROM pump_transactions
+                WHERE station_id = %s AND deduplication_key = %s
+                LIMIT 1
+                """,
+                (station_id, key),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return None
+            raise
+        row = cur.fetchone()
+        return tuple(row) if isinstance(row, (tuple, list)) else None
+
+    def _legacy_key_owner(self, cur, tx: NormalizedTransaction) -> Optional[tuple]:
+        key = getattr(tx, "deduplication_key", None)
+        if not key or not is_legacy_frame_completion_key(key):
+            return None
+        try:
+            cur.execute(
+                """
+                SELECT id, status, amount, volume_liters, deduplication_key
+                FROM pump_transactions
+                WHERE station_id = %s
+                  AND deduplication_key = %s
+                  AND id <> %s
+                LIMIT 1
+                """,
+                (tx.station_id, key, tx.transaction_id),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) == "42703":
+                return None
+            raise
+        row = cur.fetchone()
+        return tuple(row) if isinstance(row, (tuple, list)) else None
+
+    @staticmethod
+    def _totals_match(owner: tuple, tx: NormalizedTransaction) -> bool:
+        owner_amount = owner[2] if len(owner) > 2 else None
+        owner_volume = owner[3] if len(owner) > 3 else None
+        return owner_amount == tx.amount and owner_volume == tx.volume_liters
+
+    def _log_diagnostic_totals_candidate(
+        self, cur, tx: NormalizedTransaction, received_at: datetime
+    ) -> None:
+        """Non-authoritative equal-totals peer (investigation only)."""
+        status = (tx.status or "").upper()
+        if status not in {"COMPLETED", "COMPLETE"}:
+            return
+        try:
+            cur.execute(
+                """
+                SELECT id, status, amount, volume_liters, deduplication_key
+                FROM pump_transactions
                 WHERE station_id = %s AND pump_id = %s
                   AND amount IS NOT DISTINCT FROM %s
                   AND volume_liters IS NOT DISTINCT FROM %s
                   AND id <> %s
-                  AND received_at >= %s
-                  AND (
-                    (nozzle_id IS NOT DISTINCT FROM %s)
-                    OR (
-                      %s IS NOT NULL
-                      AND source_identifier IS NOT DISTINCT FROM %s
-                    )
-                  )
+                  AND nozzle_id IS NOT DISTINCT FROM %s
                 ORDER BY received_at DESC
                 LIMIT 1
                 """,
@@ -946,148 +1158,184 @@ class TransactionService:
                     tx.amount,
                     tx.volume_liters,
                     tx.transaction_id,
-                    received_at - _HANGUP_DUP_WINDOW,
-                    nozzle,
-                    source,
-                    source,
+                    getattr(tx, "nozzle_id", None),
                 ),
             )
-        except Exception as exc:
-            if getattr(exc, "pgcode", None) == "42703":
-                # Older schema without deduplication_key / source_identifier.
-                try:
-                    cur.execute(
-                        """
-                        SELECT id, status, NULL, received_at FROM pump_transactions
-                        WHERE station_id = %s AND pump_id = %s
-                          AND amount IS NOT DISTINCT FROM %s
-                          AND volume_liters IS NOT DISTINCT FROM %s
-                          AND id <> %s
-                          AND received_at >= %s
-                          AND nozzle_id IS NOT DISTINCT FROM %s
-                        ORDER BY received_at DESC
-                        LIMIT 1
-                        """,
-                        (
-                            tx.station_id,
-                            tx.pump_id,
-                            tx.amount,
-                            tx.volume_liters,
-                            tx.transaction_id,
-                            received_at - _HANGUP_DUP_WINDOW,
-                            nozzle,
-                        ),
-                    )
-                except Exception as exc2:
-                    if getattr(exc2, "pgcode", None) == "42703":
-                        return False
-                    raise
-            else:
-                raise
+        except Exception:
+            return
         row = cur.fetchone()
-        if not row or len(row) < 2:
-            return False
-        existing_id = str(row[0])
-        if existing_id == str(tx.transaction_id):
-            return False
-        existing_status = str(row[1] or "").upper()
-        existing_done = existing_status in {"COMPLETED", "COMPLETE"}
-        existing_key = row[2] if len(row) > 2 else None
-        existing_received = row[3] if len(row) > 3 else None
-        incoming_key = getattr(tx, "deduplication_key", None)
+        if not row:
+            return
+        logger.info(
+            "diagnostic_equal_totals_candidate incoming_id=%s peer_id=%s "
+            "amount=%s volume=%s (not used for dedupe)",
+            tx.transaction_id,
+            row[0],
+            tx.amount,
+            tx.volume_liters,
+        )
 
-        # Two COMPLETED rows with the same nozzle+totals are usually one physical
-        # sale published twice (fill: + tx-completed, or sidecar-settle + complete).
-        # Keep both only when keys differ, are not cross-path, and are outside the
-        # short race window (possible equal-value consecutive customers).
-        if incoming_done and existing_done:
-            if (
-                incoming_key
-                and existing_key
-                and incoming_key == existing_key
-            ):
-                logger.info(
-                    "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
-                    "reason=same_dedupe_key key=%s",
-                    existing_id,
-                    tx.transaction_id,
-                    incoming_key,
-                )
-                return True
-            if _cross_path_completion_keys(incoming_key, existing_key):
-                logger.info(
-                    "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
-                    "reason=cross_path_keys key_a=%s key_b=%s",
-                    existing_id,
-                    tx.transaction_id,
-                    existing_key,
-                    incoming_key,
-                )
-                return True
-            if existing_received is not None:
-                try:
-                    delta = abs((received_at - existing_received).total_seconds())
-                except TypeError:
-                    delta = None
-                if delta is not None and delta <= _COMPLETED_RACE_WINDOW.total_seconds():
-                    logger.info(
-                        "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
-                        "reason=completed_race_window delta_s=%.3f",
-                        existing_id,
-                        tx.transaction_id,
-                        delta,
-                    )
-                    return True
-            return False
-
-        if existing_done or (incoming_live and not incoming_done):
-            logger.info(
-                "absorbed_hangup_duplicate existing_id=%s dropped_id=%s "
-                "incoming=%s existing=%s nozzle=%s source=%s",
-                existing_id,
-                tx.transaction_id,
-                status,
-                existing_status,
-                nozzle,
-                source,
-            )
-            return True
-        if not incoming_done:
-            return False
+    def _maybe_fold_face_price(
+        self, cur, tx: NormalizedTransaction, decision: _IngestDecision
+    ) -> None:
+        """Fold non-zero face price onto same-identity COMPLETED with price 0."""
+        if (tx.status or "").upper() not in {"COMPLETED", "COMPLETE"}:
+            return
+        if tx.price_per_liter is None or tx.price_per_liter <= 0:
+            return
+        target = decision.related_transaction_id or tx.transaction_id
         try:
             cur.execute(
                 """
                 UPDATE pump_transactions SET
-                    status = %s,
-                    amount = COALESCE(%s, amount),
-                    volume_liters = COALESCE(%s, volume_liters),
-                    price_per_liter = COALESCE(%s, price_per_liter),
-                    transaction_completed_at = COALESCE(%s, transaction_completed_at),
-                    raw_payload = %s,
-                    received_at = %s
+                    price_per_liter = COALESCE(NULLIF(price_per_liter, 0), %s)
                 WHERE id = %s
+                  AND status IN ('COMPLETED', 'COMPLETE')
                 """,
+                (tx.price_per_liter, target),
+            )
+        except Exception as exc:
+            if getattr(exc, "pgcode", None) != "42703":
+                raise
+
+    def _write_ingest_decision(
+        self,
+        cur,
+        tx: NormalizedTransaction,
+        received_at: datetime,
+        decision: _IngestDecision,
+        *,
+        event_type: str,
+    ) -> None:
+        sql = """
+            INSERT INTO sale_ingestion_decisions (
+                received_at, occurrence_at, station_id, device_id, pump_id,
+                nozzle_id, source_address, transaction_id, related_transaction_id,
+                event_type, legacy_deduplication_key, raw_amount, raw_volume,
+                raw_price, prior_status, new_status, decision, reason_code,
+                evidence, software_version
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s
+            )
+        """
+        try:
+            cur.execute(
+                sql,
                 (
-                    tx.status,
+                    received_at,
+                    tx.transaction_completed_at or tx.device_timestamp,
+                    tx.station_id,
+                    tx.device_id,
+                    tx.pump_id,
+                    tx.nozzle_id,
+                    getattr(tx, "source_identifier", None),
+                    tx.transaction_id,
+                    decision.related_transaction_id,
+                    event_type,
+                    getattr(tx, "deduplication_key", None),
                     tx.amount,
                     tx.volume_liters,
                     tx.price_per_liter,
-                    tx.transaction_completed_at,
-                    Json(tx.raw_payload),
-                    received_at,
-                    existing_id,
+                    decision.prior_status,
+                    tx.status,
+                    decision.decision,
+                    decision.reason_code,
+                    Json(decision.evidence or {}),
+                    CONSUMER_VERSION,
                 ),
             )
         except Exception as exc:
-            if getattr(exc, "pgcode", None) == "42703":
-                return False
+            # Table may be missing until migration 028; never block sale path.
+            if getattr(exc, "pgcode", None) in {"42P01", "42703"}:
+                logger.warning(
+                    "sale_ingestion_decisions unavailable; continuing "
+                    "decision=%s reason=%s tx=%s",
+                    decision.decision,
+                    decision.reason_code,
+                    tx.transaction_id,
+                )
+                return
             raise
-        logger.info(
-            "merged_hangup_complete into_id=%s dropped_id=%s",
-            existing_id,
-            tx.transaction_id,
-        )
-        return True
+
+    def _write_mqtt_on_cursor(
+        self,
+        cur,
+        *,
+        topic: str,
+        payload: Any,
+        qos: int,
+        retained: bool,
+        status: str,
+        transaction_id: Optional[str],
+        error_message: Optional[str],
+        received_at: datetime,
+    ) -> None:
+        sql = """
+            INSERT INTO mqtt_messages (
+                topic, payload, qos, retained, processing_status,
+                transaction_id, error_message, received_at, processed_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        try:
+            cur.execute(
+                sql,
+                (
+                    topic,
+                    Json(payload),
+                    qos,
+                    retained,
+                    status,
+                    transaction_id,
+                    error_message,
+                    received_at,
+                    datetime.now(timezone.utc),
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to write mqtt_messages on sale connection")
+
+    def _persist_conflict_audit(
+        self,
+        *,
+        transaction: NormalizedTransaction,
+        topic: str,
+        payload: Any,
+        qos: int,
+        retained: bool,
+        received_at: datetime,
+        detail: str,
+    ) -> None:
+        try:
+            with self._db.connection() as conn:
+                with conn.cursor() as cur:
+                    gate = _IngestDecision(
+                        decision="integrity_conflict",
+                        reason_code="same_identity_conflicting_finals",
+                        evidence={"detail": detail},
+                        suppress_insert=True,
+                    )
+                    self._write_ingest_decision(
+                        cur,
+                        transaction,
+                        received_at,
+                        gate,
+                        event_type=(transaction.status or ""),
+                    )
+                    self._write_mqtt_on_cursor(
+                        cur,
+                        topic=topic,
+                        payload=payload,
+                        qos=qos,
+                        retained=retained,
+                        status="integrity_conflict",
+                        transaction_id=transaction.transaction_id,
+                        error_message=detail,
+                        received_at=received_at,
+                    )
+        except Exception:
+            logger.exception("Failed to persist integrity_conflict audit")
 
     def _save_mqtt_message(
         self,

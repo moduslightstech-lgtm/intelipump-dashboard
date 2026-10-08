@@ -44,6 +44,12 @@ services:
       context: ./consumer
     container_name: intelipump-consumer
     restart: always
+    # Keep morning ingest logs across container replace (decisions table is durable SoT).
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "7"
     environment:
       MQTT_HOST: mqtt
       MQTT_PORT: 1883

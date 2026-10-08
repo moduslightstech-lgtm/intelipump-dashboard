@@ -100,6 +100,32 @@ def test_conflicting_price_raises_visible_conflict() -> None:
     assert "existing_price=1000" in detail
 
 
+def test_price_enrichment_zero_to_face_is_not_conflict() -> None:
+    """Settle-first Unknown (0) + hang-up face price must fold, not conflict."""
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        (
+            "tx-conflict-1",
+            Decimal("13700"),
+            Decimal("10"),
+            "COMPLETED",
+            "tx-completed:InteliPump-US-Lab:sidecar-settle:tx-conflict-1",
+            Decimal("0"),
+            "pump-1",
+            "nozzle-1",
+            "InteliPump-US-Lab",
+        ),
+        None,
+    ]
+    svc = TransactionService(MagicMock(), delivery_outbox=MagicMock())
+    assert (
+        svc._completed_finals_conflict_detail(
+            cur, _tx(price_per_liter=Decimal("1355"))
+        )
+        is None
+    )
+
+
 def test_conflicting_mapping_raises_visible_conflict() -> None:
     cur = MagicMock()
     cur.fetchone.side_effect = [

@@ -331,16 +331,32 @@ def test_handle_message_persists_phase9_sale():
 
 
 def test_duplicate_deduplication_key_different_transaction_id_ignored():
-    """Restart minting a new UUID with the same dedupe key must not insert."""
-    db, cur = _mock_db(
-        fetchone_side_effect=[
-            None,
-            None,
-            None,  # station resolve
-            None,  # hangup absorb
-            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "COMPLETED"),  # existing dedupe key
-        ]
-    )
+    """Stable UUID key naming another COMPLETED sale with same totals → duplicate."""
+    owner_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    db, cur = _mock_db()
+
+    def _fetchone():
+        call = cur.execute.call_args
+        if not call:
+            return None
+        sql = call.args[0]
+        params = call.args[1] if len(call.args) > 1 else ()
+        if (
+            "WHERE id = %s" in sql
+            and params
+            and str(params[0]) == owner_id
+            and "amount" in sql
+        ):
+            return (
+                owner_id,
+                "COMPLETED",
+                Decimal("146.88"),
+                Decimal("12.500"),
+                PHASE9_SALE["deduplicationKey"],
+            )
+        return None
+
+    cur.fetchone.side_effect = _fetchone
     service = TransactionService(db)
     payload = dict(PHASE9_SALE)
     payload["transactionId"] = "ffffffff-1111-2222-3333-444444444444"
