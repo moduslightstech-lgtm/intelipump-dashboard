@@ -1,13 +1,14 @@
 # SAO Oct-8 sale identity fix — review, deploy & acceptance
 
-**Pinned commits (do not deploy unpinned `latest`):**
+**Pinned release commits (do not deploy unpinned `latest`):**
 
-| Repo | Branch | Commit |
-|------|--------|--------|
-| `intelipump-dashboard` | `prod_feature` | `767f8569cdf0c3fc96eb901b7b332e4902ebb251` (+ review follow-up on same branch) |
-| `intelipump` | `prod_feature` | `955aea1bf894871369c4797ab7c06be49a1df22e` (+ review follow-up on same branch) |
+| Repo | Branch | Commit | Role |
+|------|--------|--------|------|
+| `intelipump-dashboard` | `prod_feature` | `3510426f6ee5126531c76749d3c810c5c6e4e192` | Cloud consumer + 028 harden (build this) |
+| `intelipump` | `prod_feature` | `7ad5209063321b8dc30c4e341e3ccad67f495e62` | Pi UUID/reopen + tests (install this) |
 
-After you pull review follow-ups, pin **`git rev-parse HEAD`** from each repo and use that SHA as `IMAGE_TAG` / package build id.
+Feature bases reviewed: cloud `767f856`, Pi `955aea1`. Runbook tip commits may sit above these pins; **images/packages must use the table SHAs**.  
+`IMAGE_TAG=prod_feature-3510426f6ee5`; Pi package build id = `7ad5209063321b8dc30c4e341e3ccad67f495e62`.
 
 **Do not enable application sale ACK. Do not rewrite Oct-8 historical rows.**
 
@@ -69,28 +70,19 @@ After you pull review follow-ups, pin **`git rev-parse HEAD`** from each repo an
 ### Pi (`intelipump-fdc`, `venv`) — durability / ACK / restart / equal-value / completion
 
 ```text
-# Core durability + ACK + equal-value + restart reconcile + verified dispensing + handoff + completion_timeout
-71 passed
-  tests/unit/services/test_sale_persist_durability.py
-  tests/unit/services/test_shutdown_sale_durability_lifecycle.py
-  tests/unit/cloud/test_sale_ack_validation.py
-  tests/unit/cloud/test_sale_ack_recovery.py
-  tests/unit/cloud/test_sale_app_ack.py
-  tests/unit/controller/test_equal_value_after_restart.py
-  tests/unit/controller/test_restart_reconcile_session.py
-  tests/unit/controller/test_verified_dispensing.py
-  tests/unit/services/test_sale_handoff_gating.py
-  tests/unit/state_machine/test_completion_timeout.py
+# Broad regression batch (durability, shutdown, ACK×3, equal-value, restart,
+# verified_dispensing, handoff, completion_timeout, completion_persistence,
+# reopen_provisional_sidecar, new_fill_after_completed, phase9_cloud)
+119 passed in 11.14s
 
-# Completion persistence (UUID key assertions updated)
-test_hangup_awaits_then_confirmed_completes_once PASSED
-test_reopen_provisional_sidecar / reopen allows sidecar only PASSED
-
-# Premature / fill_stream
-test_dc2_reopens_after_premature_sidecar_settle PASSED
-test_dc2_growth_43_to_54_keeps_one_identity PASSED
-test_live_fill_stream_holds_provisional_while_dc1_filling PASSED
-test_live_fill_stream_does_not_settle_during_long_live_pause PASSED
+# Targeted retained-display / no-flow / provisional / reopen
+19 passed in 0.32s
+  test_retained_display_baseline_does_not_set_filling_seen PASSED
+  test_nozzle_ready_flow.py (14 tests) PASSED
+  test_live_fill_stream_holds_provisional_while_dc1_filling PASSED
+  test_live_fill_stream_does_not_settle_during_long_live_pause PASSED
+  test_dc2_reopens_after_premature_sidecar_settle PASSED
+  test_dc2_growth_43_to_54_keeps_one_identity PASSED
 ```
 
 ### Known pre-existing failures (not introduced by 767f856 / 955aea1)
@@ -102,20 +94,24 @@ FAILED tests/unit/controller/test_pre_auth_zero_gate.py::test_verify_zero_blocks
   (also fails on parent 81222bd)
 ```
 
-Retained-display / no-flow coverage exercised via verified_dispensing + completion_timeout + fill_stream long-pause / provisional-hold tests above (not a separate named “retained-display” module).
-
 ---
 
-## Manual cloud-first deployment (pinned)
+## Manual cloud-first deployment (pinned — do not run from this agent)
 
-Replace `CLOUD_SHA` / `PI_SHA` with `git rev-parse HEAD` after pulling review commits.
+```bash
+export CLOUD_SHA=3510426f6ee5126531c76749d3c810c5c6e4e192
+export PI_SHA=7ad5209063321b8dc30c4e341e3ccad67f495e62
+export IMAGE_TAG="prod_feature-${CLOUD_SHA:0:12}"   # prod_feature-3510426f6ee5
+# Do not enable application sale ACK. Do not rewrite Oct-8 historical rows.
+```
 
 ### A. Build & push cloud consumer (Mac / CI)
 
 ```bash
 cd /path/to/intelipump-dashboard   # DigitalTwin
 git fetch origin && git checkout prod_feature
-git rev-parse HEAD   # → CLOUD_SHA
+git checkout "$CLOUD_SHA"
+git rev-parse HEAD   # must print 3510426f6ee5126531c76749d3c810c5c6e4e192
 export IMAGE_TAG="prod_feature-${CLOUD_SHA:0:12}"
 export DOCKERHUB_NAMESPACE=kacytunde   # or your namespace
 ./scripts/build-push-images.sh         # must tag intelipump-consumer:$IMAGE_TAG
@@ -135,12 +131,10 @@ docker exec -i intelipump-postgres psql -U intelipump -d intelipump \
   -f - < /tmp/migration_028_preflight.sql \
   | tee /tmp/migration_028_preflight.out
 
-# Record IMAGE_TAG from build
-export IMAGE_TAG=prod_feature-<12hex>    # pinned
-# Ensure compose uses IMAGE_TAG for consumer (env file or export)
+export IMAGE_TAG=prod_feature-3510426f6ee5
+# Ensure compose / .env uses IMAGE_TAG for consumer only
 
 docker compose pull consumer
-# Migrate — use your standard entrypoint, e.g.:
 docker compose run --rm api alembic upgrade head
 
 docker exec -i intelipump-postgres psql -U intelipump -d intelipump <<'SQL'
@@ -151,9 +145,12 @@ WHERE indexname IN (
 );
 SELECT to_regclass('public.sale_ingestion_decisions');
 SQL
+# Expect: stable_dedupe present; legacy uq_pump_transactions_station_dedupe absent;
+# sale_ingestion_decisions present.
 
 docker compose up -d consumer
 docker ps --filter name=intelipump-consumer --format '{{.Image}} {{.Status}}'
+# Image must contain prod_feature-3510426f6ee5
 docker logs intelipump-consumer --tail 30
 ```
 
@@ -171,7 +168,11 @@ SQL
 ### D. One-Pi canary (after cloud smoke)
 
 ```bash
-# Build/install intelipump at PI_SHA on ONE attended controller only
+cd /path/to/intelipump   # intelipump-fdc
+git fetch origin && git checkout prod_feature
+git checkout "$PI_SHA"
+git rev-parse HEAD   # must print 7ad5209063321b8dc30c4e341e3ccad67f495e62
+# Build/install this SHA on ONE attended controller only
 # Leave application sale ACK disabled
 # Run attended dispenses; record face litres/amount/price + totalizers
 # Trace: Pi UUID → sync_queue → sale_ingestion_decisions → pump_transactions → dashboard
