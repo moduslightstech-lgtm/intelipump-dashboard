@@ -6,8 +6,9 @@
 | Cloud ACK digest | `prod_feature` | `3a8e10d` |
 | Cloud completed immutability | `prod_feature` | `ab2b8c5` |
 | Cloud telemetry separation + conflict/ACK harden | `prod_feature` | `fb52532` |
+| Cloud release-pin doc SHA | `prod_feature` | `add2fd8` |
 
-Combined cloud release tip for this work: **`fb52532`** (includes `ab2b8c5` + `3a8e10d`).
+Combined cloud release tip for this work: **`add2fd8`** (includes `fb52532` → `ab2b8c5` → `3a8e10d`).
 
 ## Failure behavior
 
