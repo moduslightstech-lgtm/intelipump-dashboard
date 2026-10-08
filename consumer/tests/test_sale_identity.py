@@ -140,7 +140,7 @@ def test_same_identity_dispensing_to_completed_promotes():
 
 
 def test_zero_value_starts_not_absorbed_across_uuids():
-    """Distinct TRANSACTION_STARTED 0/0 must insert, not absorb against stubs."""
+    """Distinct TRANSACTION_STARTED 0/0 → twin telemetry, not financial absorb."""
     db, cur = _mock_db(returning_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
     service = TransactionService(db)
     payload = dict(VALID)
@@ -160,7 +160,14 @@ def test_zero_value_starts_not_absorbed_across_uuids():
         transaction=tx,
         validation_error=None,
     )
-    assert status == "processed"
+    assert status == "processed_telemetry"
+    assert not any(
+        "INSERT INTO pump_transactions" in str(c.args[0]) for c in cur.execute.call_args_list
+    )
+    assert any(
+        "INSERT INTO live_dispensing_telemetry" in str(c.args[0])
+        for c in cur.execute.call_args_list
+    )
     absorbish = [
         c.args[0]
         for c in cur.execute.call_args_list

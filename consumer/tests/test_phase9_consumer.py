@@ -426,58 +426,53 @@ def test_two_legitimate_sales_same_amount_distinct_dedupe_keys_both_insert():
     assert _run("sale-2", "tx-completed:complete:sale-2") == "processed"
 
 
-def test_handle_message_persists_filling_updates():
-    db, cur = _mock_db(
-        fetchone_side_effect=[
-            None,
-            None,
-            None,
-            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",),
-            None,
-        ]
-    )
+def test_handle_message_persists_filling_updates_to_telemetry_only():
+    db, cur = _mock_db()
     app = _app(db)
     filling = dict(PHASE9_SALE)
     filling["eventType"] = "FILLING_UPDATED"
     filling["payload"] = dict(PHASE9_SALE["payload"])
     filling["payload"]["final_status"] = "DISPENSING"
-    app.handle_message(TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False)
-    inserts = [
+    result = app.handle_message(
+        TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False
+    )
+    assert result == "processed_telemetry"
+    financial = [
         c
         for c in cur.execute.call_args_list
         if "INSERT INTO pump_transactions" in str(c.args[0])
     ]
-    assert inserts
-    _sql, params = inserts[0].args
-    assert "ON CONFLICT (id) DO UPDATE" in _sql
-    assert params[0] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    assert params[11] == "DISPENSING"
+    assert financial == []
+    tele = [
+        c
+        for c in cur.execute.call_args_list
+        if "INSERT INTO live_dispensing_telemetry" in str(c.args[0])
+    ]
+    assert tele
+    assert tele[0].args[1][0] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
-def test_handle_message_persists_dispensing_update_alias():
-    db, cur = _mock_db(
-        fetchone_side_effect=[
-            None,
-            None,
-            None,
-            ("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",),
-            None,
-        ]
-    )
+def test_handle_message_persists_dispensing_update_alias_to_telemetry_only():
+    db, cur = _mock_db()
     app = _app(db)
     filling = dict(PHASE9_SALE)
     filling["eventType"] = "DISPENSING_UPDATE"
     filling["payload"] = dict(PHASE9_SALE["payload"])
     filling["payload"]["final_status"] = "DISPENSING"
-    app.handle_message(TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False)
-    inserts = [
+    result = app.handle_message(
+        TX_TOPIC, json.dumps(filling).encode(), qos=0, retained=False
+    )
+    assert result == "processed_telemetry"
+    financial = [
         c
         for c in cur.execute.call_args_list
         if "INSERT INTO pump_transactions" in str(c.args[0])
     ]
-    assert inserts
-    _sql, params = inserts[0].args
-    assert params[11] == "DISPENSING"
+    assert financial == []
+    assert any(
+        "INSERT INTO live_dispensing_telemetry" in str(c.args[0])
+        for c in cur.execute.call_args_list
+    )
 
 
 def test_handle_message_upserts_heartbeat():

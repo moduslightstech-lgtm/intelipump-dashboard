@@ -26,6 +26,7 @@ from app.services.sale_delivery_outbox import (
     default_outbox_path,
     sale_identity_from_payload,
 )
+from app.services.live_telemetry import LiveTelemetryStore, is_live_telemetry_status
 from app.services.sale_identity import (
     is_legacy_frame_completion_key,
     is_stable_uuid_completion_key,
@@ -160,6 +161,58 @@ class TransactionService:
                 getattr(transaction, "nozzle_id", None),
             )
             return "processed_incident"
+        # Live hose progress → twin table only. Never create/update pump_transactions.
+        if is_live_telemetry_status(transaction.status):
+            event_type = None
+            sequence = None
+            if isinstance(json_payload, dict):
+                event_type = str(
+                    json_payload.get("eventType") or json_payload.get("event_type") or ""
+                ) or None
+                nested = json_payload.get("payload")
+                if isinstance(nested, dict):
+                    sequence = nested.get("sessionSequence") or nested.get("sequence")
+                sequence = sequence or json_payload.get("sequence")
+                try:
+                    sequence = int(sequence) if sequence is not None else None
+                except (TypeError, ValueError):
+                    sequence = None
+            tel = LiveTelemetryStore(self._db).upsert(
+                transaction,
+                received_at=received_at,
+                event_type=event_type,
+                sequence=sequence,
+                mqtt_payload=json_payload,
+            )
+            self._save_mqtt_message(
+                topic=topic,
+                payload=json_payload,
+                qos=qos,
+                retained=retained,
+                status=f"telemetry_{tel}",
+                transaction_id=transaction.transaction_id,
+                error_message=None if tel == "processed" else tel,
+                received_at=received_at,
+            )
+            if transaction.device_id:
+                try:
+                    self._touch_device(transaction, received_at)
+                except Exception:
+                    logger.debug("device touch skipped for live telemetry", exc_info=True)
+            logger.info(
+                "live_telemetry_routed transactionId=%s station=%s pump=%s result=%s "
+                "(not written to pump_transactions)",
+                transaction.transaction_id,
+                transaction.station_id,
+                transaction.pump_id,
+                tel,
+            )
+            if tel == "error":
+                return "error"
+            if tel == "unavailable":
+                # Table missing: ACK live ticks so broker does not storm; finals still require PG.
+                return "processed_telemetry"
+            return "processed_telemetry"
         try:
             self._apply_admin_unit_price(transaction)
             insert_result = self._insert_transaction(
@@ -185,6 +238,8 @@ class TransactionService:
                 self._touch_device(transaction, received_at)
             if ingest.decision == "integrity_conflict":
                 status = "integrity_conflict"
+            elif ingest.decision == "ignored_telemetry":
+                status = "ignored_telemetry"
             elif inserted:
                 status = "processed"
             else:
@@ -201,6 +256,15 @@ class TransactionService:
                 transaction.pump_id,
                 ingest.related_transaction_id,
             )
+            if status in {"processed", "duplicate"} and status_u in {
+                "COMPLETED",
+                "COMPLETE",
+            }:
+                LiveTelemetryStore(self._db).mark_completed(
+                    station_id=transaction.station_id,
+                    transaction_id=transaction.transaction_id,
+                    at=received_at,
+                )
             self._delivery_outbox.mark_done(
                 sale_identity_from_payload(
                     json_payload if isinstance(json_payload, dict) else payload,
@@ -913,14 +977,44 @@ class TransactionService:
                     )
 
                 if row is None:
-                    # Already-complete same-id retry (idempotent) or no-op upsert.
+                    # Upsert no-op (completed row frozen). Must distinguish
+                    # identical COMPLETED replay from conflicting finals — a
+                    # silent duplicate would hide conflicts and ACK wrongly.
+                    incoming_status = (tx.status or "").upper()
+                    if incoming_status in {"COMPLETED", "COMPLETE"}:
+                        conflict_detail = self._completed_finals_conflict_detail(cur, tx)
+                        if conflict_detail:
+                            raise SaleIntegrityConflict(conflict_detail)
+                        decision = _IngestDecision(
+                            decision="duplicate",
+                            reason_code="same_identity_idempotent_replay",
+                            suppress_insert=True,
+                            inserted=False,
+                        )
+                        self._maybe_fold_face_price(cur, tx, decision)
+                        self._write_ingest_decision(
+                            cur, tx, received_at, decision, event_type=(tx.status or "")
+                        )
+                        self._write_mqtt_on_cursor(
+                            cur,
+                            topic=mqtt_topic,
+                            payload=mqtt_payload
+                            if mqtt_payload is not None
+                            else tx.raw_payload,
+                            qos=mqtt_qos,
+                            retained=mqtt_retained,
+                            status="duplicate",
+                            transaction_id=tx.transaction_id,
+                            error_message=decision.reason_code,
+                            received_at=received_at,
+                        )
+                        return False, decision
                     decision = _IngestDecision(
-                        decision="duplicate",
-                        reason_code="same_identity_idempotent_replay",
+                        decision="ignored_telemetry",
+                        reason_code="live_tick_against_completed_or_noop",
                         suppress_insert=True,
                         inserted=False,
                     )
-                    self._maybe_fold_face_price(cur, tx, decision)
                     self._write_ingest_decision(
                         cur, tx, received_at, decision, event_type=(tx.status or "")
                     )
@@ -932,7 +1026,7 @@ class TransactionService:
                         else tx.raw_payload,
                         qos=mqtt_qos,
                         retained=mqtt_retained,
-                        status="duplicate",
+                        status="ignored_telemetry",
                         transaction_id=tx.transaction_id,
                         error_message=decision.reason_code,
                         received_at=received_at,

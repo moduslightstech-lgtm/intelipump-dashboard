@@ -148,12 +148,23 @@ async def _sales_event_generator(
             break
         db = SessionLocal()
         try:
-            rows = sales_service.sales_after_cursor(
-                db,
-                station_id=station_id,
-                pump_id=pump_id,
-                cursor_received_at=cursor_at,
-                cursor_id=cursor_id,
+            rows = list(
+                sales_service.sales_after_cursor(
+                    db,
+                    station_id=station_id,
+                    pump_id=pump_id,
+                    cursor_received_at=cursor_at,
+                    cursor_id=cursor_id,
+                )
+            )
+            rows.extend(
+                sales_service.telemetry_after_cursor(
+                    db,
+                    station_id=station_id,
+                    pump_id=pump_id,
+                    cursor_received_at=cursor_at,
+                    cursor_id=cursor_id,
+                )
             )
             catalog = nozzle_catalog_for_station(db, station_id)
             for row in rows:

@@ -11,7 +11,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from types import SimpleNamespace
+
 from app.models import PumpTransaction
+from app.models.live_telemetry import LiveDispensingTelemetry
 from app.services.identity import (
     resolve_pump_by_mqtt_external_id,
     resolve_station,
@@ -168,24 +171,107 @@ def nozzle_state_event(sale: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _telemetry_as_sale_proxy(row: LiveDispensingTelemetry) -> Any:
+    """Shape live twin rows like PumpTransaction for serialize_sale / SSE."""
+    return SimpleNamespace(
+        id=row.transaction_id,
+        station_id=row.station_id,
+        device_id=row.device_id,
+        pump_id=row.pump_id or "",
+        nozzle_id=row.nozzle_id,
+        product=None,
+        volume_liters=row.volume_liters,
+        amount=row.amount,
+        currency=row.currency,
+        price_per_liter=row.price_per_liter,
+        status=row.status,
+        source_topic=row.source_topic,
+        source_identifier=row.source_identifier,
+        device_timestamp=row.observed_at,
+        transaction_started_at=row.observed_at,
+        transaction_completed_at=None,
+        raw_payload=row.raw_payload or {},
+        received_at=row.updated_at or row.received_at,
+        created_at=row.received_at,
+        mapping_status=None,
+    )
+
+
+def recent_live_telemetry(
+    db: Session,
+    *,
+    station_id: str,
+    pump_id: Optional[str] = None,
+    limit: int = 80,
+) -> list[Any]:
+    """Open hose snapshots from live_dispensing_telemetry (not pump_transactions)."""
+    keys, _station_uuid = station_query_keys(db, station_id)
+    if not keys:
+        return []
+    try:
+        stmt = select(LiveDispensingTelemetry).where(
+            LiveDispensingTelemetry.station_id.in_(keys),
+            func.upper(LiveDispensingTelemetry.status).in_(
+                ("DISPENSING", "IN_PROGRESS", "ACTIVE")
+            ),
+        )
+        if pump_id:
+            stmt = stmt.where(LiveDispensingTelemetry.pump_id == pump_id)
+        rows = list(
+            db.scalars(
+                stmt.order_by(
+                    LiveDispensingTelemetry.updated_at.desc().nullslast()
+                ).limit(limit)
+            ).all()
+        )
+    except Exception:
+        # Table missing until migration 030 — twin degrades without financial pollution.
+        return []
+    return [_telemetry_as_sale_proxy(r) for r in rows]
+
+
 def live_sales_snapshot(
     db: Session,
     *,
     station_id: str,
     pump_id: Optional[str] = None,
     limit: int = 80,
-) -> list[PumpTransaction]:
-    """Authoritative live + last-completed rows for SSE reconnect."""
-    rows = recent_sales(db, station_id=station_id, pump_id=pump_id, limit=limit)
+) -> list[Any]:
+    """Twin snapshot: live telemetry + completed financial rows (separate stores)."""
+    # Completed-only from financial ledger (exclude historical DISPENSING leftovers).
+    stmt = sales_filter(db, station_id=station_id, pump_id=pump_id)
+    completed: list[Any] = []
+    if stmt is not None:
+        completed = list(
+            db.scalars(
+                stmt.where(_completed_sale_clause())
+                .order_by(
+                    PumpTransaction.received_at.desc().nullslast(),
+                    PumpTransaction.id.desc(),
+                )
+                .limit(limit)
+            ).all()
+        )
+    live = recent_live_telemetry(
+        db, station_id=station_id, pump_id=pump_id, limit=limit
+    )
     catalog = nozzle_catalog_for_station(db, station_id)
-    chosen: dict[tuple[str, str], PumpTransaction] = {}
-    for row in rows:
+    chosen: dict[tuple[str, str], Any] = {}
+    for row in list(live) + list(completed):
         ident = canonicalize_sale_row(row, catalog)
         key = (str(ident.pump_id or row.pump_id or ""), str(ident.nozzle_id or "unknown"))
         if key in chosen:
             current = chosen[key]
-            current_live = str(current.status or "").upper() in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
-            incoming_live = str(row.status or "").upper() in {"DISPENSING", "IN_PROGRESS", "ACTIVE"}
+            current_live = str(current.status or "").upper() in {
+                "DISPENSING",
+                "IN_PROGRESS",
+                "ACTIVE",
+            }
+            incoming_live = str(row.status or "").upper() in {
+                "DISPENSING",
+                "IN_PROGRESS",
+                "ACTIVE",
+            }
             if current_live and not incoming_live:
                 continue
             if incoming_live and not current_live:
@@ -193,6 +279,47 @@ def live_sales_snapshot(
             continue
         chosen[key] = row
     return list(chosen.values())
+
+
+def telemetry_after_cursor(
+    db: Session,
+    *,
+    station_id: str,
+    pump_id: Optional[str],
+    cursor_received_at: datetime,
+    cursor_id: str,
+    limit: int = 100,
+) -> list[Any]:
+    """Live twin ticks after SSE cursor (financial sales use sales_after_cursor)."""
+    keys, _station_uuid = station_query_keys(db, station_id)
+    if not keys:
+        return []
+    try:
+        received = func.coalesce(
+            LiveDispensingTelemetry.updated_at, LiveDispensingTelemetry.received_at
+        )
+        stmt = select(LiveDispensingTelemetry).where(
+            LiveDispensingTelemetry.station_id.in_(keys),
+            or_(
+                received > cursor_received_at,
+                and_(
+                    received == cursor_received_at,
+                    LiveDispensingTelemetry.transaction_id > cursor_id,
+                ),
+            ),
+        )
+        if pump_id:
+            stmt = stmt.where(LiveDispensingTelemetry.pump_id == pump_id)
+        rows = list(
+            db.scalars(
+                stmt.order_by(received.asc(), LiveDispensingTelemetry.transaction_id.asc()).limit(
+                    limit
+                )
+            ).all()
+        )
+    except Exception:
+        return []
+    return [_telemetry_as_sale_proxy(r) for r in rows]
 
 
 def _station_match(keys: list[str], station_uuid: UUID | None):

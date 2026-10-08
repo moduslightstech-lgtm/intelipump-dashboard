@@ -54,17 +54,44 @@ def test_live_sales_snapshot_prefers_dispensing():
     class _Db:
         pass
 
-    def fake_recent(*_args, **_kwargs):
-        return [completed, dispensing, other]
-
     import app.services.sales as sales
 
-    original = sales.recent_sales
-    sales.recent_sales = fake_recent  # type: ignore[assignment]
+    original_tel = sales.recent_live_telemetry
+    original_filter = sales.sales_filter
+
+    def fake_tel(*_args, **_kwargs):
+        return [dispensing]
+
+    class _Scalars:
+        def all(self):
+            return [completed, other]
+
+    class _Result:
+        def all(self):
+            return [completed, other]
+
+    class _FakeStmt:
+        def where(self, *_a, **_k):
+            return self
+
+        def order_by(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+    def fake_filter(*_args, **_kwargs):
+        return _FakeStmt()
+
+    sales.recent_live_telemetry = fake_tel  # type: ignore[assignment]
+    sales.sales_filter = fake_filter  # type: ignore[assignment]
     try:
+        # Patch db.scalars used inside live_sales_snapshot for completed rows.
+        _Db.scalars = lambda self, stmt: _Scalars()  # type: ignore[attr-defined]
         rows = live_sales_snapshot(_Db(), station_id="InteliPump-US-Lab")  # type: ignore[arg-type]
     finally:
-        sales.recent_sales = original  # type: ignore[assignment]
+        sales.recent_live_telemetry = original_tel  # type: ignore[assignment]
+        sales.sales_filter = original_filter  # type: ignore[assignment]
     by_id = {r.id: r.status for r in rows}
     assert by_id["tx-live"] == "DISPENSING"
     assert by_id["tx-n1"] == "COMPLETED"

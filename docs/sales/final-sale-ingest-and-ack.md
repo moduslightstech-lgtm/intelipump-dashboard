@@ -5,13 +5,14 @@
 
 ## Separation
 
-| Event | Cloud row status | Financial reports | Application ACK | Sale delivery outbox |
+| Event | Storage | Financial reports | Application ACK | Sale delivery outbox |
 | --- | --- | --- | --- | --- |
-| `TRANSACTION_STARTED` / `FILLING_UPDATED` | `DISPENSING` (digital twin) | Excluded (completed-only filters) | No | Never (PG failure → `error`, no spill) |
-| `TRANSACTION_COMPLETED` / fill-complete | `COMPLETED` | Included | `SALE_COMMITTED` after PG commit (when `MQTT_PUBLISH_SALE_ACKS=true`) | Yes, on PG failure |
-| Legacy SAO payloads | Legacy ingest path | Completed-only | Same ACK rules when completed | Finals only |
+| `TRANSACTION_STARTED` / `FILLING_UPDATED` | `live_dispensing_telemetry` only (migration 030) | Never | No | Never (PG failure → `error`) |
+| `TRANSACTION_COMPLETED` / fill-complete | `pump_transactions` COMPLETED | Included | `SALE_COMMITTED` after PG commit / identical duplicate | Yes, on PG failure |
+| Conflicting COMPLETED same id | Prior row kept; `integrity_conflict` | Prior values | **No ACK** | N/A |
+| Legacy SAO completed payloads | `pump_transactions` | Completed-only | Same ACK rules | Finals only |
 
-Reordered live telemetry must not mutate a COMPLETED row (upsert `WHERE status NOT IN (COMPLETED, COMPLETE)`). Twin may still insert/update open `DISPENSING` rows for streaming.
+Digital twin SSE reads live ticks from `live_dispensing_telemetry` and last sale from completed `pump_transactions`. Identical COMPLETED replay → `duplicate` + ACK; conflicting finals → visible conflict, never treated as successful ACK.
 
 ## Application ACK
 

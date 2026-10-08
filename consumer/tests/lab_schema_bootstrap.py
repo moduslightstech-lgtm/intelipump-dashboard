@@ -134,4 +134,29 @@ CREATE TABLE IF NOT EXISTS sale_ingestion_decisions (
     software_version TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 030: live twin telemetry (not financial sales)
+CREATE TABLE IF NOT EXISTS live_dispensing_telemetry (
+    transaction_id TEXT NOT NULL,
+    station_id TEXT NOT NULL,
+    device_id TEXT,
+    pump_id TEXT,
+    nozzle_id TEXT,
+    source_identifier TEXT,
+    status TEXT NOT NULL DEFAULT 'DISPENSING',
+    volume_liters NUMERIC,
+    amount NUMERIC,
+    currency TEXT,
+    price_per_liter NUMERIC,
+    event_type TEXT,
+    sequence BIGINT,
+    source_topic TEXT,
+    observed_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    raw_payload JSONB,
+    PRIMARY KEY (station_id, transaction_id)
+);
+CREATE INDEX IF NOT EXISTS ix_live_disp_telemetry_station_pump_updated
+    ON live_dispensing_telemetry (station_id, pump_id, updated_at DESC);
 """

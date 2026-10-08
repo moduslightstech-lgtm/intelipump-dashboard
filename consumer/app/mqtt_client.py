@@ -122,6 +122,8 @@ class MqttClient:
             "processed",
             "duplicate",
             "processed_incident",
+            "processed_telemetry",
+            "ignored_telemetry",
             "rejected",
             "integrity_conflict",
         }:
