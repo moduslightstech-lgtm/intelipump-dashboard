@@ -2,12 +2,12 @@
 
 | Component | Branch | Pin |
 | --- | --- | --- |
-| Pi controller (`intelipump-fdc`) | `prod_feature` | `95e5d5e` |
-| Cloud prior ACK digest | `prod_feature` | `3a8e10d` |
+| Pi controller (`intelipump-fdc`) | `prod_feature` | `95e5d5e` (docs pin note `8311944`) |
+| Cloud ACK digest | `prod_feature` | `3a8e10d` |
 | Cloud completed immutability | `prod_feature` | `ab2b8c5` |
-| Cloud telemetry separation + conflict/ACK harden | `prod_feature` | *(this commit)* |
+| Cloud telemetry separation + conflict/ACK harden | `prod_feature` | `fb52532` |
 
-Combined cloud release = tip of `prod_feature` after the telemetry-separation commit (includes `ab2b8c5` + follow-ups).
+Combined cloud release tip for this work: **`fb52532`** (includes `ab2b8c5` + `3a8e10d`).
 
 ## Failure behavior
 
