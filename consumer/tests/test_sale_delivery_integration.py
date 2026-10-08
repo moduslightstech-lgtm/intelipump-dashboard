@@ -327,6 +327,8 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
         )
 
     psycopg2 = pytest.importorskip("psycopg2")
+    from tests.lab_schema_bootstrap import CREATE_PUMP_TRANSACTIONS
+
     try:
         conn = psycopg2.connect(
             host=dsn["host"],
@@ -338,6 +340,10 @@ def test_real_postgres_outage_recovery_and_dedupe(allow_tmp, tmp_path: Path) -> 
         )
     except Exception as exc:
         pytest.skip(f"real PostgreSQL not reachable at {dsn['host']}:{dsn['port']}: {exc}")
+
+    with conn.cursor() as cur:
+        cur.execute(CREATE_PUMP_TRANSACTIONS)
+        conn.commit()
 
     tx_id = str(uuid.uuid4())
     sale = json.loads(json.dumps(COMPLETED_SALE))

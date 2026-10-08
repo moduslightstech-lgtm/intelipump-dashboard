@@ -154,14 +154,17 @@ def test_lab_pg_mqtt_identity_set_outage_and_restart(allow_tmp, tmp_path: Path) 
         cur.execute(
             """
             SELECT 1 FROM pg_indexes
-            WHERE tablename = 'pump_transactions'
-              AND indexdef ILIKE '%deduplication_key%'
+            WHERE indexname = 'uq_pump_transactions_station_stable_dedupe'
             LIMIT 1
             """
         )
         if cur.fetchone() is None:
             conn.close()
-            pytest.fail("deduplication unique index missing after bootstrap")
+            pytest.fail("028 stable dedupe unique index missing after bootstrap")
+        cur.execute("SELECT to_regclass('public.sale_ingestion_decisions')")
+        if cur.fetchone()[0] is None:
+            conn.close()
+            pytest.fail("sale_ingestion_decisions missing after bootstrap")
     conn.close()
 
     tx_a = str(uuid.uuid4())
