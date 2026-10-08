@@ -233,6 +233,20 @@ class TransactionService:
             return "integrity_conflict"
         except Exception as exc:
             logger.exception("PostgreSQL failure while saving transaction")
+            status_final = (transaction.status or "").upper() in {
+                "COMPLETED",
+                "COMPLETE",
+            }
+            # Financial outbox is final-sale only. Live twin telemetry must not
+            # enter sale_delivery_outbox (avoids provisional backlog as "sales").
+            if not status_final:
+                logger.warning(
+                    "Live telemetry not spilled to financial outbox "
+                    "transactionId=%s status=%s (PG unavailable)",
+                    transaction.transaction_id,
+                    transaction.status,
+                )
+                return "error"
             identity = sale_identity_from_payload(
                 json_payload if isinstance(json_payload, dict) else payload,
                 topic,
@@ -492,27 +506,20 @@ class TransactionService:
         station_uuid / pump_uuid are optional resolved catalog FKs.
         Sale row, ingestion decision, and mqtt_messages audit commit atomically.
         """
+        # Completed financial rows are immutable to live telemetry (DISPENSING /
+        # STARTED / FILLING_UPDATED). Promotion DISPENSING→COMPLETED still works
+        # because the WHERE only freezes already-completed rows. Identical
+        # COMPLETED replay and late provisional ticks skip the UPDATE (RETURNING
+        # empty → duplicate). Face-price fold uses a separate UPDATE.
         upsert_live = """
             ON CONFLICT (id) DO UPDATE SET
-                volume_liters = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.volume_liters
-                    ELSE EXCLUDED.volume_liters
-                END,
-                amount = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.amount
-                    ELSE EXCLUDED.amount
-                END,
+                volume_liters = EXCLUDED.volume_liters,
+                amount = EXCLUDED.amount,
                 currency = COALESCE(EXCLUDED.currency, pump_transactions.currency),
                 price_per_liter = COALESCE(
                     EXCLUDED.price_per_liter, pump_transactions.price_per_liter
                 ),
-                status = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.status
-                    ELSE EXCLUDED.status
-                END,
+                status = EXCLUDED.status,
                 device_timestamp = COALESCE(
                     EXCLUDED.device_timestamp, pump_transactions.device_timestamp
                 ),
@@ -525,42 +532,22 @@ class TransactionService:
                     pump_transactions.transaction_completed_at
                 ),
                 raw_payload = EXCLUDED.raw_payload,
-                received_at = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                     AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.received_at
-                    ELSE EXCLUDED.received_at
-                END,
+                received_at = EXCLUDED.received_at,
                 source_topic = COALESCE(
                     EXCLUDED.source_topic, pump_transactions.source_topic
                 )
-            WHERE NOT (
-                pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
-            )
+            WHERE pump_transactions.status NOT IN ('COMPLETED', 'COMPLETE')
             RETURNING id, (xmax = 0) AS is_insert
         """
         upsert_hierarchy = """
             ON CONFLICT (id) DO UPDATE SET
-                volume_liters = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.volume_liters
-                    ELSE EXCLUDED.volume_liters
-                END,
-                amount = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.amount
-                    ELSE EXCLUDED.amount
-                END,
+                volume_liters = EXCLUDED.volume_liters,
+                amount = EXCLUDED.amount,
                 currency = COALESCE(EXCLUDED.currency, pump_transactions.currency),
                 price_per_liter = COALESCE(
                     EXCLUDED.price_per_liter, pump_transactions.price_per_liter
                 ),
-                status = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.status
-                    ELSE EXCLUDED.status
-                END,
+                status = EXCLUDED.status,
                 device_timestamp = COALESCE(
                     EXCLUDED.device_timestamp, pump_transactions.device_timestamp
                 ),
@@ -573,12 +560,7 @@ class TransactionService:
                     pump_transactions.transaction_completed_at
                 ),
                 raw_payload = EXCLUDED.raw_payload,
-                received_at = CASE
-                    WHEN pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                     AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
-                    THEN pump_transactions.received_at
-                    ELSE EXCLUDED.received_at
-                END,
+                received_at = EXCLUDED.received_at,
                 source_topic = COALESCE(
                     EXCLUDED.source_topic, pump_transactions.source_topic
                 ),
@@ -593,10 +575,7 @@ class TransactionService:
                 deduplication_key = COALESCE(
                     pump_transactions.deduplication_key, EXCLUDED.deduplication_key
                 )
-            WHERE NOT (
-                pump_transactions.status IN ('COMPLETED', 'COMPLETE')
-                AND EXCLUDED.status IN ('COMPLETED', 'COMPLETE')
-            )
+            WHERE pump_transactions.status NOT IN ('COMPLETED', 'COMPLETE')
             RETURNING id, (xmax = 0) AS is_insert
         """
         hierarchy_sql = f"""

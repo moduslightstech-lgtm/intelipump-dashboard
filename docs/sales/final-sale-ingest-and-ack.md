@@ -5,13 +5,13 @@
 
 ## Separation
 
-| Event | Cloud row status | Financial reports | Application ACK |
-| --- | --- | --- | --- |
-| `TRANSACTION_STARTED` / `FILLING_UPDATED` | `DISPENSING` (digital twin) | Excluded (completed-only filters) | No |
-| `TRANSACTION_COMPLETED` / fill-complete | `COMPLETED` | Included | `SALE_COMMITTED` after PG commit (when `MQTT_PUBLISH_SALE_ACKS=true`) |
-| Legacy SAO payloads | Legacy ingest path | Completed-only | Same ACK rules when completed |
+| Event | Cloud row status | Financial reports | Application ACK | Sale delivery outbox |
+| --- | --- | --- | --- | --- |
+| `TRANSACTION_STARTED` / `FILLING_UPDATED` | `DISPENSING` (digital twin) | Excluded (completed-only filters) | No | Never (PG failure → `error`, no spill) |
+| `TRANSACTION_COMPLETED` / fill-complete | `COMPLETED` | Included | `SALE_COMMITTED` after PG commit (when `MQTT_PUBLISH_SALE_ACKS=true`) | Yes, on PG failure |
+| Legacy SAO payloads | Legacy ingest path | Completed-only | Same ACK rules when completed | Finals only |
 
-Reordered live telemetry must not downgrade a COMPLETED row to DISPENSING (`transaction_service` conflict / live gates).
+Reordered live telemetry must not mutate a COMPLETED row (upsert `WHERE status NOT IN (COMPLETED, COMPLETE)`). Twin may still insert/update open `DISPENSING` rows for streaming.
 
 ## Application ACK
 

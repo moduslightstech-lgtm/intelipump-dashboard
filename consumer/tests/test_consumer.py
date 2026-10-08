@@ -394,15 +394,13 @@ def test_cross_path_key_helpers():
 
 
 def test_reordered_dispensing_does_not_downgrade_completed():
-    """Upsert keeps COMPLETED status when a late DISPENSING tick arrives."""
+    """Late DISPENSING must not UPDATE an already COMPLETED financial row."""
     db, cur = _mock_db_with_cursor()
     cur.fetchone.side_effect = [
         None,
         None,
         None,
-        None,  # RETURNING empty because WHERE NOT (both completed) — wait, incoming is DISPENSING
-        # Actually upsert updates volume but keeps COMPLETED status; RETURNING may yield row.
-        ("tx-late-fill", False),
+        None,  # RETURNING empty: WHERE freezes completed rows
         None,
     ]
     service = TransactionService(db)
@@ -426,8 +424,34 @@ def test_reordered_dispensing_does_not_downgrade_completed():
         for c in cur.execute.call_args_list
         if "ON CONFLICT (id) DO UPDATE" in c.args[0]
     )
-    assert "COMPLETED" in upsert_sql
-    assert "EXCLUDED.status" in upsert_sql
+    assert "pump_transactions.status NOT IN ('COMPLETED', 'COMPLETE')" in upsert_sql
+    # Live telemetry must not rewrite completed rows via this upsert path.
+    assert "WHERE pump_transactions.status NOT IN" in upsert_sql
+
+
+def test_live_telemetry_pg_failure_does_not_enter_sale_outbox():
+    """DISPENSING must not spill into the financial sale_delivery_outbox."""
+    db = MagicMock()
+    db.connection.side_effect = RuntimeError("pg down")
+    service = TransactionService(db)
+    service._delivery_outbox = MagicMock()
+    payload = dict(VALID_PAYLOAD)
+    payload["transactionId"] = "tx-live-spill"
+    payload["status"] = "DISPENSING"
+    payload["eventType"] = "FILLING_UPDATED"
+    tx, err = normalize_transaction(payload, source_topic="t")
+    assert err is None
+    status = service.process_message(
+        topic="t",
+        raw_payload=json.dumps(payload).encode(),
+        qos=0,
+        retained=False,
+        payload=payload,
+        transaction=tx,
+        validation_error=None,
+    )
+    assert status == "error"
+    service._delivery_outbox.upsert.assert_not_called()
 
 
 def test_same_totals_different_nozzles_both_insert():
