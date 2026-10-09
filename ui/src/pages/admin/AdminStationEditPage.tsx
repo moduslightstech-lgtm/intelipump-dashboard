@@ -457,7 +457,6 @@ export default function AdminStationEditPage() {
                     {p.commanded_unit_price_raw != null
                       ? ` · ₦${p.commanded_unit_price_raw}/L`
                       : ''}
-                    {p.price_command_detail ? ` · ${p.price_command_detail}` : ''}
                   </li>
                 )
               })}

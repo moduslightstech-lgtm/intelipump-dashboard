@@ -7,8 +7,9 @@ Create Date: 2026-10-08
 TRANSACTION_STARTED / FILLING_UPDATED land here. Authoritative completed
 sales remain in pump_transactions only. Additive; no historical rewrite.
 
-Note: uncommitted local 029_pump_meter_readings also revises 028 — merge
-heads or re-parent 029→030 before applying both in one environment.
+Committed chain for sales canary: 028_sale_identity_decisions → this revision.
+Uncommitted meter work (029_pump_meter_readings) must NOT be synced to the
+droplet for this canary; when later committed it revises this 030 head.
 """
 
 from __future__ import annotations

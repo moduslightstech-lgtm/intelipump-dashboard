@@ -17,6 +17,7 @@ from app.phase9 import (
     KIND_DEVICE_STATUS,
     KIND_HEARTBEAT,
     KIND_IGNORED,
+    KIND_METER_READING,
     KIND_PUMP_ALERT,
     KIND_TRANSACTION,
     TRANSACTION_STARTED_EVENTS,
@@ -328,6 +329,22 @@ class ConsumerApp:
             result = handle_command_result(self.db, topic=topic, payload=payload)
             logger.info(
                 "Command result alert topic=%s result=%s eventType=%s",
+                topic,
+                result,
+                payload.get("eventType"),
+            )
+            return result
+
+        if kind == KIND_METER_READING:
+            from app.services.meter_reading_ingest import ingest_meter_reading
+
+            try:
+                result = ingest_meter_reading(self.db, topic=topic, payload=payload)
+            except Exception:
+                logger.exception("meter_reading_ingest_failed topic=%s", topic)
+                result = "error"
+            logger.info(
+                "Meter reading topic=%s result=%s eventType=%s",
                 topic,
                 result,
                 payload.get("eventType"),

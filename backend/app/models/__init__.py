@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Date,
     DateTime,
@@ -622,6 +623,56 @@ class ManualTankReadingEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PumpMeterReading(Base):
+    """Immutable cumulative pump/nozzle meter observation (additive; not sales)."""
+
+    __tablename__ = "pump_meter_readings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    station_id: Mapped[str] = mapped_column(String, nullable=False)
+    device_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    pump_id: Mapped[str] = mapped_column(String, nullable=False)
+    nozzle_id: Mapped[str] = mapped_column(String, nullable=False)
+    dart_address: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cumulative_volume_raw: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    volume_decimals: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    volume_liters: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    units: Mapped[str] = mapped_column(String, default="liters", nullable=False)
+    captured_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    scheduled_for: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    slot: Mapped[Optional[str]] = mapped_column(String)  # OPENING | CLOSING | AD_HOC
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, default="CAPTURED", nullable=False)
+    freshness_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    nearby_offset_seconds: Mapped[Optional[int]] = mapped_column(Integer)
+    correlation_id: Mapped[Optional[str]] = mapped_column(String)
+    deduplication_key: Mapped[Optional[str]] = mapped_column(String)
+    raw_evidence: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB)
+    software_version: Mapped[Optional[str]] = mapped_column(String)
+    flags: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    entered_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    error_code: Mapped[Optional[str]] = mapped_column(String)
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PumpMeterReadingSchedule(Base):
+    __tablename__ = "pump_meter_reading_schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    station_id: Mapped[str] = mapped_column(String, nullable=False)
+    pump_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timezone: Mapped[str] = mapped_column(String, default="Africa/Lagos", nullable=False)
+    opening_local_time: Mapped[time] = mapped_column(Time, nullable=False)
+    closing_local_time: Mapped[time] = mapped_column(Time, nullable=False)
+    closing_next_day: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class FuelDelivery(Base):
     __tablename__ = "fuel_deliveries"
 
@@ -963,6 +1014,8 @@ __all__ = [
     "TankReadingBatch",
     "ManualTankReading",
     "ManualTankReadingEvent",
+    "PumpMeterReading",
+    "PumpMeterReadingSchedule",
     "FuelDelivery",
     "ReconciliationTolerance",
     "AuditLog",

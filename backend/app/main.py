@@ -21,6 +21,7 @@ from app.routers import (
     executive,
     fuel_deliveries,
     health,
+    pump_meter_readings,
     sales,
     reconciliations,
     resources,
@@ -99,6 +100,7 @@ def create_app() -> FastAPI:
     application.include_router(alerts.router, prefix=prefix)
     application.include_router(resources.mqtt_router, prefix=prefix)
     application.include_router(reconciliations.router, prefix=prefix)
+    application.include_router(pump_meter_readings.router, prefix=prefix)
     application.include_router(digital_twin.router, prefix=prefix)
     application.include_router(events.router, prefix=prefix)
     application.include_router(sales.router, prefix=prefix)

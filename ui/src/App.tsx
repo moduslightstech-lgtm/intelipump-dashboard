@@ -12,6 +12,7 @@ import MqttPage from './pages/MqttPage'
 import AlertsPage from './pages/AlertsPage'
 import SettingsPage from './pages/SettingsPage'
 import ReconciliationsPage from './pages/ReconciliationsPage'
+import PumpMeterReadingsPage from './pages/PumpMeterReadingsPage'
 import DigitalTwinPage from './pages/DigitalTwinPage'
 import ExecutiveOverviewPage from './pages/ExecutiveOverviewPage'
 import UsersPage from './pages/UsersPage'
@@ -92,6 +93,7 @@ function AppRoutes() {
         <Route path="digital-twin/:stationId" element={<DigitalTwinPage />} />
         <Route path="transactions" element={<TransactionsPage />} />
         <Route path="reconciliations" element={<ReconciliationsPage />} />
+        <Route path="pump-meter-readings" element={<PumpMeterReadingsPage />} />
         <Route path="stations" element={<StationsPage />} />
         <Route path="stations/:stationId" element={<StationDetailPage />} />
         <Route path="devices" element={<DevicesPage />} />

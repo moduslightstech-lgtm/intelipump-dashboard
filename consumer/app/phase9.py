@@ -40,6 +40,13 @@ IGNORED_EVENTS = frozenset(
 )
 
 COMMAND_RESULT_EVENTS = frozenset({"COMMAND_RESULT"})
+METER_READING_EVENTS = frozenset(
+    {
+        "METER_READING",
+        "PUMP_METER_READING",
+        "METER_READING_UNSUPPORTED",
+    }
+)
 PUMP_CLOSED_EVENTS = frozenset(
     {
         "PUMP_CLOSED_STUCK",
@@ -49,6 +56,7 @@ PUMP_CLOSED_EVENTS = frozenset(
 )
 KIND_COMMAND_RESULT = "command_result"
 KIND_PUMP_ALERT = "pump_alert"
+KIND_METER_READING = "meter_reading"
 
 # Hose lift / start → treat as live dispensing (zero or partial totals OK).
 TRANSACTION_STARTED_EVENTS = frozenset(
@@ -125,6 +133,8 @@ def classify_phase9_message(topic: str, payload: dict[str, Any]) -> str:
         return KIND_DEVICE_STATUS
     if event in COMMAND_RESULT_EVENTS or "/commands/" in (topic or "") and (topic or "").endswith("/result"):
         return KIND_COMMAND_RESULT
+    if event in METER_READING_EVENTS or "/meter-readings" in (topic or ""):
+        return KIND_METER_READING
     if event in PUMP_CLOSED_EVENTS or event == "PUMP_CLOSED_STUCK":
         return KIND_PUMP_ALERT
     tx_events = {

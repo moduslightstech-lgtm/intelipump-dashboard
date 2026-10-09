@@ -43,6 +43,7 @@ export function canAccessPath(role: AppRole, path: string): boolean {
   if (path === '/login') return true
   if (path.startsWith('/station-manager/reconciliation')) return false
   if (path.startsWith('/reconciliations')) return false
+  if (path.startsWith('/pump-meter-readings')) return false
   return (
     path === '/' ||
     path.startsWith('/executive') ||

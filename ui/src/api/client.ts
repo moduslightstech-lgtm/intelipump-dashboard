@@ -1179,6 +1179,34 @@ export type DayCloseRow = {
   runId: string | null
 }
 
+
+export const getMeterCapability = () =>
+  api.get<{
+    automatic_cd101?: string
+    manual_supported?: boolean
+    read_now_default?: string
+    spec_ref?: string
+    detail?: string
+  }>('/api/v1/pump-meter-readings/capability')
+
+export const listMeterReadings = (params: Record<string, string | number | undefined>) =>
+  api.get<any[]>('/api/v1/pump-meter-readings', { params })
+
+export const getMeterReadingWindow = (params: Record<string, string | boolean | undefined>) =>
+  api.get<any>('/api/v1/pump-meter-readings/window', { params })
+
+export const postManualMeterReading = (body: Record<string, unknown>) =>
+  api.post<any>('/api/v1/pump-meter-readings/manual', body)
+
+export const postMeterReadNow = (body: Record<string, unknown>) =>
+  api.post<any>('/api/v1/pump-meter-readings/read-now', body)
+
+export const getMeterSchedules = (station_id: string) =>
+  api.get<any[]>('/api/v1/pump-meter-readings/schedules', { params: { station_id } })
+
+export const putMeterSchedule = (body: Record<string, unknown>) =>
+  api.put<any>('/api/v1/pump-meter-readings/schedules', body)
+
 export const getReconciliations = (params?: Record<string, unknown>) =>
   api.get<ReconciliationRun[]>('/api/v1/reconciliations', { params })
 
