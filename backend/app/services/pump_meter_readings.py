@@ -302,6 +302,23 @@ def ingest_edge_reading(db: Session, payload: dict[str, Any]) -> PumpMeterReadin
     return row
 
 
+def _apply_channel_map_identity(row: PumpMeterReading) -> PumpMeterReading:
+    """Prefer DART channelMap over a wrong/default nozzle_id column.
+
+    Pump-1 addr=2 CAPTURED was stored as nozzle-1 while raw_evidence.channelMap
+    correctly said nozzle-2 — Admin UI then hid the real N2 total.
+    """
+    ev = row.raw_evidence if isinstance(row.raw_evidence, dict) else {}
+    cm = ev.get("channelMap") if isinstance(ev.get("channelMap"), dict) else {}
+    mapped_n = str(cm.get("nozzle_id") or cm.get("nozzleId") or "").strip()
+    mapped_p = str(cm.get("pump_id") or cm.get("pumpId") or "").strip()
+    if mapped_n:
+        row.nozzle_id = mapped_n
+    if mapped_p:
+        row.pump_id = mapped_p
+    return row
+
+
 def list_readings(
     db: Session,
     *,
@@ -317,14 +334,19 @@ def list_readings(
     q = select(PumpMeterReading).where(PumpMeterReading.station_id == mqtt)
     if pump_id:
         q = q.where(PumpMeterReading.pump_id == pump_id)
-    if nozzle_id:
-        q = q.where(PumpMeterReading.nozzle_id == nozzle_id)
+    # nozzle_id filtered after channelMap correction (mis-tagged rows).
     if from_ts:
         q = q.where(PumpMeterReading.captured_at >= from_ts)
     if to_ts:
         q = q.where(PumpMeterReading.captured_at <= to_ts)
-    q = q.order_by(PumpMeterReading.captured_at.desc().nullslast()).limit(min(limit, 500))
-    return list(db.scalars(q).all())
+    # Pull extra rows when nozzle filter is set so a mis-tagged CAPTURED still matches.
+    fetch_limit = min(limit * 3 if nozzle_id else limit, 500)
+    q = q.order_by(PumpMeterReading.captured_at.desc().nullslast()).limit(fetch_limit)
+    rows = [_apply_channel_map_identity(r) for r in db.scalars(q).all()]
+    if nozzle_id:
+        want = nozzle_id.strip()
+        rows = [r for r in rows if (r.nozzle_id or "") == want]
+    return rows[:limit]
 
 
 def _window_bounds(
@@ -533,12 +555,37 @@ def request_read_now(
         flags={},
         notes="Awaiting controller response; value not backdated if missed",
     )
-    db.add(pending)
-    db.commit()
-    db.refresh(pending)
+    try:
+        db.add(pending)
+        db.commit()
+        db.refresh(pending)
+    except Exception as exc:  # noqa: BLE001 — surface missing migration clearly
+        db.rollback()
+        logger.exception(
+            "pump_meter_read_now_persist_failed station=%s pump=%s nozzle=%s",
+            mqtt,
+            pump_id,
+            nozzle_id,
+        )
+        detail = str(exc)
+        if "pump_meter_readings" in detail.lower() or "does not exist" in detail.lower():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "pump_meter_readings table missing — apply alembic "
+                    "029_pump_meter_readings on the cloud DB, then retry."
+                ),
+            ) from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to record meter read request: {detail}",
+        ) from exc
 
-    environment = (cfg.mqtt_command_environment or "PRODUCTION").strip() or "PRODUCTION"
-    env_seg = environment.lower()
+    # Match station_commands / Pi TopicBuilder: PRODUCTION → "prod", not "production".
+    from app.services.station_commands import _command_environment, _env_segment
+
+    environment = _command_environment(station, cfg)
+    env_seg = _env_segment(environment)
     topic = f"intelipump/{env_seg}/stations/{mqtt}/commands"
     envelope = {
         "commandId": str(uuid.uuid4()),

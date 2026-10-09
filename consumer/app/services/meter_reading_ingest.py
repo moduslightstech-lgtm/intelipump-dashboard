@@ -38,6 +38,22 @@ def ingest_meter_reading(db, *, topic: str, payload: dict[str, Any]) -> str:
     station_id = _as_str(payload.get("stationId") or inner.get("stationId"))
     pump_id = _as_str(inner.get("pumpId") or payload.get("pumpId"))
     nozzle_id = _as_str(inner.get("nozzleId") or payload.get("nozzleId"))
+    # Prefer DART channel map over a wrong/default nozzleId (addr-2 was landing on nozzle-1).
+    raw_ev = inner.get("rawEvidence") if isinstance(inner.get("rawEvidence"), dict) else {}
+    channel = raw_ev.get("channelMap") if isinstance(raw_ev.get("channelMap"), dict) else {}
+    mapped_nozzle = _as_str(channel.get("nozzle_id") or channel.get("nozzleId"))
+    mapped_pump = _as_str(channel.get("pump_id") or channel.get("pumpId"))
+    if mapped_nozzle and mapped_nozzle != nozzle_id:
+        logger.info(
+            "meter_reading_nozzle_from_channel_map station=%s corr=%s was=%s now=%s",
+            station_id,
+            _as_str(payload.get("correlationId") or inner.get("correlationId")),
+            nozzle_id,
+            mapped_nozzle,
+        )
+        nozzle_id = mapped_nozzle
+    if mapped_pump:
+        pump_id = mapped_pump
     correlation_id = _as_str(payload.get("correlationId") or inner.get("correlationId"))
     dedupe = _as_str(
         payload.get("deduplicationKey")
@@ -86,6 +102,32 @@ def ingest_meter_reading(db, *, topic: str, payload: dict[str, Any]) -> str:
             if cur.fetchone():
                 return "duplicate"
 
+            # Do not let a ghost DEFERRED from another Pi overwrite a real CAPTURED.
+            if correlation_id and status in {
+                "UNSUPPORTED",
+                "RATE_LIMITED",
+                "DEFERRED",
+                "PENDING_CONTROLLER",
+            }:
+                cur.execute(
+                    """
+                    SELECT id FROM pump_meter_readings
+                    WHERE station_id = %s
+                      AND correlation_id = %s
+                      AND status IN ('CAPTURED', 'CAPTURED_AMBIGUOUS')
+                    LIMIT 1
+                    """,
+                    (station_id, correlation_id),
+                )
+                if cur.fetchone():
+                    logger.info(
+                        "meter_reading_skip_after_captured station=%s corr=%s status=%s",
+                        station_id,
+                        correlation_id,
+                        status,
+                    )
+                    return "skipped_after_captured"
+
             # Promote the dashboard PENDING read-now row for this correlation.
             if correlation_id:
                 cur.execute(
@@ -109,7 +151,7 @@ def ingest_meter_reading(db, *, topic: str, payload: dict[str, Any]) -> str:
                         deduplication_key = COALESCE(deduplication_key, %s)
                     WHERE station_id = %s
                       AND correlation_id = %s
-                      AND status = 'PENDING'
+                      AND status IN ('PENDING', 'PENDING_CONTROLLER')
                     RETURNING id
                     """,
                     (

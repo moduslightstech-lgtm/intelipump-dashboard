@@ -107,6 +107,9 @@ def test_ingest_updates_pending_by_correlation():
     result = ingest_meter_reading(db, topic="t", payload=_envelope())
     assert result == "updated"
     assert any("UPDATE pump_meter_readings" in q for q, _ in cur.queries)
+    update_sql = [q for q, _ in cur.queries if "UPDATE pump_meter_readings" in q][0]
+    assert "PENDING_CONTROLLER" in update_sql
+    assert "status IN" in update_sql or "PENDING" in update_sql
 
 
 def test_ingest_duplicate_dedupe():
@@ -147,3 +150,32 @@ def test_reject_missing_identity():
         "payload": {"nozzleId": "nozzle-1"},
     }
     assert ingest_meter_reading(_DB(cur), topic="t", payload=bad) == "rejected"
+
+
+def test_ingest_prefers_channel_map_nozzle_over_payload():
+    cur = _Cursor()
+    result = ingest_meter_reading(
+        _DB(cur),
+        topic="t",
+        payload=_envelope(
+            nozzleId="nozzle-1",
+            status="CAPTURED",
+            source="STARTUP_OPENING",
+            dartAddress=2,
+            cumulativeVolumeRaw=1788822994,
+            volumeLiters="1788822.994000",
+            volumeDecimals=3,
+            rawEvidence={
+                "kind": "hardware_cd101",
+                "channelMap": {
+                    "pump_id": "pump-1",
+                    "nozzle_id": "nozzle-2",
+                    "source_identifier": "pump-1-n2",
+                },
+            },
+        ),
+    )
+    assert result == "processed"
+    params = [p for q, p in cur.queries if "INSERT INTO pump_meter_readings" in q][0]
+    assert params[4] == "nozzle-2"  # nozzle_id column
+    assert params[3] == "pump-1"

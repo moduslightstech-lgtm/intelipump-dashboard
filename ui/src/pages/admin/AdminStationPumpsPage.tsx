@@ -18,6 +18,7 @@ import {
   updateAdminNozzle,
   updateAdminPump,
 } from '../../api/client'
+import AdminPumpMeterReadPanel from './AdminPumpMeterReadPanel'
 
 type Ctx = { stationId: string; station?: Station; refreshStation: () => void }
 
@@ -40,7 +41,7 @@ const emptyPumpForm = {
 }
 
 export default function AdminStationPumpsPage() {
-  const { stationId, refreshStation } = useOutletContext<Ctx>()
+  const { stationId, station, refreshStation } = useOutletContext<Ctx>()
   const qc = useQueryClient()
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState<Pump | null>(null)
@@ -48,6 +49,7 @@ export default function AdminStationPumpsPage() {
   const [msg, setMsg] = useState('')
   const [expandedPumpId, setExpandedPumpId] = useState<string | null>(null)
   const [promptConnectPumpId, setPromptConnectPumpId] = useState<string | null>(null)
+  const [meterFocusPumpNumber, setMeterFocusPumpNumber] = useState<number | null>(null)
 
   const pumpsQ = useQuery({
     queryKey: ['admin-station-pumps', stationId],
@@ -172,6 +174,14 @@ export default function AdminStationPumpsPage() {
           </div>
         </div>
       )}
+
+      <AdminPumpMeterReadPanel
+        stationId={stationId}
+        station={station}
+        pumps={pumpsQ.data || []}
+        focusPumpNumber={meterFocusPumpNumber}
+        onFocusConsumed={() => setMeterFocusPumpNumber(null)}
+      />
 
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-white font-semibold">Physical pumps</h2>
@@ -388,6 +398,20 @@ export default function AdminStationPumpsPage() {
                     <div className="flex flex-wrap gap-1">
                       <button type="button" className="btn-secondary text-xs px-2 py-1" onClick={() => openEdit(p)}>
                         Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-secondary text-xs px-2 py-1"
+                        onClick={() => {
+                          if (p.pump_number != null) {
+                            setMeterFocusPumpNumber(p.pump_number)
+                            window.scrollTo({ top: 0, behavior: 'smooth' })
+                          } else {
+                            setMsg('Set a pump number on this pump before meter read')
+                          }
+                        }}
+                      >
+                        Meter
                       </button>
                       <button
                         type="button"

@@ -13,10 +13,22 @@ from app.services import pump_meter_readings as svc
 from app.services.rbac import require_reconciliation_access
 
 
-def test_capability_declares_unverified_auto():
+def test_capability_declares_hardware_gated():
     assert svc.CAPABILITY["manual_supported"] is True
-    assert svc.CAPABILITY["automatic_cd101"] == "unverified"
-    assert "DC2" in svc.CAPABILITY["detail"]
+    assert svc.CAPABILITY["automatic_cd101"] == "hardware_gated"
+    assert "CD101" in svc.CAPABILITY["detail"] or "HARDWARE" in svc.CAPABILITY["detail"].upper()
+
+
+def test_read_now_mqtt_topic_uses_prod_not_production(monkeypatch):
+    """Regression: Pi TopicBuilder maps PRODUCTION → prod; .lower() was wrong."""
+    from app.services.station_commands import _env_segment
+
+    assert _env_segment("PRODUCTION") == "prod"
+    assert _env_segment("PROD") == "prod"
+    assert _env_segment("LAB") == "lab"
+    assert f"intelipump/{_env_segment('PRODUCTION')}/stations/SAO/commands" == (
+        "intelipump/prod/stations/SAO/commands"
+    )
 
 
 def test_roles_block_station_manager():
@@ -88,6 +100,26 @@ def test_nearest_reading_exposes_offset_not_backdate():
     row, off = svc._nearest_reading([near, far], target, max_skew_seconds=6 * 3600)
     assert row is near
     assert off == 5400  # +1.5h explicit offset
+
+
+def test_apply_channel_map_identity_fixes_mis_tagged_nozzle():
+    row = type(
+        "R",
+        (),
+        {
+            "nozzle_id": "nozzle-1",
+            "pump_id": "pump-1",
+            "raw_evidence": {
+                "channelMap": {
+                    "pump_id": "pump-1",
+                    "nozzle_id": "nozzle-2",
+                }
+            },
+        },
+    )()
+    out = svc._apply_channel_map_identity(row)  # type: ignore[arg-type]
+    assert out.nozzle_id == "nozzle-2"
+    assert out.pump_id == "pump-1"
 
 
 def test_flags_detect_decrease():

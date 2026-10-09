@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  getAdminStationPumps,
   getMeterCapability,
   getMeterReadingWindow,
   getMeterSchedules,
@@ -37,6 +38,7 @@ export default function PumpMeterReadingsPage() {
   })
   const [stationId, setStationId] = useState('')
   const [pumpId, setPumpId] = useState('pump-1')
+  const [pumpNumber, setPumpNumber] = useState('')
   const [businessDate, setBusinessDate] = useState(todayLagos())
   const [manualNozzle, setManualNozzle] = useState('nozzle-1')
   const [manualLiters, setManualLiters] = useState('')
@@ -51,6 +53,12 @@ export default function PumpMeterReadingsPage() {
     const st = rows.find((s: any) => s.id === stationId || s.mqtt_station_id === stationId)
     return st?.mqtt_station_id || st?.station_code || stationId
   }, [stationsQ.data, stationId])
+
+  const pumpsQ = useQuery({
+    queryKey: ['admin-station-pumps', stationId],
+    enabled: Boolean(stationId),
+    queryFn: async () => (await getAdminStationPumps(stationId, true)).data,
+  })
 
   const capQ = useQuery({
     queryKey: ['meter-cap'],
@@ -147,7 +155,7 @@ export default function PumpMeterReadingsPage() {
         </div>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-5">
         <label className="text-sm text-slate-300">
           Station
           <select
@@ -164,13 +172,58 @@ export default function PumpMeterReadingsPage() {
           </select>
         </label>
         <label className="text-sm text-slate-300">
-          Pump
-          <input
+          Pump number
+          <div className="mt-1 flex gap-2">
+            <input
+              className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-2"
+              type="number"
+              min={1}
+              value={pumpNumber}
+              onChange={(e) => setPumpNumber(e.target.value)}
+              placeholder="6"
+            />
+            <button
+              type="button"
+              className="rounded bg-slate-700 px-2 py-2 text-xs text-white"
+              disabled={!stationId}
+              onClick={() => {
+                const n = Number(pumpNumber)
+                const found = (pumpsQ.data || []).find((p) => p.pump_number === n)
+                if (found) {
+                  setPumpId((found.mqtt_pump_id || found.pump_code || '').trim())
+                }
+              }}
+            >
+              Apply #
+            </button>
+          </div>
+        </label>
+        <label className="text-sm text-slate-300">
+          Pump id (MQTT)
+          <select
             className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2 py-2"
             value={pumpId}
-            onChange={(e) => setPumpId(e.target.value)}
-            placeholder="pump-1"
-          />
+            onChange={(e) => {
+              setPumpId(e.target.value)
+              const p = (pumpsQ.data || []).find(
+                (x) => (x.mqtt_pump_id || x.pump_code) === e.target.value,
+              )
+              if (p?.pump_number != null) setPumpNumber(String(p.pump_number))
+            }}
+          >
+            <option value="">Select…</option>
+            {(pumpsQ.data || [])
+              .filter((p) => p.active !== false)
+              .sort((a, b) => (a.pump_number ?? 0) - (b.pump_number ?? 0))
+              .map((p) => {
+                const mid = (p.mqtt_pump_id || p.pump_code || '').trim()
+                return (
+                  <option key={p.id} value={mid}>
+                    #{p.pump_number ?? '—'} — {p.name || p.pump_code} ({mid})
+                  </option>
+                )
+              })}
+          </select>
         </label>
         <label className="text-sm text-slate-300">
           Business date (Lagos)
