@@ -8,6 +8,8 @@ import {
   markStaleSessions,
   operationalDisplay,
   presentationOf,
+  promoteLiveToLastCompleted,
+  resolveLastCompletedFace,
   sessionKey,
 } from '../lib/nozzleSessions'
 
@@ -312,6 +314,121 @@ describe('nozzle session machine', () => {
       start,
     )
     const stale = markStaleSessions(r.sessions, start + 121_000)
-    expect(stale[sessionKey(base.stationId, 'pump-1', 'nozzle-2')].state).toBe('INTERRUPTED')
+    const s = stale[sessionKey(base.stationId, 'pump-1', 'nozzle-2')]
+    expect(s.state).toBe('INTERRUPTED')
+    // Live face becomes LAST SALE so idle does not keep a prior ₦96k-style face.
+    expect(s.lastCompleted?.amount).toBe(10)
+    expect(s.lastCompleted?.volumeLiters).toBe(0.01)
+  })
+
+  it('resolveLastCompletedFace prefers newer catalog over stale session lastCompleted', () => {
+    const session = {
+      ...applyNozzleEvent(
+        {},
+        ev({
+          status: 'COMPLETED',
+          amount: 96056,
+          volumeLiters: 70.89,
+          sequence: 1,
+          transactionId: 'tx-old',
+          completedAt: '2026-10-08T10:00:00Z',
+        }),
+        'rest',
+        Date.parse('2026-10-09T14:00:00Z'),
+      ).sessions[sessionKey(base.stationId, 'pump-1', 'nozzle-2')],
+    }
+    expect(session.lastCompleted?.amount).toBe(96056)
+    const face = resolveLastCompletedFace(session, {
+      amount: 3000,
+      volume: 2.21,
+      completedAt: '2026-10-09T10:38:45Z',
+    })
+    expect(face?.amount).toBe(3000)
+    expect(face?.volumeLiters).toBe(2.21)
+  })
+
+  it('promoteLiveToLastCompleted overwrites older lastCompleted with this sale', () => {
+    let sessions = applyNozzleEvent(
+      {},
+      ev({
+        status: 'COMPLETED',
+        amount: 96056,
+        volumeLiters: 70.89,
+        sequence: 1,
+        transactionId: 'tx-old',
+        completedAt: '2026-10-08T10:00:00Z',
+        receivedAt: '2026-10-08T10:00:00Z',
+      }),
+      'rest',
+      Date.parse('2026-10-09T09:00:00Z'),
+    ).sessions
+    sessions = applyNozzleEvent(
+      sessions,
+      ev({
+        status: 'DISPENSING',
+        amount: 3000,
+        volumeLiters: 2.21,
+        sequence: 2,
+        transactionId: 'tx-new',
+        receivedAt: '2026-10-09T10:38:00Z',
+      }),
+      'sse',
+      Date.parse('2026-10-09T10:38:00Z'),
+    ).sessions
+    const key = sessionKey(base.stationId, 'pump-1', 'nozzle-2')
+    expect(sessions[key].state).toBe('DISPENSING')
+    expect(sessions[key].transactionId).toBe('tx-new')
+    const promoted = promoteLiveToLastCompleted(
+      sessions[key],
+      '2026-10-09T10:38:45Z',
+    )
+    expect(promoted.lastCompleted?.transactionId).toBe('tx-new')
+    expect(promoted.lastCompleted?.amount).toBe(3000)
+    expect(promoted.lastCompleted?.volumeLiters).toBe(2.21)
+  })
+
+  it('completed after prior lastCompleted replaces LAST SALE totals', () => {
+    let sessions = applyNozzleEvent(
+      {},
+      ev({
+        status: 'COMPLETED',
+        amount: 96056,
+        volumeLiters: 70.89,
+        sequence: 1,
+        transactionId: 'tx-old',
+        completedAt: '2026-10-08T10:00:00Z',
+      }),
+      'sse',
+      Date.parse('2026-10-08T10:00:00Z'),
+    ).sessions
+    sessions = applyNozzleEvent(
+      sessions,
+      ev({
+        status: 'DISPENSING',
+        amount: 3000,
+        volumeLiters: 2.21,
+        sequence: 2,
+        transactionId: 'tx-new',
+      }),
+      'sse',
+      Date.parse('2026-10-09T10:38:00Z'),
+    ).sessions
+    sessions = applyNozzleEvent(
+      sessions,
+      ev({
+        status: 'COMPLETED',
+        amount: 3000,
+        volumeLiters: 2.21,
+        sequence: 3,
+        transactionId: 'tx-new',
+        completedAt: '2026-10-09T10:38:45Z',
+      }),
+      'sse',
+      Date.parse('2026-10-09T10:38:45Z'),
+    ).sessions
+    const s = sessions[sessionKey(base.stationId, 'pump-1', 'nozzle-2')]
+    expect(s.lastCompleted?.transactionId).toBe('tx-new')
+    expect(s.lastCompleted?.amount).toBe(3000)
+    expect(s.lastCompleted?.volumeLiters).toBe(2.21)
   })
 })

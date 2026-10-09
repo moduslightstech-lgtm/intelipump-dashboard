@@ -137,6 +137,94 @@ function tsMs(value?: string | null): number {
   return Number.isFinite(n) ? n : 0
 }
 
+function hasMeaningfulTotals(amount?: number | null, volume?: number | null): boolean {
+  return (
+    (amount != null && Number.isFinite(amount) && Math.abs(amount) > 0) ||
+    (volume != null && Number.isFinite(volume) && Math.abs(volume) > 0)
+  )
+}
+
+/** Promote live face into lastCompleted when a fill ends without a COMPLETED SSE. */
+export function promoteLiveToLastCompleted(
+  session: NozzleSession,
+  stamp?: string | null,
+): NozzleSession {
+  if (!hasMeaningfulTotals(session.amount, session.volumeLiters)) return session
+  const tx = session.transactionId || session.lastCompleted?.transactionId || ''
+  const completedAt =
+    stamp ||
+    session.completedAt ||
+    session.lastUpdateAt ||
+    new Date().toISOString()
+  const prev = session.lastCompleted
+  // Never replace a newer ledger face with older live totals.
+  if (prev?.completedAt && tsMs(prev.completedAt) > tsMs(completedAt)) {
+    return session
+  }
+  return {
+    ...session,
+    lastCompleted: {
+      transactionId: tx || prev?.transactionId || '',
+      amount: session.amount,
+      volumeLiters: session.volumeLiters,
+      pricePerLiter: session.pricePerLiter,
+      product: session.product,
+      completedAt,
+    },
+  }
+}
+
+/**
+ * Idle LAST SALE face: prefer the newer of session.lastCompleted vs twin catalog.
+ * Fixes stale client lastCompleted (e.g. ₦96k) winning over a newer COMPLETED (₦3k).
+ */
+export function resolveLastCompletedFace(
+  session: NozzleSession | undefined | null,
+  catalog?: {
+    amount?: number | null
+    volume?: number | null
+    completedAt?: string | null
+  } | null,
+): LastCompletedSale | null {
+  const fromSession = session?.lastCompleted ?? null
+  const catAmount = catalog?.amount ?? null
+  const catVolume = catalog?.volume ?? null
+  const catAt = catalog?.completedAt ?? null
+  const hasCat = hasMeaningfulTotals(catAmount, catVolume)
+  const hasSession = Boolean(
+    fromSession && hasMeaningfulTotals(fromSession.amount, fromSession.volumeLiters),
+  )
+
+  if (hasSession && hasCat) {
+    const sMs = tsMs(fromSession!.completedAt)
+    const cMs = tsMs(catAt)
+    // Catalog wins when strictly newer; equal timestamps keep session (same sale).
+    if (cMs > sMs) {
+      return {
+        transactionId: fromSession!.transactionId || '',
+        amount: catAmount,
+        volumeLiters: catVolume,
+        pricePerLiter: fromSession!.pricePerLiter,
+        product: fromSession!.product,
+        completedAt: catAt,
+      }
+    }
+    return fromSession
+  }
+  if (hasSession) return fromSession
+  if (hasCat) {
+    return {
+      transactionId: '',
+      amount: catAmount,
+      volumeLiters: catVolume,
+      pricePerLiter: null,
+      product: null,
+      completedAt: catAt,
+    }
+  }
+  return fromSession
+}
+
 function emptySession(event: NozzleLiveEvent): NozzleSession {
   return {
     key: sessionKey(event.stationId, event.pumpId, event.nozzleId),
@@ -397,6 +485,8 @@ export function applyNozzleEvent(
       transactionId: event.transactionId || current.transactionId,
       completedAtMs: now,
     }
+    // Hang-up / stale without COMPLETED SSE: keep the face just shown as THIS SALE.
+    session = promoteLiveToLastCompleted(session, stamp)
   } else if (nextState === 'IDLE' && current.state !== 'DISPENSING') {
     session = {
       ...session,
@@ -435,17 +525,22 @@ export function applyPresentationElapsed(
   if (!prev || (prev.state !== 'COMPLETED' && prev.state !== 'CANCELLED' && prev.state !== 'INTERRUPTED')) {
     return sessions
   }
+  const promoted =
+    prev.state === 'COMPLETED'
+      ? prev
+      : promoteLiveToLastCompleted(prev, prev.lastUpdateAt || prev.completedAt)
+  const last = promoted.lastCompleted
   return {
     ...sessions,
     [key]: {
-      ...prev,
+      ...promoted,
       state: 'IDLE',
       transactionId: null,
       completedAtMs: null,
-      amount: prev.lastCompleted?.amount ?? prev.amount,
-      volumeLiters: prev.lastCompleted?.volumeLiters ?? prev.volumeLiters,
-      pricePerLiter: prev.lastCompleted?.pricePerLiter ?? prev.pricePerLiter,
-      product: prev.lastCompleted?.product ?? prev.product,
+      amount: last?.amount ?? promoted.amount,
+      volumeLiters: last?.volumeLiters ?? promoted.volumeLiters,
+      pricePerLiter: last?.pricePerLiter ?? promoted.pricePerLiter,
+      product: last?.product ?? promoted.product,
     },
   }
 }
@@ -461,7 +556,15 @@ export function markStaleSessions(
     if (session.state !== 'DISPENSING') continue
     const age = now - tsMs(session.lastUpdateAt)
     if (age < staleMs) continue
-    next[key] = { ...session, state: 'INTERRUPTED', completedAtMs: now }
+    const interrupted = {
+      ...session,
+      state: 'INTERRUPTED' as const,
+      completedAtMs: now,
+    }
+    next[key] = promoteLiveToLastCompleted(
+      interrupted,
+      session.lastUpdateAt || new Date(now).toISOString(),
+    )
     changed = true
   }
   return changed ? next : sessions

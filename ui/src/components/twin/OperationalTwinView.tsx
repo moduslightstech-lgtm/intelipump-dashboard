@@ -13,7 +13,12 @@ import {
   livePumpInferredStatus,
   inProgressSaleStatus,
 } from '../../lib/liveDispensing'
-import { findSession, flowingSessions, operationalDisplay } from '../../lib/nozzleSessions'
+import {
+  findSession,
+  flowingSessions,
+  operationalDisplay,
+  resolveLastCompletedFace,
+} from '../../lib/nozzleSessions'
 import { catalogFromPumps } from '../../lib/nozzleIdentity'
 import { applyLiveTankDrawdown } from '../../lib/liveTankLevels'
 import { getConnections } from './forecourtLayout'
@@ -235,16 +240,14 @@ export default function OperationalTwinView({
           if (session) {
             const display = operationalDisplay(session)
             const liveOpen = display === 'DISPENSING' || display === 'SALE_COMPLETED'
-            const lastAmount =
-              session.lastCompleted?.amount ??
-              n.lastCompletedAmount ??
-              n.lastTransactionAmount ??
-              null
-            const lastVolume =
-              session.lastCompleted?.volumeLiters ??
-              n.lastCompletedVolume ??
-              n.lastTransactionVolume ??
-              null
+            // Prefer the newer of client lastCompleted vs twin catalog COMPLETED.
+            const lastFace = resolveLastCompletedFace(session, {
+              amount: n.lastCompletedAmount ?? n.lastTransactionAmount ?? null,
+              volume: n.lastCompletedVolume ?? n.lastTransactionVolume ?? null,
+              completedAt: n.lastTransactionAt ?? null,
+            })
+            const lastAmount = lastFace?.amount ?? null
+            const lastVolume = lastFace?.volumeLiters ?? null
             // Keep totals on the nozzle continuously — never flash empty between
             // live ticks or when flipping SALE_COMPLETED → LAST SALE.
             const shownAmount = liveOpen
@@ -272,8 +275,14 @@ export default function OperationalTwinView({
               lastTransactionAmount: lastAmount,
               lastTransactionVolume: lastVolume,
               lastTransactionAt:
-                session.lastCompleted?.completedAt || session.completedAt || n.lastTransactionAt,
-              lastTransactionPrice: session.lastCompleted?.pricePerLiter ?? session.pricePerLiter,
+                lastFace?.completedAt ||
+                session.lastCompleted?.completedAt ||
+                session.completedAt ||
+                n.lastTransactionAt,
+              lastTransactionPrice:
+                lastFace?.pricePerLiter ??
+                session.lastCompleted?.pricePerLiter ??
+                session.pricePerLiter,
               livePresentation: display === 'LAST_SALE' ? 'IDLE' : display,
               liveTransactionId: session.transactionId,
               liveSequence: session.sequence,
@@ -285,12 +294,17 @@ export default function OperationalTwinView({
           }
           // No live session: only this nozzle's twin last-sale fields (never
           // pump-level shared totals that would duplicate across hoses).
+          const catalogFace = resolveLastCompletedFace(null, {
+            amount: n.lastTransactionAmount ?? n.lastCompletedAmount ?? null,
+            volume: n.lastTransactionVolume ?? n.lastCompletedVolume ?? null,
+            completedAt: n.lastTransactionAt ?? null,
+          })
           return {
             ...n,
             liveAmount: null,
             liveVolume: null,
-            lastCompletedAmount: n.lastTransactionAmount ?? n.lastCompletedAmount ?? null,
-            lastCompletedVolume: n.lastTransactionVolume ?? n.lastCompletedVolume ?? null,
+            lastCompletedAmount: catalogFace?.amount ?? null,
+            lastCompletedVolume: catalogFace?.volumeLiters ?? null,
             inferredStatus:
               dispenserOffline && displayPumpStatus(n.inferredStatus) !== 'DISPENSING'
                 ? 'OFFLINE'
