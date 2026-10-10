@@ -12,10 +12,30 @@ import {
 function fmtTs(iso?: string | null) {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleString('en-GB', { timeZone: 'Africa/Lagos' })
+    // Station business clock is WAT (Africa/Lagos); label it so it is not
+    // read as the viewer's local browser timezone.
+    return (
+      new Date(iso).toLocaleString('en-GB', {
+        timeZone: 'Africa/Lagos',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }) + ' WAT'
+    )
   } catch {
     return iso
   }
+}
+
+function readingTs(row: any): number {
+  const raw = row?.captured_at || row?.requested_at || row?.created_at
+  if (!raw) return 0
+  const t = Date.parse(String(raw))
+  return Number.isFinite(t) ? t : 0
 }
 
 function mqttStationKey(station?: Station | null, stationId?: string) {
@@ -131,18 +151,16 @@ export default function AdminPumpMeterReadPanel({
       const ra = rank(a)
       const rb = rank(b)
       if (ra !== rb) return ra < rb ? a : b
-      // Morning auto-read over ad-hoc when both CAPTURED
-      const sa = String(a?.source || '')
-      const sb = String(b?.source || '')
-      if (sa === 'STARTUP_OPENING' && sb !== 'STARTUP_OPENING') return a
-      if (sb === 'STARTUP_OPENING' && sa !== 'STARTUP_OPENING') return b
       // Prefer a real litre value over empty UNSUPPORTED/DEFERRED noise
       const hasA = a?.volume_liters != null && a?.volume_liters !== ''
       const hasB = b?.volume_liters != null && b?.volume_liters !== ''
       if (hasA && !hasB) return a
       if (hasB && !hasA) return b
-      // Prefer dart_address match when channel map is present on one side
-      return a // API list is newest-first; keep first seen
+      // Newest CAPTURED wins (do not pin morning OPENING over a later Read now)
+      const ta = readingTs(a)
+      const tb = readingTs(b)
+      if (ta !== tb) return ta >= tb ? a : b
+      return a
     }
     const map = new Map<string, any>()
     for (const row of readingsQ.data || []) {
